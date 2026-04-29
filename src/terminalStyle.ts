@@ -30,7 +30,7 @@ export function warn(text: string): string {
   return chalk.yellow(text);
 }
 
-/** Mutagen sync target shown as `host:path` in prompts (e.g. `mini:~/code/repo`). */
+/** **Remote** sync target shown as `host:path` in prompts (e.g. `mini:~/code/repo`). */
 export function syncRemoteTarget(text: string): string {
   return chalk.cyan(text);
 }

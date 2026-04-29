@@ -30,6 +30,9 @@ const DEFAULT_BICA_YML = `sync:
     paths:
       - node_modules
       - .git
+      # Build outputs (TS composite .d.ts, etc.): syncing dist from local can make
+      # remote typecheck against stale declarations while src is up to date.
+      - dist
 
 bica:
   pluginMode: auto
@@ -64,7 +67,7 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
     {
       type: 'confirm',
       name: 'yes',
-      message: `Create ${BICA_SPEC_FILE} with default sync (one-way-replica, ignore node_modules/.git)?`,
+      message: `Create ${BICA_SPEC_FILE} with default sync (one-way-replica, ignore node_modules/.git/dist)?`,
       initial: true,
     },
     PROMPT_OPTS,

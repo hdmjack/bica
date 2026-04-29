@@ -37,9 +37,9 @@ function writePnpmWorkspace(repoRoot: string, lockfileBody: string): void {
 function makePrep(repoRoot: string): PrepareResult {
   return {
     repoRoot,
-    projectFilePath: path.join(repoRoot, '.mutagen', 'project.yml'),
+    projectFilePath: path.join(repoRoot, '.bica', 'project.yml'),
     sessionName: 'test-session',
-    beta: 'test-host:/remote/repo',
+    remoteSyncUrl: 'test-host:/remote/repo',
     config: {
       sshHost: 'test-host',
       remoteWorkspacePath: '/remote/repo',

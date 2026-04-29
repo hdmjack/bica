@@ -133,3 +133,32 @@ export function mutagenSyncMonitor(sessionName: string): void {
     shell: false,
   });
 }
+
+/**
+ * Force a sync cycle so the **remote** catches up to **local** (best-effort before `bica run`).
+ * Used when `BICA_SYNC_FLUSH=1`; see README. Requires an existing session.
+ */
+export function mutagenSyncFlush(repoRoot: string, sessionName: string): boolean {
+  const result = spawnSync(
+    'mutagen',
+    ['sync', 'flush', sessionName],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  if (result.status === 0) {
+    return true;
+  }
+  const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+  if (err) {
+    process.stderr.write(`[bica] mutagen sync flush: ${err}\n`);
+  } else {
+    process.stderr.write(
+      `[bica] mutagen sync flush exited ${String(result.status)}\n`,
+    );
+  }
+  return false;
+}

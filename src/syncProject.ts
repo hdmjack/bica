@@ -16,10 +16,15 @@ export const BICA_WORKSPACE_SPEC_FILE = 'bica-workspace.yml';
 /** @deprecated Use BICA_SPEC_FILE */
 export const SYNC_SPEC_FILE = BICA_SPEC_FILE;
 
-export const MUTAGEN_PROJECT_RELATIVE = path.join('.mutagen', 'project.yml');
+export const MUTAGEN_PROJECT_RELATIVE = path.join('.bica', 'project.yml');
 
+/**
+ * One Mutagen sync session (written to `.bica/project.yml`). Property names are Mutagen’s sync schema.
+ */
 export interface WorkspaceSyncSession {
+  /** Local repository root. */
   alpha?: string;
+  /** Remote URL: `host:path`. */
   beta?: string;
   mode?: string;
   ignore?: { paths?: string[] };
@@ -283,7 +288,8 @@ export interface PrepareResult {
   repoRoot: string;
   projectFilePath: string;
   sessionName: string;
-  beta: string;
+  /** Remote sync target: `sshHost:remotePath`. */
+  remoteSyncUrl: string;
   config: RemoteEnvConfig;
 }
 
@@ -298,7 +304,7 @@ export function prepareSyncProjectFile(options: {
   const { absolutePath: sourcePath, displayName } =
     resolveSyncSpecPath(repoRoot);
   const config = loadRemoteEnvConfig(repoRoot);
-  const beta = `${config.sshHost}:${config.remoteWorkspacePath}`;
+  const remoteSyncUrl = `${config.sshHost}:${config.remoteWorkspacePath}`;
 
   const raw = fs.readFileSync(sourcePath, 'utf8');
   const docUnknown: unknown = YAML.parse(raw);
@@ -323,12 +329,13 @@ export function prepareSyncProjectFile(options: {
     ...doc.sync,
     [sessionName]: {
       ...session,
+      // Mutagen requires these key names: local root and remote URL.
       alpha: repoRoot,
-      beta,
+      beta: remoteSyncUrl,
     },
   };
 
-  const outDir = path.join(repoRoot, '.mutagen');
+  const outDir = path.join(repoRoot, '.bica');
   fs.mkdirSync(outDir, { recursive: true });
   const projectFilePath = path.join(repoRoot, MUTAGEN_PROJECT_RELATIVE);
   const mutagenDoc = { sync: mergedSync };
@@ -341,14 +348,14 @@ export function prepareSyncProjectFile(options: {
   if (verbose) {
     console.log('Wrote sync project file.');
     console.log(`  local:  ${repoRoot}`);
-    console.log(`  remote: ${beta}`);
+    console.log(`  remote: ${remoteSyncUrl}`);
   }
 
   return {
     repoRoot,
     projectFilePath,
     sessionName,
-    beta,
+    remoteSyncUrl,
     config,
   };
 }

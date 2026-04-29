@@ -134,6 +134,7 @@ Environment
   BICA_LOGIN_SHELL               Remote shell for non-interactive commands (default zsh)
   BICA_LOGIN_FLAGS               Flags for that shell (default -lc for zsh)
   BICA_DEBUG                     Set to 1 to print the remote script on stderr before ssh (env-dump hint: always on TTY; with debug, also when stderr is not a TTY)
+  BICA_SYNC_FLUSH                Set to 1 to run mutagen sync flush before bica run (slower; reduces remote lag vs local)
 
 Globals (parsed from the full argv; not forwarded to the remote — put before "run" for clarity)
   -y, --yes              Non-interactive: auto-confirm starting file sync when no session exists yet
