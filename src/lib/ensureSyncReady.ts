@@ -5,6 +5,7 @@ import {
   getSessionListParse,
   isLikelySyncReady,
   mutagenProjectStart,
+  mutagenSyncFlush,
 } from './mutagenSession';
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt, sleep } from './prompt';
 import type { PrepareResult } from '../syncProject';
@@ -19,7 +20,7 @@ export async function ensureSyncReady(options: {
   assertMutagenInstalled();
   await ensureRemoteSshHostFromEnvOrPrompt();
   const prep = prepareSyncProjectFile({ verbose: false });
-  const { sessionName, projectFilePath, repoRoot, beta } = prep;
+  const { sessionName, projectFilePath, repoRoot, remoteSyncUrl } = prep;
 
   let info = getSessionListParse(sessionName);
 
@@ -27,7 +28,7 @@ export async function ensureSyncReady(options: {
     const ok =
       options.autoYes ||
       (await confirm(
-        `${dim(`No file sync session "${sessionName}" for this repo yet.`)}\n${bold('Start one-way sync')} ${dim('to')} ${syncRemoteTarget(beta)}?`,
+        `${dim(`No file sync session "${sessionName}" for this repo yet.`)}\n${bold('Start one-way sync')} ${dim('to')} ${syncRemoteTarget(remoteSyncUrl)}?`,
         true,
       ));
     if (!ok) {
@@ -45,6 +46,15 @@ export async function ensureSyncReady(options: {
     process.stderr.write(
       `${warn('[bica]')} ${dim('Sync:')} ${info.status ?? 'unknown'} ${dim('(remote disk may lag this machine).')}\n`,
     );
+  }
+
+  // Optional: block until Mutagen pushes pending local changes to remote (see README / BICA_SYNC_FLUSH).
+  if (process.env.BICA_SYNC_FLUSH?.trim() === '1' && info.exists) {
+    if (!mutagenSyncFlush(repoRoot, sessionName)) {
+      process.stderr.write(
+        `${warn('[bica]')} ${dim('BICA_SYNC_FLUSH=1 but flush failed; continuing anyway.')}\n`,
+      );
+    }
   }
 
   return prep;

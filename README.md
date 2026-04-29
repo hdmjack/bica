@@ -28,7 +28,7 @@ Until published, use **`pnpm link --global`** from this repo after `pnpm install
 3. Set **`BICA_SSH_HOST`** / **`BICA_REMOTE_PATH`** or let **`bica init`** write **`.bica/local.yml`**.
 4. Run **`bica prepare`** (writes the sync project file), then **`bica start`**, then e.g. **`bica run pnpm install`**.
 
-Minimal **`bica.yml`** (simplified `sync:` — `alpha` / `beta` are filled by `prepare`):
+Minimal **`bica.yml`** (simplified `sync:` — you set mode/ignore here; **`bica prepare`** injects **local** and **remote** paths into `.bica/project.yml`):
 
 ```yaml
 bica:
@@ -43,11 +43,20 @@ sync:
     paths:
       - node_modules
       - .git
+      - dist
 ```
 
 Legacy shape (single named session under `sync:`) is still supported.
 
-`bica prepare` overwrites `alpha` / `beta` with your local tree and `host:path` from env.
+`bica prepare` writes your **local** repository root and **remote** `host:path` from env into `.bica/project.yml`.
+
+### Sync ignores and TypeScript `dist/`
+
+For **composite** / project-reference monorepos, dependents often typecheck against **`dist/*.d.ts`** from workspace packages. If Mutagen **syncs `dist/`** from your laptop while **`src/`** changes without a matching local rebuild, the remote can see **stale declarations** next to fresh source (missing exports, wrong property names, etc.). **`pnpm install` does not fix that.**
+
+**Recommendation:** add **`dist`** to `sync.ignore.paths` (Mutagen treats it like gitignore: any directory named `dist` under the repo root). The **remote** **`pnpm typecheck`** / **`tsc --build`** then rebuilds `dist` from the synced source. **Tradeoff:** the remote no longer receives prebuilt emit from **local** via sync; anything that needs emit must **build on the remote** (normal for typecheck/CI-style commands).
+
+After changing `ignore.paths`, **restart the sync session** (`bica stop` then `bica start`, or terminate/recreate the Mutagen project) so the new rules apply. If the **remote** already has bad `dist/` trees, remove them once there (or let the next full build overwrite them once `dist` is no longer synced from a stale **local** tree).
 
 ## Environment
 
@@ -58,6 +67,7 @@ Legacy shape (single named session under `sync:`) is still supported.
 | `BICA_LOGIN_SHELL` | Remote shell for non-interactive commands (default `zsh`) |
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
+| `BICA_SYNC_FLUSH` | `1` = before `bica run`, run `mutagen sync flush` on the primary session so the **remote** finishes catching up to **local** (slower; use if you hit brief sync lag) |
 | `BICA_PLUGIN_MODE` | `auto` \| `explicit` |
 | `BICA_PACKAGE_MANAGER_PLUGINS` | Comma-separated ids |
 | `BICA_CREDENTIALS_PLUGINS` | Comma-separated ids |
