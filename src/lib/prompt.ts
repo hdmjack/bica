@@ -1,5 +1,3 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as readline from 'node:readline/promises';
 import prompts from 'prompts';
 
@@ -55,33 +53,12 @@ function sleep(ms: number): Promise<void> {
 export { sleep };
 
 const REMOTE_HOST_ENV = 'BICA_SSH_HOST';
-const SAVED_HOST_FILE = path.join('.mutagen', 'remote-host');
-
-function savedHostPath(): string {
-  try {
-    return path.join(getGitRepoRoot(), SAVED_HOST_FILE);
-  } catch {
-    return SAVED_HOST_FILE;
-  }
-}
-
-function readSavedHost(): string | null {
-  try {
-    const p = savedHostPath();
-    return fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() || null : null;
-  } catch {
-    return null;
-  }
-}
 
 function saveHost(host: string): void {
   try {
     const root = getGitRepoRoot();
     const existing = readLocalBicaSettings(root);
     writeLocalBicaSettings(root, { ...existing, sshHost: host });
-    const p = savedHostPath();
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, host, 'utf8');
   } catch {
     // Best-effort; not critical if it fails.
   }
@@ -130,7 +107,7 @@ function sshHostAlreadyResolved(): boolean {
  *
  * Resolution order:
  *   1. BICA_SSH_HOST env var
- *   2. Saved choice from a previous interactive run
+ *   2. sshHost in .bica/local.yml (from bica init or saveHost)
  *   3. Single Host alias auto-detected from ~/.ssh/config
  *   4. Numbered prompt when multiple hosts exist (TTY only — saves the choice)
  *   5. Free-text prompt for manual entry (TTY only)
@@ -149,13 +126,7 @@ export async function ensureRemoteSshHostFromEnvOrPrompt(): Promise<void> {
       return;
     }
   } catch {
-    // Not a git repo — fall through to saved file / prompts
-  }
-
-  const saved = readSavedHost();
-  if (saved) {
-    process.env[REMOTE_HOST_ENV] = saved;
-    return;
+    // Not a git repo — fall through to ~/.ssh/config and prompts
   }
 
   const fromSshConfig = resolveUnambiguousSshHostFromUserConfig();
