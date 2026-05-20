@@ -127,6 +127,102 @@ export function mutagenSyncList(): void {
   spawnSync('mutagen', ['sync', 'list'], { stdio: 'inherit', shell: false });
 }
 
+export interface SyncSessionSummary {
+  name: string;
+  identifier: string;
+  alpha: string;
+  beta: string;
+}
+
+const SYNC_LIST_TEMPLATE =
+  '{{range .}}{{.Name}}|{{.Identifier}}|{{.Alpha.Path}}|{{.Beta.Host}}:{{.Beta.Path}}{{"\\n"}}{{end}}';
+
+/**
+ * Parse a single `Name|Identifier|alpha|host:beta-path` line into a summary. Returns null when the
+ * line is malformed (e.g. an old `mutagen` build does not expose the field shape we expect).
+ */
+export function parseSyncListTemplateLine(
+  line: string,
+): SyncSessionSummary | null {
+  const parts = line.split('|');
+  if (parts.length !== 4) {
+    return null;
+  }
+  const [name, identifier, alpha, beta] = parts.map((p) => p.trim());
+  if (!name || !identifier) {
+    return null;
+  }
+  return { name, identifier, alpha, beta };
+}
+
+/**
+ * List every Mutagen sync session by name + endpoints. Returns [] if the templated CLI invocation
+ * fails (older Mutagen lacking template support, etc.) — callers should treat the empty case as
+ * "no detection possible" rather than "no conflicts".
+ */
+export function listAllSyncSessions(): SyncSessionSummary[] {
+  const result = spawnSync(
+    'mutagen',
+    ['sync', 'list', '--template', SYNC_LIST_TEMPLATE],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    },
+  );
+  if (result.status !== 0) {
+    return [];
+  }
+  const out = result.stdout ?? '';
+  const sessions: SyncSessionSummary[] = [];
+  for (const raw of out.split('\n')) {
+    const line = raw.trim();
+    if (line === '') {
+      continue;
+    }
+    const parsed = parseSyncListTemplateLine(line);
+    if (parsed !== null) {
+      sessions.push(parsed);
+    }
+  }
+  return sessions;
+}
+
+/**
+ * Sessions that bind the same alpha+beta as the project we are about to start, but with a name
+ * other than the one bica's project file owns. These are leftovers from a prior bica.yml session
+ * name — they fight the new session's ignore rules (e.g. snapshot return-flow gets clobbered).
+ */
+export function findConflictingSessions(options: {
+  expectedSessionName: string;
+  alphaPath: string;
+  remoteSyncUrl: string;
+}): SyncSessionSummary[] {
+  const all = listAllSyncSessions();
+  return all.filter(
+    (s) =>
+      s.alpha === options.alphaPath &&
+      s.beta === options.remoteSyncUrl &&
+      s.name !== options.expectedSessionName,
+  );
+}
+
+export function mutagenSyncTerminate(sessionName: string): boolean {
+  const result = spawnSync('mutagen', ['sync', 'terminate', sessionName], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false,
+  });
+  if (result.status === 0) {
+    return true;
+  }
+  const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+  process.stderr.write(
+    `[bica] mutagen sync terminate ${sessionName}: ${err || `exit ${String(result.status)}`}\n`,
+  );
+  return false;
+}
+
 export function mutagenSyncMonitor(sessionName: string): void {
   spawnSync('mutagen', ['sync', 'monitor', sessionName], {
     stdio: 'inherit',

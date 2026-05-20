@@ -58,6 +58,32 @@ For **composite** / project-reference monorepos, dependents often typecheck agai
 
 After changing `ignore.paths`, **restart the sync session** (`bica stop` then `bica start`, or terminate/recreate the Mutagen project) so the new rules apply. If the **remote** already has bad `dist/` trees, remove them once there (or let the next full build overwrite them once `dist` is no longer synced from a stale **local** tree).
 
+### Return-flow (test snapshots back from remote)
+
+Mutagen `one-way-replica` only pushes **local → remote**, so artifacts generated on the remote (Jest/Vitest snapshot files, screenshot diffs, etc.) never reach your laptop. **`bica run`** automatically `rsync`s a whitelist of patterns **remote → local** after the remote command exits (success or fail — failing tests still write snapshot diffs you want).
+
+Defaults (used when `returnFlow:` is absent from `bica.yml`):
+
+```yaml
+returnFlow:
+  paths:
+    - "**/__snapshots__/**"
+    - "**/*.snap"
+```
+
+Add your own patterns (gitignore-style globs):
+
+```yaml
+returnFlow:
+  paths:
+    - "**/__snapshots__/**"
+    - "**/*.snap"
+    - "**/*.png"            # visual snapshots
+    - "test-results/**"     # Playwright traces
+```
+
+Set `paths: []` to disable. Whitelisted patterns are also auto-added to the forward session's `sync.ignore.paths`, so a stale local snapshot will not overwrite the fresh remote one. Disable per-run with `BICA_RETURN_FLOW=0`. Requires `rsync` on PATH; if missing, bica prints a warning and skips the pull.
+
 ## Environment
 
 | Variable | Purpose |
@@ -68,6 +94,7 @@ After changing `ignore.paths`, **restart the sync session** (`bica stop` then `b
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
 | `BICA_SYNC_FLUSH` | `1` = before `bica run`, run `mutagen sync flush` on the primary session so the **remote** finishes catching up to **local** (slower; use if you hit brief sync lag) |
+| `BICA_RETURN_FLOW` | `0` = disable the post-`bica run` rsync that pulls whitelisted artifacts (snapshots, etc.) **remote → local** (see "Return-flow" above) |
 | `BICA_PLUGIN_MODE` | `auto` \| `explicit` |
 | `BICA_PACKAGE_MANAGER_PLUGINS` | Comma-separated ids |
 | `BICA_CREDENTIALS_PLUGINS` | Comma-separated ids |

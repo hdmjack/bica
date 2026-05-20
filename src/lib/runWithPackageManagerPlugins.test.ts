@@ -40,6 +40,7 @@ function makePrep(repoRoot: string): PrepareResult {
     projectFilePath: path.join(repoRoot, '.bica', 'project.yml'),
     sessionName: 'test-session',
     remoteSyncUrl: 'test-host:/remote/repo',
+    returnFlowPaths: [],
     config: {
       sshHost: 'test-host',
       remoteWorkspacePath: '/remote/repo',
