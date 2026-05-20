@@ -34,6 +34,14 @@ const DEFAULT_BICA_YML = `sync:
       # remote typecheck against stale declarations while src is up to date.
       - dist
 
+# returnFlow: rsync these patterns from remote→local after \`bica run\`. Default values cover
+# Jest/Vitest snapshots so tests run on the remote update the local repo. Set paths: [] to disable,
+# or list additional gitignore-style globs (e.g. "**/*.png" for visual snapshots).
+# returnFlow:
+#   paths:
+#     - "**/__snapshots__/**"
+#     - "**/*.snap"
+
 bica:
   pluginMode: auto
 `;

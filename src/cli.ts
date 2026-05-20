@@ -10,7 +10,10 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
-import { ensureSyncReady } from './lib/ensureSyncReady';
+import {
+  ensureSyncReady,
+  terminateConflictingSyncSessions,
+} from './lib/ensureSyncReady';
 import {
   mutagenProjectStart,
   mutagenProjectTerminate,
@@ -18,6 +21,7 @@ import {
   mutagenSyncMonitor,
 } from './lib/mutagenSession';
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
+import { pullReturnFlow } from './lib/returnFlow';
 import { openRemoteInteractiveSsh } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
 import {
@@ -135,6 +139,9 @@ Environment
   BICA_LOGIN_FLAGS               Flags for that shell (default -lc for zsh)
   BICA_DEBUG                     Set to 1 to print the remote script on stderr before ssh (env-dump hint: always on TTY; with debug, also when stderr is not a TTY)
   BICA_SYNC_FLUSH                Set to 1 to run mutagen sync flush before bica run (slower; reduces remote lag vs local)
+  BICA_RETURN_FLOW               Set to 0 to disable the post-\`bica run\` rsync that pulls test
+                                 snapshots and other whitelisted files back from remote→local
+                                 (configure patterns via top-level returnFlow: in bica.yml)
 
 Globals (parsed from the full argv; not forwarded to the remote — put before "run" for clarity)
   -y, --yes              Non-interactive: auto-confirm starting file sync when no session exists yet
@@ -196,9 +203,10 @@ async function cmdPrepare(): Promise<void> {
   prepareSyncProjectFile({ verbose: true });
 }
 
-async function cmdStart(): Promise<void> {
+async function cmdStart(autoYes: boolean): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const prep = prepareSyncProjectFile({ verbose: false });
+  await terminateConflictingSyncSessions(prep, { autoYes });
   if (!mutagenProjectStart(prep.repoRoot, prep.projectFilePath)) {
     process.exit(1);
   }
@@ -342,6 +350,9 @@ async function cmdRun(
     pmOverride: pm,
     confirm,
   });
+  // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
+  // failed tests still produce snapshot diffs the user needs locally.
+  pullReturnFlow(prep);
   process.exit(code);
 }
 
@@ -387,7 +398,7 @@ async function main(): Promise<void> {
         await cmdPrepare();
         break;
       case 'start':
-        await cmdStart();
+        await cmdStart(autoYes);
         break;
       case 'stop':
         cmdStop();

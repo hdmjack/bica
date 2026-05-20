@@ -35,7 +35,18 @@ export interface SyncSpecYaml {
   sync: {
     [sessionName: string]: WorkspaceSyncSession;
   };
+  /** Return-flow patterns: files that should rsync remote→local after `bica run`. */
+  returnFlow?: { paths: string[] };
 }
+
+/**
+ * Default return-flow whitelist (gitignore/rsync-filter globs). Test snapshot artifacts produced
+ * on the remote should always flow back to the local repo.
+ */
+export const DEFAULT_RETURN_FLOW_PATHS: readonly string[] = [
+  '**/__snapshots__/**',
+  '**/*.snap',
+];
 
 export function findBicaSpecPath(repoRoot: string): {
   absolutePath: string;
@@ -160,6 +171,8 @@ export function normalizeToSyncSpecYaml(
 
   const allValuesArePlainObjects = keys.every((k) => isPlainObject(syncObj[k]));
 
+  const returnFlow = parseReturnFlow(doc.returnFlow, sourceLabel);
+
   if (!looksLikeFlatSync && allValuesArePlainObjects) {
     if (keys.length !== 1) {
       throw new Error(
@@ -170,8 +183,9 @@ export function normalizeToSyncSpecYaml(
     const session = syncObj[sessionName] as WorkspaceSyncSession;
     return {
       sync: {
-        [sessionName]: { ...session },
+        [sessionName]: applyReturnFlowToSession(session, returnFlow.paths),
       },
+      returnFlow,
     };
   }
 
@@ -193,11 +207,59 @@ export function normalizeToSyncSpecYaml(
 
   return {
     sync: {
-      [sessionName]: {
-        mode,
-        ...(ignore !== undefined ? { ignore } : {}),
-      },
+      [sessionName]: applyReturnFlowToSession(
+        {
+          mode,
+          ...(ignore !== undefined ? { ignore } : {}),
+        },
+        returnFlow.paths,
+      ),
     },
+    returnFlow,
+  };
+}
+
+/**
+ * Parse `returnFlow:` block from bica.yml root. Falls back to DEFAULT_RETURN_FLOW_PATHS when absent.
+ * An explicit empty list (`paths: []`) disables return-flow.
+ */
+function parseReturnFlow(
+  raw: unknown,
+  sourceLabel: string,
+): { paths: string[] } {
+  if (raw === undefined) {
+    return { paths: [...DEFAULT_RETURN_FLOW_PATHS] };
+  }
+  if (!isPlainObject(raw)) {
+    throw new Error(`${sourceLabel}: returnFlow: must be an object.`);
+  }
+  const pathsUnknown = (raw as { paths?: unknown }).paths;
+  if (pathsUnknown === undefined) {
+    return { paths: [...DEFAULT_RETURN_FLOW_PATHS] };
+  }
+  if (!Array.isArray(pathsUnknown)) {
+    throw new Error(`${sourceLabel}: returnFlow.paths must be a list of strings.`);
+  }
+  const paths = pathsUnknown.filter((x): x is string => typeof x === 'string');
+  return { paths };
+}
+
+/**
+ * Merge return-flow patterns into a session's `ignore.paths` so the forward sync does not push
+ * stale local copies of remote-owned files.
+ */
+function applyReturnFlowToSession(
+  session: WorkspaceSyncSession,
+  returnFlowPaths: string[],
+): WorkspaceSyncSession {
+  if (returnFlowPaths.length === 0) {
+    return session;
+  }
+  const existing = session.ignore?.paths ?? [];
+  const merged = Array.from(new Set([...existing, ...returnFlowPaths]));
+  return {
+    ...session,
+    ignore: { paths: merged },
   };
 }
 
@@ -290,6 +352,8 @@ export interface PrepareResult {
   sessionName: string;
   /** Remote sync target: `sshHost:remotePath`. */
   remoteSyncUrl: string;
+  /** Glob patterns to rsync remote→local after `bica run`. Empty list = disabled. */
+  returnFlowPaths: string[];
   config: RemoteEnvConfig;
 }
 
@@ -356,6 +420,7 @@ export function prepareSyncProjectFile(options: {
     projectFilePath,
     sessionName,
     remoteSyncUrl,
+    returnFlowPaths: doc.returnFlow?.paths ?? [],
     config,
   };
 }

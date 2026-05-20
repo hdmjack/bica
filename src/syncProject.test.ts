@@ -6,6 +6,7 @@ import YAML from 'yaml';
 import {
   BICA_SPEC_FILE,
   BICA_WORKSPACE_SPEC_FILE,
+  DEFAULT_RETURN_FLOW_PATHS,
   findBicaSpecPath,
   normalizeToSyncSpecYaml,
   resolveSyncSpecPath,
@@ -21,6 +22,8 @@ sync:
   ignore:
     paths:
       - node_modules
+returnFlow:
+  paths: []
 `) as unknown;
     const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
     const keys = Object.keys(n.sync);
@@ -36,6 +39,8 @@ sync:
   ignore:
     paths:
       - node_modules
+returnFlow:
+  paths: []
 `) as unknown;
     const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
     const name = Object.keys(n.sync)[0];
@@ -68,6 +73,52 @@ sync:
     expect(() =>
       normalizeToSyncSpecYaml({ sync: {} }, repoRoot, 'bica.yml'),
     ).toThrow(/empty/);
+  });
+
+  it('applies default returnFlow patterns when returnFlow is absent', () => {
+    const doc = YAML.parse(`
+sync:
+  mode: one-way-replica
+`) as unknown;
+    const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
+    expect(n.returnFlow?.paths).toEqual([...DEFAULT_RETURN_FLOW_PATHS]);
+    const session = n.sync[Object.keys(n.sync)[0]];
+    for (const pattern of DEFAULT_RETURN_FLOW_PATHS) {
+      expect(session?.ignore?.paths).toContain(pattern);
+    }
+  });
+
+  it('merges returnFlow paths into forward ignore without duplicating user entries', () => {
+    const doc = YAML.parse(`
+sync:
+  mode: one-way-replica
+  ignore:
+    paths:
+      - node_modules
+      - "**/*.snap"
+returnFlow:
+  paths:
+    - "**/*.snap"
+    - "**/snapshots/**"
+`) as unknown;
+    const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
+    expect(n.returnFlow?.paths).toEqual(['**/*.snap', '**/snapshots/**']);
+    const session = n.sync[Object.keys(n.sync)[0]];
+    const ignored = session?.ignore?.paths ?? [];
+    expect(ignored).toEqual(['node_modules', '**/*.snap', '**/snapshots/**']);
+  });
+
+  it('disables return-flow when returnFlow.paths is an empty list', () => {
+    const doc = YAML.parse(`
+sync:
+  mode: one-way-replica
+returnFlow:
+  paths: []
+`) as unknown;
+    const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
+    expect(n.returnFlow?.paths).toEqual([]);
+    const session = n.sync[Object.keys(n.sync)[0]];
+    expect(session?.ignore?.paths ?? undefined).toBeUndefined();
   });
 });
 
