@@ -98,12 +98,22 @@ describe('runRemoteCommandWithPmHooks', () => {
     }
   });
 
-  it('prompts before initial install when autoYes is false', async () => {
+  it('auto-runs remote install on lockfile drift without prompting', async () => {
     const repoRoot = makeTempRepo();
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
+      const fpOld = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
+      expect(fpOld).not.toBeNull();
+      pnpmPackageManagerPlugin.writeStoredHash(repoRoot, fpOld!);
+
+      fs.writeFileSync(
+        path.join(repoRoot, 'pnpm-lock.yaml'),
+        "lockfileVersion: '9.0'\npackages: {}\n",
+        'utf8',
+      );
+
       const prep = makePrep(repoRoot);
-      const confirm = vi.fn().mockResolvedValue(true);
+      const confirm = vi.fn();
 
       await runRemoteCommandWithPmHooks({
         prep,
@@ -113,10 +123,9 @@ describe('runRemoteCommandWithPmHooks', () => {
         confirm,
       });
 
-      expect(confirm).toHaveBeenCalledTimes(1);
-      expect(String(confirm.mock.calls[0]?.[0])).toContain(
-        'No remote install recorded yet',
-      );
+      expect(confirm).not.toHaveBeenCalled();
+      expect(runRemote).toHaveBeenCalledTimes(2);
+      expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -281,12 +290,12 @@ describe('runRemoteCommandWithPmHooks', () => {
     }
   });
 
-  it('runs only the user command when the user declines the initial install', async () => {
+  it('records install hash after auto-running the initial install', async () => {
     const repoRoot = makeTempRepo();
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const prep = makePrep(repoRoot);
-      const confirm = vi.fn().mockResolvedValue(false);
+      const confirm = vi.fn();
 
       await runRemoteCommandWithPmHooks({
         prep,
@@ -296,9 +305,12 @@ describe('runRemoteCommandWithPmHooks', () => {
         confirm,
       });
 
-      expect(runRemote).toHaveBeenCalledTimes(1);
-      expect(runRemote.mock.calls[0]?.[2]).toContain('test');
-      expect(pnpmPackageManagerPlugin.readStoredHash(repoRoot)).toBeNull();
+      expect(confirm).not.toHaveBeenCalled();
+      expect(runRemote).toHaveBeenCalledTimes(2);
+      expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
+      const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
+      expect(fp).not.toBeNull();
+      expect(pnpmPackageManagerPlugin.readStoredHash(repoRoot)).toBe(fp);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }

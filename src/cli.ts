@@ -415,11 +415,23 @@ async function cmdRun(
     });
     // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
     // failed tests still produce snapshot diffs the user needs locally.
-    pullReturnFlow(prep);
+    if (prep.returnFlowPaths.length > 0) {
+      process.stderr.write(
+        `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
+      );
+    }
+    const pull = pullReturnFlow(prep);
+    if (pull.ran && pull.exitCode === 0) {
+      process.stderr.write(`${dim('[bica]')} ${dim('Return-flow pull done.')}\n`);
+    }
   } finally {
     process.removeListener('SIGINT', onSigint);
+    process.stderr.write(
+      `${dim('[bica]')} ${dim('Stopping sync session…')}\n`,
+    );
     cleanup();
     process.removeListener('exit', cleanup);
+    process.stderr.write(`${dim('[bica]')} ${dim('Sync session stopped.')}\n`);
   }
 
   process.exit(code);
