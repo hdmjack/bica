@@ -48,6 +48,27 @@ export function getSessionListParse(sessionName: string): SessionListParse {
   };
 }
 
+/**
+ * Block until the session reaches a sync-ready state (or timeoutMs elapses). Polls every 500ms.
+ * Returns the last observed status string (null when the session never appeared).
+ */
+export function waitForSyncReady(
+  sessionName: string,
+  options: { timeoutMs: number },
+): { ready: boolean; lastStatus: string | null } {
+  const deadline = Date.now() + options.timeoutMs;
+  let lastStatus: string | null = null;
+  while (Date.now() < deadline) {
+    const info = getSessionListParse(sessionName);
+    lastStatus = info.status;
+    if (info.exists && isLikelySyncReady(info.status)) {
+      return { ready: true, lastStatus };
+    }
+    spawnSync('sleep', ['0.5']);
+  }
+  return { ready: false, lastStatus };
+}
+
 export function isLikelySyncReady(status: string | null): boolean {
   if (!status) {
     return false;
@@ -205,6 +226,15 @@ export function findConflictingSessions(options: {
       s.beta === options.remoteSyncUrl &&
       s.name !== options.expectedSessionName,
   );
+}
+
+/**
+ * Every sync session whose alpha endpoint is exactly `repoRoot`. Used by ephemeral-session mode
+ * (`bica run`) to guarantee no stale session — regardless of name, beta, or ignore config — is
+ * left running before we start a fresh one.
+ */
+export function findAllSessionsForRepo(repoRoot: string): SyncSessionSummary[] {
+  return listAllSyncSessions().filter((s) => s.alpha === repoRoot);
 }
 
 export function mutagenSyncTerminate(sessionName: string): boolean {

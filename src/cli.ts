@@ -10,20 +10,23 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
+import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import {
-  ensureSyncReady,
-  terminateConflictingSyncSessions,
-} from './lib/ensureSyncReady';
-import {
+  assertMutagenInstalled,
+  findAllSessionsForRepo,
   mutagenProjectStart,
   mutagenProjectTerminate,
+  mutagenSyncFlush,
   mutagenSyncList,
   mutagenSyncMonitor,
+  mutagenSyncTerminate,
+  waitForSyncReady,
 } from './lib/mutagenSession';
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
 import { pullReturnFlow } from './lib/returnFlow';
 import { openRemoteInteractiveSsh } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
+import { dim, syncRemoteTarget, warn } from './terminalStyle';
 import {
   BUILTIN_CREDENTIALS_PLUGINS,
   BUILTIN_PACKAGE_MANAGER_PLUGINS,
@@ -109,6 +112,10 @@ File sync
                               bica uses for start/stop (derived from your sync: block).
   start / stop / list / monitor
                               Start, stop, list, or watch workspace file sync.
+                              Note: 'bica run' uses an ephemeral session per invocation
+                              (terminates any existing session for this repo before starting,
+                              and tears it down on exit). 'start' is for users who want a
+                              long-lived session — but it will be killed at the next 'bica run'.
 
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
@@ -342,17 +349,79 @@ async function cmdRun(
     die('usage: bica run <command> [args...]\nExample: bica run pnpm test:run');
   }
 
-  const prep = await ensureSyncReady({ autoYes });
-  const code = await runRemoteCommandWithPmHooks({
-    prep,
-    remoteArgv: tail,
-    autoYes,
-    pmOverride: pm,
-    confirm,
-  });
-  // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
-  // failed tests still produce snapshot diffs the user needs locally.
-  pullReturnFlow(prep);
+  assertMutagenInstalled();
+  await ensureRemoteSshHostFromEnvOrPrompt();
+  const prep = prepareSyncProjectFile({ verbose: false });
+  const { repoRoot, projectFilePath, sessionName, remoteSyncUrl } = prep;
+
+  // Ephemeral session: terminate anything bound to this repo (any name / any beta), start fresh
+  // from the current project file, run the command, pull return-flow, terminate. Guarantees the
+  // running session's ignore config matches what bica.yml says right now.
+  const stale = findAllSessionsForRepo(repoRoot);
+  for (const s of stale) {
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`Terminating existing sync session ${s.name} for ${repoRoot} before fresh start.`)}\n`,
+    );
+    mutagenSyncTerminate(s.name);
+  }
+
+  process.stderr.write(
+    `${dim('Starting one-way sync to')} ${syncRemoteTarget(remoteSyncUrl)}\n`,
+  );
+  if (!mutagenProjectStart(repoRoot, projectFilePath)) {
+    process.exit(1);
+  }
+
+  // Cleanup hook: terminate the project on any exit path (normal, error, SIGINT, SIGTERM).
+  let cleanupDone = false;
+  const cleanup = (): void => {
+    if (cleanupDone) {
+      return;
+    }
+    cleanupDone = true;
+    mutagenProjectTerminate(repoRoot, projectFilePath);
+  };
+  process.on('exit', cleanup);
+
+  let sigintCount = 0;
+  const onSigint = (): void => {
+    sigintCount += 1;
+    if (sigintCount >= 2) {
+      // Second Ctrl-C: emergency exit. Cleanup hook still runs via 'exit' event.
+      process.removeListener('SIGINT', onSigint);
+      process.kill(process.pid, 'SIGINT');
+    }
+  };
+  process.on('SIGINT', onSigint);
+
+  const ready = waitForSyncReady(sessionName, { timeoutMs: 60_000 });
+  if (!ready.ready) {
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`Sync did not reach a ready state within 60s (last status: ${ready.lastStatus ?? 'unknown'}); continuing anyway.`)}\n`,
+    );
+  } else {
+    // Force one flush so any pending alpha→beta changes finish before the remote command runs.
+    mutagenSyncFlush(repoRoot, sessionName);
+  }
+
+  let code: number;
+  try {
+    code = await runRemoteCommandWithPmHooks({
+      prep,
+      remoteArgv: tail,
+      autoYes,
+      pmOverride: pm,
+      confirm,
+    });
+    // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
+    // failed tests still produce snapshot diffs the user needs locally.
+    pullReturnFlow(prep);
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+    cleanup();
+    process.removeListener('exit', cleanup);
+  }
+
   process.exit(code);
 }
 
