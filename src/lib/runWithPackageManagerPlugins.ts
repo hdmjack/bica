@@ -108,27 +108,25 @@ export async function runRemoteCommandWithPmHooks(options: {
       !isInstall && isFingerprintOutOfSync(plugin, repoRoot);
 
     if (initial || lockfileDrift) {
-      const promptMessage = initial
-        ? `[bica] No remote install recorded yet (${plugin.id}). Run ${plugin.remoteInstallCommand} on the remote first?`
-        : `[bica] Lockfile changed since last remote install (${plugin.id}). Reinstall on the remote now?`;
-      const reinstall = autoYes || (await confirmFn(promptMessage, true));
-      if (reinstall) {
-        const installCode = runRemoteCommand(
-          config.sshHost,
-          config.remoteWorkspacePath,
-          plugin.remoteInstallCommand,
-          repoRoot,
+      const reason = initial
+        ? `[bica] No remote install recorded yet (${plugin.id}); running ${plugin.remoteInstallCommand}.`
+        : `[bica] Lockfile changed since last remote install (${plugin.id}); reinstalling.`;
+      process.stderr.write(`${reason}\n`);
+      const installCode = runRemoteCommand(
+        config.sshHost,
+        config.remoteWorkspacePath,
+        plugin.remoteInstallCommand,
+        repoRoot,
+      );
+      if (installCode !== 0) {
+        process.stderr.write(
+          '\nHint: private registry 401? Run `bica credentials sync`.\n',
         );
-        if (installCode !== 0) {
-          process.stderr.write(
-            '\nHint: private registry 401? Run `bica credentials sync`.\n',
-          );
-          return installCode;
-        }
-        const fp = plugin.readLocalFingerprint(repoRoot);
-        if (fp !== null) {
-          plugin.writeStoredHash(repoRoot, fp);
-        }
+        return installCode;
+      }
+      const fp = plugin.readLocalFingerprint(repoRoot);
+      if (fp !== null) {
+        plugin.writeStoredHash(repoRoot, fp);
       }
     }
   }
