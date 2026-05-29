@@ -8,6 +8,7 @@ import { miseRemoteShellPlugin } from './plugins/miseRemoteShellPlugin';
 import { npmrcCredentialsPlugin } from './plugins/npmrcCredentialsPlugin';
 import {
   pickCredentialsPluginsForSync,
+  resolveActivePackageManagerPlugins,
   resolveActiveRemoteShellPlugins,
 } from './resolveActivePlugins';
 
@@ -103,5 +104,50 @@ describe('resolveActiveRemoteShellPlugins', () => {
     expect(resolveActiveRemoteShellPlugins(dir, resolved)).toEqual([
       miseRemoteShellPlugin,
     ]);
+  });
+
+  it('returns rust remote shell in auto mode when a Cargo manifest exists', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-rs-'));
+    fs.writeFileSync(path.join(dir, 'bica-workspace.yml'), MIN_SYNC, 'utf8');
+    fs.writeFileSync(path.join(dir, 'Cargo.toml'), '[package]\n', 'utf8');
+    const resolved = resolveBicaPluginConfig(dir);
+    expect(resolveActiveRemoteShellPlugins(dir, resolved).map((p) => p.id)).toEqual([
+      'rust',
+    ]);
+  });
+});
+
+describe('resolveActivePackageManagerPlugins', () => {
+  let dir: string | undefined;
+
+  afterEach(() => {
+    if (dir !== undefined) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      dir = undefined;
+    }
+  });
+
+  it('returns cargo in auto mode when a Cargo manifest exists', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-pm-'));
+    fs.writeFileSync(path.join(dir, 'bica-workspace.yml'), MIN_SYNC, 'utf8');
+    fs.writeFileSync(path.join(dir, 'Cargo.toml'), '[package]\n', 'utf8');
+    const resolved = resolveBicaPluginConfig(dir);
+    expect(
+      resolveActivePackageManagerPlugins(dir, resolved).map((p) => p.id),
+    ).toEqual(['cargo']);
+  });
+
+  it('explicit mode with cargo id includes plugin when manifest exists', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-pm-'));
+    fs.writeFileSync(
+      path.join(dir, 'bica-workspace.yml'),
+      `${MIN_SYNC}bica:\n  pluginMode: explicit\n  packageManagerPlugins:\n    - cargo\n`,
+      'utf8',
+    );
+    fs.writeFileSync(path.join(dir, 'Cargo.lock'), 'version = 4\n', 'utf8');
+    const resolved = resolveBicaPluginConfig(dir);
+    expect(
+      resolveActivePackageManagerPlugins(dir, resolved).map((p) => p.id),
+    ).toEqual(['cargo']);
   });
 });

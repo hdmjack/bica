@@ -34,6 +34,15 @@ function needsInitialRemoteInstall(
   return stored === null && local !== null;
 }
 
+/** Registry-auth hint only makes sense for package managers that authenticate to a registry. */
+function maybeWriteCredentialsHint(plugin: PackageManagerPlugin): void {
+  if (plugin.id === 'pnpm') {
+    process.stderr.write(
+      '\nHint: private registry 401? Run `bica credentials sync`.\n',
+    );
+  }
+}
+
 async function ensureRemoteWorkspaceDirectory(
   sshHost: string,
   remoteWorkspacePath: string,
@@ -119,9 +128,7 @@ export async function runRemoteCommandWithPmHooks(options: {
         repoRoot,
       );
       if (installCode !== 0) {
-        process.stderr.write(
-          '\nHint: private registry 401? Run `bica credentials sync`.\n',
-        );
+        maybeWriteCredentialsHint(plugin);
         return installCode;
       }
       const fp = plugin.readLocalFingerprint(repoRoot);
@@ -145,9 +152,7 @@ export async function runRemoteCommandWithPmHooks(options: {
         plugin.writeStoredHash(repoRoot, fp);
       }
     } else if (plugin.isInstallArgv(remoteArgv) && code !== 0) {
-      process.stderr.write(
-        '\nHint: private registry 401? Run `bica credentials sync`.\n',
-      );
+      maybeWriteCredentialsHint(plugin);
     }
   }
 

@@ -24,7 +24,9 @@ const PROMPT_OPTS: prompts.Options = {
   },
 };
 
-const DEFAULT_BICA_YML = `sync:
+type ProjectKind = 'rust' | 'node';
+
+const NODE_BICA_YML = `sync:
   mode: one-way-replica
   ignore:
     paths:
@@ -45,6 +47,78 @@ const DEFAULT_BICA_YML = `sync:
 bica:
   pluginMode: auto
 `;
+
+function rustBicaYml(binName: string): string {
+  return `sync:
+  mode: one-way-replica
+  ignore:
+    paths:
+      - .git
+      # Build output is large and remote-owned; the remote rebuilds target/ from synced source.
+      - target
+
+# returnFlow: rsync these patterns from remote→local after \`bica run\`, so a remote build's
+# artifacts land locally. Pulls the runnable binary plus any sidecar dylibs it links at runtime.
+# Note: a dev binary resolves assets relative to its build-time path — keep the remote workspace
+# path (.bica/local.yml) equal to this repo's local absolute path so the pulled binary runs locally.
+returnFlow:
+  paths:
+    - "target/debug/${binName}"
+    - "target/debug/*.dylib"
+
+bica:
+  pluginMode: auto
+`;
+}
+
+/** Rust when a Cargo manifest/lockfile is present at the repo root; otherwise the node default. */
+function detectProjectKind(repoRoot: string): ProjectKind {
+  if (
+    fs.existsSync(path.join(repoRoot, 'Cargo.toml')) ||
+    fs.existsSync(path.join(repoRoot, 'Cargo.lock'))
+  ) {
+    return 'rust';
+  }
+  return 'node';
+}
+
+/** Best-effort binary name for return-flow: Cargo.toml [package].name, else repo basename. */
+function inferRustBinName(repoRoot: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(repoRoot, 'Cargo.toml'), 'utf8');
+    let inPackage = false;
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (t.startsWith('[')) {
+        inPackage = t === '[package]';
+        continue;
+      }
+      if (inPackage) {
+        const m = /^name\s*=\s*"([^"]+)"/.exec(t);
+        if (m) {
+          return m[1];
+        }
+      }
+    }
+  } catch {
+    // fall through to repo basename
+  }
+  return path.basename(repoRoot);
+}
+
+export interface BicaScaffold {
+  kind: ProjectKind;
+  yaml: string;
+}
+
+/** Picks the bica.yml scaffold for a repo based on its project type. */
+export function scaffoldForRepo(repoRoot: string): BicaScaffold {
+  const kind = detectProjectKind(repoRoot);
+  if (kind === 'rust') {
+    return { kind, yaml: rustBicaYml(inferRustBinName(repoRoot)) };
+  }
+  return { kind, yaml: NODE_BICA_YML };
+}
 
 const OTHER_HOST = '__bica_other__';
 const SKIP_HOST = '__bica_skip__';
@@ -71,11 +145,15 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
   console.log(dim('Remote sync, SSH, and argv-safe `bica run` commands.'));
   console.log();
 
+  const scaffold = scaffoldForRepo(repoRoot);
+  const ignoreSummary =
+    scaffold.kind === 'rust' ? '.git/target' : 'node_modules/.git/dist';
+
   const createSpec = await prompts(
     {
       type: 'confirm',
       name: 'yes',
-      message: `Create ${BICA_SPEC_FILE} with default sync (one-way-replica, ignore node_modules/.git/dist)?`,
+      message: `Create ${BICA_SPEC_FILE} with default sync (one-way-replica, ignore ${ignoreSummary})?`,
       initial: true,
     },
     PROMPT_OPTS,
@@ -91,7 +169,7 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
   }
 
   const specPath = path.join(repoRoot, BICA_SPEC_FILE);
-  fs.writeFileSync(specPath, DEFAULT_BICA_YML, 'utf8');
+  fs.writeFileSync(specPath, scaffold.yaml, 'utf8');
   console.log(
     ok(`Wrote ${path.relative(process.cwd(), specPath) || BICA_SPEC_FILE}`),
   );
@@ -159,6 +237,18 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
   const repoBasename = path.basename(repoRoot);
   const defaultRemote = `~/code/${repoBasename}`;
 
+  if (scaffold.kind === 'rust') {
+    console.log(
+      warn(
+        `Rust note: compiled binaries bake their absolute build path (CARGO_MANIFEST_DIR) for\n` +
+          `asset/resource lookup. To run a pulled binary locally, this remote path must resolve to\n` +
+          `the same absolute path as your local repo:\n  ${repoRoot}\n` +
+          `The default below works only if the remote home/username matches; otherwise enter a path\n` +
+          `that resolves identically on the remote.`,
+      ),
+    );
+  }
+
   const pathAnswer = await prompts(
     {
       type: 'text',
@@ -188,9 +278,11 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
   }
 
   console.log();
-  console.log(
-    `${bold('Next:')} ${dim('bica prepare')}   then   ${dim('bica run pnpm install')}   then   ${dim('bica run pnpm test')}`,
-  );
+  const nextRun =
+    scaffold.kind === 'rust'
+      ? `${dim('bica run cargo build')}   then   ${dim('bica run cargo nextest run')}`
+      : `${dim('bica run pnpm install')}   then   ${dim('bica run pnpm test')}`;
+  console.log(`${bold('Next:')} ${dim('bica prepare')}   then   ${nextRun}`);
   console.log();
 }
 
