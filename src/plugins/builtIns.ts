@@ -1,6 +1,8 @@
+import { cargoPackageManagerPlugin } from './cargoPackageManagerPlugin';
 import { miseRemoteShellPlugin } from './miseRemoteShellPlugin';
 import { npmrcCredentialsPlugin } from './npmrcCredentialsPlugin';
 import { pnpmPackageManagerPlugin } from './pnpmPackageManagerPlugin';
+import { rustRemoteShellPlugin } from './rustRemoteShellPlugin';
 import type {
   CredentialsPlugin,
   PackageManagerPlugin,
@@ -8,7 +10,7 @@ import type {
 } from './types';
 
 export const BUILTIN_PACKAGE_MANAGER_PLUGINS: readonly PackageManagerPlugin[] =
-  [pnpmPackageManagerPlugin];
+  [pnpmPackageManagerPlugin, cargoPackageManagerPlugin];
 
 export const BUILTIN_CREDENTIALS_PLUGINS: readonly CredentialsPlugin[] = [
   npmrcCredentialsPlugin,
@@ -16,6 +18,7 @@ export const BUILTIN_CREDENTIALS_PLUGINS: readonly CredentialsPlugin[] = [
 
 export const BUILTIN_REMOTE_SHELL_PLUGINS: readonly RemoteShellPlugin[] = [
   miseRemoteShellPlugin,
+  rustRemoteShellPlugin,
 ];
 
 export function getPackageManagerPluginById(

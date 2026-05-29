@@ -26,6 +26,28 @@ function loginFlagsFromEnv(): string[] {
 }
 
 /**
+ * SSH options that keep long remote commands (e.g. `cargo build`) alive across quiet stretches.
+ * ServerAliveInterval probes every 30s; CountMax 20 tolerates ~10 min of silence before giving up,
+ * avoiding "Broken pipe" / "Connection reset" drops on slow downloads or compiles.
+ * Extra opts can be appended via BICA_SSH_OPTS (space-separated, each token passed verbatim).
+ */
+function sshKeepaliveOpts(): string[] {
+  const base = [
+    '-o',
+    'ServerAliveInterval=30',
+    '-o',
+    'ServerAliveCountMax=20',
+    '-o',
+    'TCPKeepAlive=yes',
+  ];
+  const extra = process.env.BICA_SSH_OPTS?.trim();
+  if (extra !== undefined && extra.length > 0) {
+    base.push(...extra.split(/\s+/).filter(Boolean));
+  }
+  return base;
+}
+
+/**
  * Escape a path segment for use inside double quotes on the remote shell (zsh/bash).
  */
 function escapeForDoubleQuotedRemotePath(s: string): string {
@@ -453,7 +475,14 @@ export function runRemoteCommand(
   const shell = loginShellFromEnv();
   const flags = loginFlagsFromEnv();
 
-  const sshArgs = ['-t', sshHost, shell, ...flags, remoteScript];
+  const sshArgs = [
+    ...sshKeepaliveOpts(),
+    '-t',
+    sshHost,
+    shell,
+    ...flags,
+    remoteScript,
+  ];
   if (isBicaDebug()) {
     process.stderr.write(
       `[bica-debug] ssh ${sshArgs[0]} ${sshArgs[1]} ${shell} ${flags.join(' ')}\n${remoteScript}\n---\n`,
@@ -478,7 +507,7 @@ export function openRemoteInteractiveSsh(
   const dir = remotePathExprForCd(remoteWorkspacePath);
   const shell = loginShellFromEnv();
   const remoteCmd = `cd ${dir} && exec ${shell} -l`;
-  const result = spawnSync('ssh', ['-t', sshHost, remoteCmd], {
+  const result = spawnSync('ssh', [...sshKeepaliveOpts(), '-t', sshHost, remoteCmd], {
     stdio: 'inherit',
     shell: false,
   });
