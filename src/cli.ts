@@ -23,7 +23,7 @@ import {
   waitForSyncReady,
 } from './lib/mutagenSession';
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
-import { pullReturnFlow } from './lib/returnFlow';
+import { pullReturnFlow, pushGitToRemote } from './lib/returnFlow';
 import { openRemoteInteractiveSsh } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
 import { dim, syncRemoteTarget, warn } from './terminalStyle';
@@ -402,6 +402,19 @@ async function cmdRun(
   } else {
     // Force one flush so any pending alpha→beta changes finish before the remote command runs.
     mutagenSyncFlush(repoRoot, sessionName);
+  }
+
+  // When git.sync is enabled, mirror local .git to the remote so git-dependent commands
+  // (e.g. `vitest --changed`, `jest --changed`) resolve the same history/HEAD/refs as local.
+  // .git is intentionally Mutagen-ignored; this one-shot rsync avoids continuous index.lock churn.
+  if (resolveBicaPluginConfig(repoRoot).syncGit) {
+    process.stderr.write(
+      `${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`,
+    );
+    const gitPush = pushGitToRemote(prep);
+    if (gitPush.ran && gitPush.exitCode === 0) {
+      process.stderr.write(`${dim('[bica]')} ${dim('.git sync done.')}\n`);
+    }
   }
 
   let code: number;

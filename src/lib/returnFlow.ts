@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import * as path from 'node:path';
 
 import { dim, warn } from '../terminalStyle';
 import type { PrepareResult } from '../syncProject';
@@ -77,6 +78,42 @@ export function pullReturnFlow(prep: PrepareResult): PullResult {
     const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
     process.stderr.write(
       `${warn('[bica]')} ${dim(`return-flow rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
+    );
+  }
+  return { ran: true, exitCode: code };
+}
+
+/**
+ * Rsync the local `.git` directory to the remote workspace (local → remote), making the remote git
+ * history/HEAD/refs an exact mirror of local. Enables git-dependent commands like `vitest --changed`
+ * to resolve the same changed-file set on the remote as they would locally.
+ *
+ * Uses `--delete` so stale remote-only refs/objects don't linger (unlike return-flow, which never
+ * deletes). Best-effort — failures emit a warning and return non-zero but do not throw, so they
+ * don't mask the remote command's exit code.
+ */
+export function pushGitToRemote(prep: PrepareResult): PullResult {
+  if (!rsyncAvailable()) {
+    process.stderr.write(
+      `${warn('[bica]')} ${dim('rsync not on PATH; skipping .git sync (install rsync to enable git-dependent commands like --changed).')}\n`,
+    );
+    return { ran: false };
+  }
+
+  const localSource = ensureTrailingSlash(path.join(prep.repoRoot, '.git'));
+  const remoteDest = `${ensureTrailingSlash(prep.remoteSyncUrl)}.git/`;
+  const args = ['-az', '--delete', localSource, remoteDest];
+
+  const result = spawnSync('rsync', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false,
+  });
+  const code = result.status ?? 1;
+  if (code !== 0) {
+    const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`.git sync rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
     );
   }
   return { ran: true, exitCode: code };

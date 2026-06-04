@@ -84,6 +84,19 @@ returnFlow:
 
 Set `paths: []` to disable. Whitelisted patterns are also auto-added to the forward session's `sync.ignore.paths`, so a stale local snapshot will not overwrite the fresh remote one. Disable per-run with `BICA_RETURN_FLOW=0`. Requires `rsync` on PATH; if missing, bica prints a warning and skips the pull.
 
+### Git-dependent commands (`--changed`, `--since`)
+
+`.git` is excluded from the Mutagen sync, so the remote clone's git history/HEAD/refs do **not** match local. Commands that resolve files from the commit graph — `vitest --changed origin/master`, `jest --changed`, `turbo --filter=...[ref]` — therefore find nothing on the remote.
+
+Opt in with a top-level `git:` block:
+
+```yaml
+git:
+  sync: true
+```
+
+When enabled, `bica run` does a one-shot `rsync -az --delete` of local `.git` → remote right before the command, mirroring history/HEAD/refs exactly. Keep `.git` in `sync.ignore.paths` (this is a one-shot rsync, not a continuous Mutagen watch — avoids `index.lock` churn). Toggle per-run with `BICA_GIT_SYNC=1`/`0`. Requires `rsync` on PATH; if missing, bica warns and skips.
+
 ## Environment
 
 | Variable | Purpose |
@@ -95,6 +108,7 @@ Set `paths: []` to disable. Whitelisted patterns are also auto-added to the forw
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
 | `BICA_SYNC_FLUSH` | `1` = before `bica run`, run `mutagen sync flush` on the primary session so the **remote** finishes catching up to **local** (slower; use if you hit brief sync lag) |
 | `BICA_RETURN_FLOW` | `0` = disable the post-`bica run` rsync that pulls whitelisted artifacts (snapshots, etc.) **remote → local** (see "Return-flow" above) |
+| `BICA_GIT_SYNC` | `1`/`0` = enable/disable the pre-`bica run` rsync of `.git` **local → remote** (overrides `git.sync` in `bica.yml`; see "Git-dependent commands" above) |
 | `BICA_PLUGIN_MODE` | `auto` \| `explicit` |
 | `BICA_PACKAGE_MANAGER_PLUGINS` | Comma-separated ids |
 | `BICA_CREDENTIALS_PLUGINS` | Comma-separated ids |
