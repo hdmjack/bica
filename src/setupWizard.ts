@@ -44,6 +44,12 @@ const NODE_BICA_YML = `sync:
 #     - "**/__snapshots__/**"
 #     - "**/*.snap"
 
+# git.sync: rsync local .git → remote before each \`bica run\` so git-dependent commands
+# (e.g. \`vitest --changed\`, \`jest --changed\`) see the same history/HEAD/refs as local.
+# .git stays Mutagen-ignored above; this is a one-shot rsync, not a continuous watch.
+# git:
+#   sync: true
+
 bica:
   pluginMode: auto
 `;

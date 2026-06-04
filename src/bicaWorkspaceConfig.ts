@@ -9,12 +9,47 @@ const ENV_PLUGIN_MODE = 'BICA_PLUGIN_MODE';
 const ENV_PACKAGE_MANAGER_PLUGINS = 'BICA_PACKAGE_MANAGER_PLUGINS';
 const ENV_CREDENTIALS_PLUGINS = 'BICA_CREDENTIALS_PLUGINS';
 const ENV_REMOTE_SHELL_PLUGINS = 'BICA_REMOTE_SHELL_PLUGINS';
+const ENV_GIT_SYNC = 'BICA_GIT_SYNC';
 
 export interface BicaYamlSection {
   pluginMode?: string;
   packageManagerPlugins?: unknown;
   credentialsPlugins?: unknown;
   remoteShellPlugins?: unknown;
+}
+
+/**
+ * Read the top-level `git.sync` boolean from the workspace YAML.
+ * `git:` is a sibling of `bica:`, not nested inside it.
+ */
+function readGitSyncFromYaml(doc: unknown): boolean | undefined {
+  if (!isPlainObject(doc) || !('git' in doc)) {
+    return undefined;
+  }
+  const gitUnknown: unknown = doc.git;
+  if (!isPlainObject(gitUnknown) || !('sync' in gitUnknown)) {
+    return undefined;
+  }
+  const sync: unknown = gitUnknown.sync;
+  if (typeof sync !== 'boolean') {
+    throw new Error('git.sync must be a boolean (true/false)');
+  }
+  return sync;
+}
+
+/** Parse a boolean-ish env var: "1"/"true" → true, "0"/"false" → false, unset → undefined. */
+function parseBoolEnv(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const t = raw.trim().toLowerCase();
+  if (t === '1' || t === 'true') {
+    return true;
+  }
+  if (t === '0' || t === 'false' || t === '') {
+    return false;
+  }
+  return undefined;
 }
 
 function parsePluginMode(
@@ -111,6 +146,12 @@ export interface ResolvedBicaPluginConfig {
   packageManagerPluginIds: string[] | undefined;
   credentialsPluginIds: string[] | undefined;
   remoteShellPluginIds: string[] | undefined;
+  /**
+   * When true, `bica run` rsyncs the local `.git` directory to the remote before running the
+   * command so git-dependent commands (e.g. `vitest --changed`, `jest --changed`) see the same
+   * history/HEAD/refs as local. Defaults to false.
+   */
+  syncGit: boolean;
 }
 
 /**
@@ -153,10 +194,15 @@ export function resolveBicaPluginConfig(
   const envRemoteShell = parseIdListEnv(process.env[ENV_REMOTE_SHELL_PLUGINS]);
   const remoteShellPluginIds = envRemoteShell ?? yamlRemoteShell;
 
+  const yamlGitSync = readGitSyncFromYaml(doc);
+  const envGitSync = parseBoolEnv(process.env[ENV_GIT_SYNC]);
+  const syncGit = envGitSync ?? yamlGitSync ?? false;
+
   return {
     pluginMode,
     packageManagerPluginIds,
     credentialsPluginIds,
     remoteShellPluginIds,
+    syncGit,
   };
 }
