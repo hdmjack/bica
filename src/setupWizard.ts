@@ -37,12 +37,13 @@ const NODE_BICA_YML = `sync:
       - dist
 
 # returnFlow: rsync these patterns from remote→local after \`bica run\`. Default values cover
-# Jest/Vitest snapshots so tests run on the remote update the local repo. Set paths: [] to disable,
-# or list additional gitignore-style globs (e.g. "**/*.png" for visual snapshots).
+# Jest/Vitest snapshots and log files so artifacts from a remote run land locally. Set paths: [] to
+# disable, or list additional gitignore-style globs (e.g. "**/*.png" for visual snapshots).
 # returnFlow:
 #   paths:
 #     - "**/__snapshots__/**"
 #     - "**/*.snap"
+#     - "*.log"
 
 # git.sync: rsync local .git → remote before each \`bica run\` so git-dependent commands
 # (e.g. \`vitest --changed\`, \`jest --changed\`) see the same history/HEAD/refs as local.

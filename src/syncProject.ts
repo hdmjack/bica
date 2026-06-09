@@ -40,12 +40,15 @@ export interface SyncSpecYaml {
 }
 
 /**
- * Default return-flow whitelist (gitignore/rsync-filter globs). Test snapshot artifacts produced
- * on the remote should always flow back to the local repo.
+ * Default return-flow whitelist (gitignore/rsync-filter globs). Test snapshot artifacts and log
+ * files produced on the remote should always flow back to the local repo.
  */
 export const DEFAULT_RETURN_FLOW_PATHS: readonly string[] = [
   '**/__snapshots__/**',
   '**/*.snap',
+  // No leading **/ : rsync treats a slash-containing pattern as a full-path match (so **/*.log
+  // would skip root-level logs). A bare basename pattern matches *.log at any depth.
+  '*.log',
 ];
 
 export function findBicaSpecPath(repoRoot: string): {
