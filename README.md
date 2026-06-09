@@ -69,6 +69,7 @@ returnFlow:
   paths:
     - "**/__snapshots__/**"
     - "**/*.snap"
+    - "*.log"
 ```
 
 Add your own patterns (gitignore-style globs):
