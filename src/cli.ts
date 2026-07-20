@@ -26,7 +26,7 @@ import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
 import { pullReturnFlow, pushGitToRemote } from './lib/returnFlow';
 import { openRemoteInteractiveSsh } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
-import { dim, syncRemoteTarget, warn } from './terminalStyle';
+import { dim, remoteExitStatusLine, syncRemoteTarget, warn } from './terminalStyle';
 import {
   BUILTIN_CREDENTIALS_PLUGINS,
   BUILTIN_PACKAGE_MANAGER_PLUGINS,
@@ -337,7 +337,8 @@ async function cmdSsh(): Promise<void> {
   const repoRoot = getRepoRoot();
   const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
   const code = openRemoteInteractiveSsh(sshHost, remoteWorkspacePath);
-  process.exit(code);
+  // Set exitCode rather than process.exit() so any buffered stdout/stderr flushes before exit.
+  process.exitCode = code;
 }
 
 async function cmdRun(
@@ -354,18 +355,27 @@ async function cmdRun(
   const prep = prepareSyncProjectFile({ verbose: false });
   const { repoRoot, projectFilePath, sessionName, remoteSyncUrl } = prep;
 
+  // Captured (piped/redirected) output: suppress decorative `[bica]` chrome and the Mutagen
+  // teardown `\r` spinner so the stream is just the remote command's output + one status line.
+  const captured = !process.stdout.isTTY;
+  const chrome = (text: string): void => {
+    if (!captured) {
+      process.stderr.write(text);
+    }
+  };
+
   // Ephemeral session: terminate anything bound to this repo (any name / any beta), start fresh
   // from the current project file, run the command, pull return-flow, terminate. Guarantees the
   // running session's ignore config matches what bica.yml says right now.
   const stale = findAllSessionsForRepo(repoRoot);
   for (const s of stale) {
-    process.stderr.write(
+    chrome(
       `${warn('[bica]')} ${dim(`Terminating existing sync session ${s.name} for ${repoRoot} before fresh start.`)}\n`,
     );
     mutagenSyncTerminate(s.name);
   }
 
-  process.stderr.write(
+  chrome(
     `${dim('Starting one-way sync to')} ${syncRemoteTarget(remoteSyncUrl)}\n`,
   );
   if (!mutagenProjectStart(repoRoot, projectFilePath)) {
@@ -379,7 +389,7 @@ async function cmdRun(
       return;
     }
     cleanupDone = true;
-    mutagenProjectTerminate(repoRoot, projectFilePath);
+    mutagenProjectTerminate(repoRoot, projectFilePath, captured);
   };
   process.on('exit', cleanup);
 
@@ -408,12 +418,10 @@ async function cmdRun(
   // (e.g. `vitest --changed`, `jest --changed`) resolve the same history/HEAD/refs as local.
   // .git is intentionally Mutagen-ignored; this one-shot rsync avoids continuous index.lock churn.
   if (resolveBicaPluginConfig(repoRoot).syncGit) {
-    process.stderr.write(
-      `${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`,
-    );
+    chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     const gitPush = pushGitToRemote(prep);
     if (gitPush.ran && gitPush.exitCode === 0) {
-      process.stderr.write(`${dim('[bica]')} ${dim('.git sync done.')}\n`);
+      chrome(`${dim('[bica]')} ${dim('.git sync done.')}\n`);
     }
   }
 
@@ -429,25 +437,27 @@ async function cmdRun(
     // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
     // failed tests still produce snapshot diffs the user needs locally.
     if (prep.returnFlowPaths.length > 0) {
-      process.stderr.write(
+      chrome(
         `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
       );
     }
     const pull = pullReturnFlow(prep);
     if (pull.ran && pull.exitCode === 0) {
-      process.stderr.write(`${dim('[bica]')} ${dim('Return-flow pull done.')}\n`);
+      chrome(`${dim('[bica]')} ${dim('Return-flow pull done.')}\n`);
     }
   } finally {
     process.removeListener('SIGINT', onSigint);
-    process.stderr.write(
-      `${dim('[bica]')} ${dim('Stopping sync session…')}\n`,
-    );
+    chrome(`${dim('[bica]')} ${dim('Stopping sync session…')}\n`);
     cleanup();
     process.removeListener('exit', cleanup);
-    process.stderr.write(`${dim('[bica]')} ${dim('Sync session stopped.')}\n`);
+    chrome(`${dim('[bica]')} ${dim('Sync session stopped.')}\n`);
   }
 
-  process.exit(code);
+  // Always-print status line so silent-success commands are unambiguous; stderr so `2>/dev/null`
+  // still yields a clean command-output-only stream. Set exitCode (not process.exit) so piped
+  // stdout/stderr flushes before the event loop drains.
+  process.stderr.write(`${remoteExitStatusLine(code)}\n`);
+  process.exitCode = code;
 }
 
 async function main(): Promise<void> {
