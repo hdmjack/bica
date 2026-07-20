@@ -23,7 +23,11 @@ import {
   waitForSyncReady,
 } from './lib/mutagenSession';
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
-import { pullReturnFlow, pushGitToRemote } from './lib/returnFlow';
+import {
+  pullReturnFlow,
+  pushGitToRemote,
+  pushReturnFlowToRemote,
+} from './lib/returnFlow';
 import { openRemoteInteractiveSsh } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
 import { dim, remoteExitStatusLine, syncRemoteTarget, warn } from './terminalStyle';
@@ -422,6 +426,21 @@ async function cmdRun(
     const gitPush = pushGitToRemote(prep);
     if (gitPush.ran && gitPush.exitCode === 0) {
       chrome(`${dim('[bica]')} ${dim('.git sync done.')}\n`);
+    }
+  }
+
+  // Return-flow artifacts (snapshots, logs) are Mutagen-ignored, so the forward sync never
+  // refreshes them on the remote across a branch switch — the remote keeps the previous branch's
+  // snapshots, which then flow back locally. Mirror the current branch's artifacts onto the remote
+  // (local → remote, --delete) before the run so it starts clean and can't leak stale cross-branch
+  // snapshots back via return-flow.
+  if (prep.returnFlowPaths.length > 0) {
+    chrome(
+      `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
+    );
+    const rfPush = pushReturnFlowToRemote(prep);
+    if (rfPush.ran && rfPush.exitCode === 0) {
+      chrome(`${dim('[bica]')} ${dim('Return-flow remote refresh done.')}\n`);
     }
   }
 
