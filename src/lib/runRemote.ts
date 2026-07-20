@@ -441,6 +441,31 @@ function remoteLoginPreambleForRun(repoRoot: string): string {
 }
 
 /**
+ * Builds the `ssh` argv (sans the leading `ssh`) for a remote run.
+ *
+ * `interactive` gates PTY allocation: `-t` forces a PTY (color + `\r` spinners, for a real
+ * terminal); `-T` disables it so remote tools (tsc, pnpm, vitest) auto-detect non-interactive
+ * output and emit clean, line-buffered, color-free text — essential when bica's stdout is piped
+ * or redirected. Pure for testability.
+ */
+export function buildRunRemoteSshArgs(opts: {
+  interactive: boolean;
+  sshHost: string;
+  shell: string;
+  flags: string[];
+  remoteScript: string;
+}): string[] {
+  return [
+    ...sshKeepaliveOpts(),
+    opts.interactive ? '-t' : '-T',
+    opts.sshHost,
+    opts.shell,
+    ...opts.flags,
+    opts.remoteScript,
+  ];
+}
+
+/**
  * Runs a command on the remote via SSH.
  *
  * Defaults to `zsh -lc` so macOS picks up ~/.zprofile / ~/.zshrc (pnpm, nvm, Homebrew, etc.).
@@ -475,14 +500,16 @@ export function runRemoteCommand(
   const shell = loginShellFromEnv();
   const flags = loginFlagsFromEnv();
 
-  const sshArgs = [
-    ...sshKeepaliveOpts(),
-    '-t',
+  // Only force a PTY for a genuine interactive terminal. When piped/redirected, `-T` keeps
+  // remote tool output clean (no ANSI color, no `\r` spinners, line-buffered).
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const sshArgs = buildRunRemoteSshArgs({
+    interactive,
     sshHost,
     shell,
-    ...flags,
+    flags,
     remoteScript,
-  ];
+  });
   if (isBicaDebug()) {
     process.stderr.write(
       `[bica-debug] ssh ${sshArgs[0]} ${sshArgs[1]} ${shell} ${flags.join(' ')}\n${remoteScript}\n---\n`,

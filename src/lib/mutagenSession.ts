@@ -131,17 +131,26 @@ export function mutagenProjectStart(
 export function mutagenProjectTerminate(
   repoRoot: string,
   projectFileAbsolutePath: string,
+  quiet = false,
 ): boolean {
+  // Quiet mode (captured / non-TTY): pipe instead of inherit so Mutagen's `\r`-based
+  // "Terminating session …" progress line cannot clobber the last real output line.
   const result = spawnSync(
     'mutagen',
     ['project', 'terminate', '-f', projectFileAbsolutePath],
     {
       cwd: repoRoot,
-      stdio: 'inherit',
+      encoding: quiet ? 'utf8' : undefined,
+      stdio: quiet ? ['ignore', 'pipe', 'pipe'] : 'inherit',
       shell: false,
     },
   );
-  return result.status === 0;
+  const ok = result.status === 0;
+  // Surface stderr only on failure so quiet teardown stays silent on the happy path.
+  if (quiet && !ok && typeof result.stderr === 'string' && result.stderr.trim().length > 0) {
+    process.stderr.write(result.stderr);
+  }
+  return ok;
 }
 
 export function mutagenSyncList(): void {

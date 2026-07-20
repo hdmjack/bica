@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildRunRemoteSshArgs,
   pickRemoteHomeFromSshStdout,
   remotePathExprForCd,
   sanitizeRemotePosixAbsolutePath,
@@ -27,6 +28,39 @@ describe('shellSingleQuoteRemotePathForSh', () => {
     expect(shellSingleQuoteRemotePathForSh("/Users/x/a'b")).toBe(
       `'/Users/x/a'\\''b'`,
     );
+  });
+});
+
+describe('buildRunRemoteSshArgs', () => {
+  const base = {
+    sshHost: 'mini',
+    shell: 'zsh',
+    flags: ['-lc'],
+    remoteScript: 'cd "$HOME/code/foo" && pnpm typecheck',
+  };
+
+  it('forces a PTY (-t) for an interactive terminal', () => {
+    const argv = buildRunRemoteSshArgs({ ...base, interactive: true });
+    expect(argv).toContain('-t');
+    expect(argv).not.toContain('-T');
+  });
+
+  it('disables the PTY (-T) when output is captured', () => {
+    const argv = buildRunRemoteSshArgs({ ...base, interactive: false });
+    expect(argv).toContain('-T');
+    expect(argv).not.toContain('-t');
+  });
+
+  it('preserves host, shell, flags, and remote script order after the PTY flag', () => {
+    const argv = buildRunRemoteSshArgs({ ...base, interactive: false });
+    const ptyIdx = argv.indexOf('-T');
+    expect(argv.slice(ptyIdx)).toEqual([
+      '-T',
+      'mini',
+      'zsh',
+      '-lc',
+      'cd "$HOME/code/foo" && pnpm typecheck',
+    ]);
   });
 });
 

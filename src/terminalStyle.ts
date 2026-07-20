@@ -34,3 +34,12 @@ export function warn(text: string): string {
 export function syncRemoteTarget(text: string): string {
   return chalk.cyan(text);
 }
+
+/**
+ * One-line remote-command result, printed unconditionally after `bica run` so a silent-success
+ * command (e.g. `tsgo --build`) is unambiguous in captured output. Dim on success, warn otherwise.
+ */
+export function remoteExitStatusLine(code: number): string {
+  const msg = `[bica] remote command exited ${code}`;
+  return code === 0 ? dim(msg) : warn(msg);
+}
