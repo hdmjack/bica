@@ -4,13 +4,48 @@ import * as path from 'node:path';
 import { dim, warn } from '../terminalStyle';
 import type { PrepareResult } from '../syncProject';
 
-// Build the rsync filter-rule arguments that pull only the whitelisted patterns from remote→local.
-// The "+ <slash>" rule lets rsync descend into every directory so it can find matches; each
-// whitelist pattern becomes an include; the trailing "- *" excludes everything else; and
-// --prune-empty-dirs keeps rsync from materializing empty parent dirs on the local side.
-export function buildReturnFlowRsyncArgs(patterns: readonly string[]): string[] {
+/**
+ * Trees return-flow must never walk, on top of whatever the user ignores. `.git` is mirrored
+ * separately by {@link pushGitToRemote} and must not be reached through a `*.log`-style pattern.
+ */
+const ALWAYS_EXCLUDED_PATHS: readonly string[] = ['.git'];
+
+/**
+ * Turn the session's `sync.ignore.paths` into the set of paths return-flow excludes.
+ *
+ * Ignored trees are owned independently by each side — `node_modules` is installed on the remote,
+ * `dist` is built there — so they hold artifacts that match the return-flow whitelist (a dependency
+ * shipping `__snapshots__/*.snap`, a build log) but have no business crossing the wire. Without this
+ * the mirror drags remote-only files into the local tree and, with `--delete`, removes local-only
+ * ones. Mutagen negations (`!foo`) re-include a path in the *forward* sync and say nothing about
+ * return-flow ownership, so they are dropped rather than translated.
+ */
+export function buildReturnFlowExcludes(
+  syncIgnorePaths: readonly string[],
+): string[] {
+  const fromConfig = syncIgnorePaths
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0 && !p.startsWith('!'));
+  return Array.from(new Set([...ALWAYS_EXCLUDED_PATHS, ...fromConfig]));
+}
+
+// Build the rsync filter-rule arguments that transfer only the whitelisted patterns.
+// Excluded trees are ruled out first (first matching rule wins), so rsync never descends into them
+// and --delete never reaches inside them; the "+ <slash>" rule lets rsync descend into every
+// remaining directory so it can find matches; each whitelist pattern becomes an include; the
+// trailing "- *" excludes everything else; and --prune-empty-dirs keeps rsync from materializing
+// empty parent dirs on the receiving side.
+//
+// Note: a "P */" protect rule would look like a tidy way to keep --delete off receiver-side
+// directories, but protecting a directory protects everything under it, which switches off the
+// obsolete-snapshot pruning entirely. The exclude list is what keeps deletion in bounds.
+export function buildReturnFlowRsyncArgs(
+  patterns: readonly string[],
+  excludePaths: readonly string[] = [],
+): string[] {
   return [
     '--prune-empty-dirs',
+    ...excludePaths.map((p) => `--filter=- ${p}`),
     '--filter=+ */',
     ...patterns.map((p) => `--filter=+ ${p}`),
     '--filter=- *',
@@ -19,21 +54,22 @@ export function buildReturnFlowRsyncArgs(patterns: readonly string[]): string[] 
 
 /**
  * Full rsync argv (sans the leading `rsync`) to *mirror* the return-flow patterns from `source`
- * to `dest`. `--delete` is scoped to the whitelisted patterns: the trailing `--filter=- *`
- * protects every non-matching file from both transfer and deletion, so only files matching a
- * return-flow pattern that exist on the receiver but not the sender get removed. Used for both the
- * pre-run push (local→remote) and the post-run pull (remote→local) so each side becomes an exact
- * mirror of the other for the whitelisted artifacts. Pure, for testability.
+ * to `dest`, skipping `excludePaths`. `--delete` is scoped to the whitelisted patterns: the trailing
+ * `--filter=- *` protects every non-matching file from both transfer and deletion, so only files
+ * matching a return-flow pattern that exist on the receiver but not the sender get removed. Used for
+ * both the pre-run push (local→remote) and the post-run pull (remote→local) so each side becomes an
+ * exact mirror of the other for the whitelisted artifacts. Pure, for testability.
  */
 export function buildReturnFlowMirrorArgs(
   patterns: readonly string[],
   source: string,
   dest: string,
+  excludePaths: readonly string[] = [],
 ): string[] {
   return [
     '-az',
     '--delete',
-    ...buildReturnFlowRsyncArgs(patterns),
+    ...buildReturnFlowRsyncArgs(patterns, excludePaths),
     source,
     dest,
   ];
@@ -92,6 +128,7 @@ export function pullReturnFlow(prep: PrepareResult): PullResult {
     prep.returnFlowPaths,
     remoteSource,
     localDest,
+    buildReturnFlowExcludes(prep.syncIgnorePaths),
   );
 
   const result = spawnSync('rsync', args, {
@@ -142,6 +179,7 @@ export function pushReturnFlowToRemote(prep: PrepareResult): PullResult {
     prep.returnFlowPaths,
     localSource,
     remoteDest,
+    buildReturnFlowExcludes(prep.syncIgnorePaths),
   );
 
   const result = spawnSync('rsync', args, {
