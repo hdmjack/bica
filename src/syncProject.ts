@@ -37,6 +37,12 @@ export interface SyncSpecYaml {
   };
   /** Return-flow patterns: files that should rsync remote→local after `bica run`. */
   returnFlow?: { paths: string[] };
+  /**
+   * The user's configured `sync.ignore.paths`, *before* the return-flow patterns are merged in.
+   * These name trees each side owns independently (node_modules, dist, …); return-flow must not
+   * mirror artifacts across them in either direction.
+   */
+  syncIgnorePaths: string[];
 }
 
 /**
@@ -189,6 +195,7 @@ export function normalizeToSyncSpecYaml(
         [sessionName]: applyReturnFlowToSession(session, returnFlow.paths),
       },
       returnFlow,
+      syncIgnorePaths: [...(session.ignore?.paths ?? [])],
     };
   }
 
@@ -219,6 +226,7 @@ export function normalizeToSyncSpecYaml(
       ),
     },
     returnFlow,
+    syncIgnorePaths: [...(ignore?.paths ?? [])],
   };
 }
 
@@ -357,6 +365,11 @@ export interface PrepareResult {
   remoteSyncUrl: string;
   /** Glob patterns to rsync remote→local after `bica run`. Empty list = disabled. */
   returnFlowPaths: string[];
+  /**
+   * `sync.ignore.paths` as configured by the user (return-flow patterns not merged in). Trees each
+   * side owns on its own — return-flow excludes them so it never mirrors artifacts across them.
+   */
+  syncIgnorePaths: string[];
   config: RemoteEnvConfig;
 }
 
@@ -424,6 +437,7 @@ export function prepareSyncProjectFile(options: {
     sessionName,
     remoteSyncUrl,
     returnFlowPaths: doc.returnFlow?.paths ?? [],
+    syncIgnorePaths: doc.syncIgnorePaths,
     config,
   };
 }

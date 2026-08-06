@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildReturnFlowExcludes,
   buildReturnFlowMirrorArgs,
   buildReturnFlowRsyncArgs,
 } from './returnFlow';
@@ -28,6 +29,51 @@ describe('buildReturnFlowRsyncArgs', () => {
       '--filter=- *',
     ]);
   });
+
+  it('rules out excluded trees before anything else so rsync never descends into them', () => {
+    const args = buildReturnFlowRsyncArgs(
+      ['**/*.snap'],
+      ['.git', 'node_modules', 'dist'],
+    );
+    expect(args).toEqual([
+      '--prune-empty-dirs',
+      '--filter=- .git',
+      '--filter=- node_modules',
+      '--filter=- dist',
+      '--filter=+ */',
+      '--filter=+ **/*.snap',
+      '--filter=- *',
+    ]);
+    // First matching rule wins: the excludes must precede the descend-everywhere include.
+    expect(args.indexOf('--filter=- node_modules')).toBeLessThan(
+      args.indexOf('--filter=+ */'),
+    );
+  });
+});
+
+describe('buildReturnFlowExcludes', () => {
+  it('always excludes .git, which is mirrored separately', () => {
+    expect(buildReturnFlowExcludes([])).toEqual(['.git']);
+  });
+
+  it('excludes the trees each side owns independently', () => {
+    expect(
+      buildReturnFlowExcludes(['node_modules', 'dist', '.playwright-mcp']),
+    ).toEqual(['.git', 'node_modules', 'dist', '.playwright-mcp']);
+  });
+
+  it('does not repeat .git when the config also ignores it', () => {
+    expect(buildReturnFlowExcludes(['.git', 'node_modules'])).toEqual([
+      '.git',
+      'node_modules',
+    ]);
+  });
+
+  it('drops blanks and Mutagen negations, which say nothing about return-flow ownership', () => {
+    expect(
+      buildReturnFlowExcludes(['  node_modules  ', '', '!dist/keep']),
+    ).toEqual(['.git', 'node_modules']);
+  });
 });
 
 describe('buildReturnFlowMirrorArgs', () => {
@@ -50,6 +96,21 @@ describe('buildReturnFlowMirrorArgs', () => {
       'mini:~/code/foo/',
       '/local/foo/',
     ]);
+  });
+
+  it('passes excluded trees through, keeping --delete out of them entirely', () => {
+    const args = buildReturnFlowMirrorArgs(
+      patterns,
+      'mini:~/code/foo/',
+      '/local/foo/',
+      ['.git', 'node_modules'],
+    );
+    // Excluded paths are protected from deletion as well as transfer, so a dependency's own
+    // snapshots never cross the wire and local-only ignored trees are left alone.
+    expect(args).toContain('--filter=- node_modules');
+    expect(args.indexOf('--filter=- node_modules')).toBeLessThan(
+      args.indexOf('--filter=+ */'),
+    );
   });
 
   it('places --delete before the trailing exclude so non-matching files stay protected', () => {
