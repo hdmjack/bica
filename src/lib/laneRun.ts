@@ -24,6 +24,15 @@ import {
 } from './lanes';
 import { shortOid } from './contentIdentity';
 import {
+  claimIsStale,
+  claimPathExpr,
+  describeClaim,
+  describeSelfAsOwner,
+  remoteAcquireClaim,
+  remoteBreakClaim,
+  remoteReleaseClaim,
+} from './remoteClaim';
+import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
 } from './runRemote';
@@ -234,6 +243,51 @@ async function runPinnedLaneRunFrom(
     return dirReady.code;
   }
 
+  // The lease is taken here, *before* the rsync, because the rsync is what destroys another run's
+  // work. Claiming after it would let this run overwrite a live run's files and only then discover the
+  // conflict -- which is exactly what happened: the victim exited 97 and the thief exited 0.
+  const owner = describeSelfAsOwner(
+    resolvedRef === undefined
+      ? `${lane.label}-${String(process.pid)}`
+      : `${shortOid(resolvedRef.treeOid)}-${String(process.pid)}`,
+  );
+  let claim = remoteAcquireClaim(
+    prep.config.sshHost,
+    prep.config.remoteWorkspacePath,
+    owner,
+  );
+  if (!claim.ok && claimIsStale(claim.heldBy, isProcessAlive)) {
+    // The holder is gone. Break exactly the claim we inspected and try once more.
+    if (claim.heldBy !== null) {
+      remoteBreakClaim(prep.config.sshHost, prep.config.remoteWorkspacePath, claim.heldBy);
+    }
+    claim = remoteAcquireClaim(
+      prep.config.sshHost,
+      prep.config.remoteWorkspacePath,
+      owner,
+    );
+  }
+  if (!claim.ok) {
+    process.stderr.write(
+      `${warn('[bica]')} ${prep.remoteSyncUrl} is in use by ${describeClaim(claim)}. ` +
+        'Refusing to run: syncing into it would overwrite that run\'s files, and neither result would ' +
+        'then be trustworthy. Use a different lane, or wait for it to finish.\n',
+    );
+    return REMOTE_CONTENT_MISMATCH_EXIT;
+  }
+  const claimExpr = claimPathExpr(prep.config.remoteWorkspacePath);
+  // Released on every path below. A hard kill still strands it, but that is recoverable without a
+  // clock: the claim names this machine and this pid, so the next run finds the owner gone and breaks it.
+  const releaseClaim = (): void => {
+    remoteReleaseClaim(prep.config.sshHost, prep.config.remoteWorkspacePath, owner);
+  };
+  try {
+    return await runLeasedCommand();
+  } finally {
+    releaseClaim();
+  }
+
+  async function runLeasedCommand(): Promise<number> {
   const sourceLabel =
     resolvedRef === undefined
       ? 'working tree'
@@ -262,14 +316,7 @@ async function runPinnedLaneRunFrom(
     }
     return 1;
   }
-  // A run id that names the content *and* this process. The content half makes a wrong workspace
-  // detectable; the pid half makes two runs on the same content distinguishable.
-  const contentOid = push.treeOidBefore;
-  // The run's own remote script writes and re-checks this, so no extra ssh round-trip is needed.
-  const runId =
-    contentOid === undefined
-      ? undefined
-      : `${shortOid(contentOid)}-${String(process.pid)}`;
+  const runId = owner.runId;
 
   // The tree (and so `mise.toml`) is on the remote now, which is what `mise trust` needs to see.
   if (dirReady.created) {
@@ -303,16 +350,13 @@ async function runPinnedLaneRunFrom(
     pmOverride: options.pmOverride,
     confirm: options.confirm,
     assertRunId: runId,
+    claimPathExpr: claimExpr,
   });
 
   // 255 is ambiguous: ssh uses it for its own transport failures, and a command may legitimately exit
   // 255. The recorded exit code settles which it was, as a fact rather than a guess.
   if (code === 255 && runId !== undefined) {
-    const recorded = remoteReadRecordedExit(
-      prep.config.sshHost,
-      prep.config.remoteWorkspacePath,
-      runId,
-    );
+    const recorded = remoteReadRecordedExit(prep.config.sshHost, claimExpr, runId);
     if (recorded.mine && recorded.exitCode === 255) {
       process.stderr.write(
         `${warn('[bica]')} ${dim('The remote command really did exit 255 — confirmed from the exit code it recorded — so this is a command failure, not a dropped connection.')}\n`,
@@ -364,4 +408,5 @@ async function runPinnedLaneRunFrom(
   }
 
   return code;
+  }
 }

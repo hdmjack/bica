@@ -256,7 +256,39 @@ export function tryResolveRemoteWorkspaceAbsolutePath(
 /**
  * argv for `ssh -T host <shell> … -c <script>` without sourcing login rc (quiet probe / mkdir).
  */
-function buildRemoteProbeSshArgv(sshHost: string, script: string): string[] {
+/**
+ * Run a script on the remote by feeding it to the shell on **stdin**.
+ *
+ * The argv form (`ssh host zsh -f -c <script>`) cannot carry a multi-line script. ssh joins its
+ * arguments with spaces into one string and the remote *login* shell parses that before anything else
+ * sees it, so `zsh -f -c` receives only the first word and the remaining lines are executed by the
+ * login shell instead. Single-line probes happened to survive; multi-line ones silently did not, which
+ * is why `mise trust` never actually ran.
+ *
+ * stdin sidesteps the whole problem: nothing re-parses the script, so no quoting scheme is needed.
+ */
+export function runRemoteScriptOverStdin(
+  sshHost: string,
+  script: string,
+): { status: number; stdout: string; stderr: string } {
+  const shell = loginShellFromEnv();
+  const runner = shell.includes('bash')
+    ? [shell, '--noprofile', '--norc', '-s']
+    : [shell, '-f', '-s'];
+  const result = spawnSync('ssh', ['-T', sshHost, ...runner], {
+    input: script,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: false,
+  });
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
+}
+
+export function buildRemoteProbeSshArgv(sshHost: string, script: string): string[] {
   const shell = loginShellFromEnv();
   let runner: string[];
   if (shell.includes('bash') || path.basename(shell) === 'bash') {
@@ -423,63 +455,40 @@ export function remoteRemoveLaneDirectory(
   return { ok: false, reason: 'no usable rm on the remote host' };
 }
 
-/**
- * One file in the remote workspace, doing two jobs: naming the content this run put there, and
- * recording the command's exit code.
- *
- * It began as two files plus a dedicated ssh round-trip to write the first. One file is enough, and the
- * run's own script can write it, so there is no extra connection either. Contents are `<run-id>` while
- * the command runs, then `<run-id> <exit-code>` once it finishes.
- *
- * Checking it *after* the command rather than before is also strictly better. Beforehand it could only
- * confirm what the rsync had just established anyway; afterwards it catches a concurrent run that
- * overwrote this workspace part-way through — the case that would otherwise report another run's files
- * as this run's result.
- *
- * This is what demotes the lane lock from a correctness mechanism to a scheduling one: if the lock ever
- * fails, as it did, the result is a loud mismatch rather than a confident wrong answer.
- */
-const REMOTE_RUN_FILE = '.bica-run';
-
 /** Exit code the remote uses when another run took the workspace while this one was executing. */
 export const REMOTE_CONTENT_MISMATCH_EXIT = 97;
 
 export interface RecordedRemoteExit {
   /** Exit code the command recorded, when it got as far as recording one. */
   exitCode: number | null;
-  /** Whether the recorded run id is the one that asked. */
+  /** Whether the recording belongs to the run that asked. */
   mine: boolean;
 }
 
 /**
- * Read what the remote recorded for a run.
+ * Read the exit code a run recorded into its claim file.
  *
- * Consulted only when ssh itself reports 255, which is ambiguous: it is both ssh's own code for a
+ * The claim doubles as the record so there is one file rather than two: `<runid> <host> <pid>` while
+ * the command runs, with the exit code appended as a fourth field once it finishes.
+ *
+ * Consulted only when ssh itself reports 255, which is ambiguous — it is both ssh's own code for a
  * dropped connection and a legitimate exit code a command may choose. The recording settles it as a
- * fact — the command writes it as its last act, so its absence proves the connection died first.
+ * fact, because the command writes it as its last act; its absence proves the connection died first.
  */
 export function remoteReadRecordedExit(
   sshHost: string,
-  remoteWorkspacePath: string,
+  claimPath: string,
   runId: string,
 ): RecordedRemoteExit {
-  const dir = remotePathExprForCd(remoteWorkspacePath);
-  const script = `cd ${dir} 2>/dev/null || exit 1\ncat ${REMOTE_RUN_FILE} 2>/dev/null\n`;
-  const argv = buildRemoteProbeSshArgv(sshHost, script);
-  const result = spawnSync(argv[0], argv.slice(1), {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: false,
-  });
-  if ((result.status ?? 1) !== 0) {
+  const result = runRemoteScriptOverStdin(sshHost, `cat ${claimPath} 2>/dev/null\n`);
+  if (result.status !== 0) {
     return { exitCode: null, mine: false };
   }
-  const [recordedId, recordedExit] = (result.stdout ?? '').trim().split(/\s+/);
-  const parsed = Number(recordedExit);
+  const fields = result.stdout.trim().split(/\s+/);
+  const parsed = Number(fields[3]);
   return {
-    exitCode:
-      recordedExit !== undefined && Number.isInteger(parsed) ? parsed : null,
-    mine: recordedId === runId,
+    exitCode: fields[3] !== undefined && Number.isInteger(parsed) ? parsed : null,
+    mine: fields[0] === runId,
   };
 }
 
@@ -511,15 +520,7 @@ export function remoteTrustMiseWorkspace(
   sshHost: string,
   remoteWorkspacePath: string,
 ): void {
-  const argv = buildRemoteProbeSshArgv(
-    sshHost,
-    buildMiseTrustScript(remoteWorkspacePath),
-  );
-  spawnSync(argv[0], argv.slice(1), {
-    encoding: 'utf8',
-    stdio: ['ignore', 'ignore', 'ignore'],
-    shell: false,
-  });
+  runRemoteScriptOverStdin(sshHost, buildMiseTrustScript(remoteWorkspacePath));
 }
 
 /**
@@ -625,11 +626,11 @@ export const REMOTE_CD_FAILED_EXIT = 96;
  * Written as statements rather than `cd && command` so the exit code can be captured *after* the
  * command without changing anything the command itself observes.
  *
- * With a `runId`, the script claims the workspace before running and re-checks the claim afterwards.
- * The re-check is the load-bearing half: it catches a concurrent run that replaced this workspace
- * part-way through, which is the only way a run could otherwise report another run's files as its own
- * result. Checking beforehand would add nothing, since the rsync immediately before already put this
- * run's content there.
+ * The lease is taken before the rsync and lives outside the workspace — see `remoteClaim.ts` for why
+ * both of those matter. What happens here is the other half: confirm the lease is still ours once the
+ * command has finished, and record the exit code into it. The end-of-run check is what catches a run
+ * that took the workspace after this one had already started, and without it that theft is reported as
+ * this run's own result.
  */
 export function buildRemoteRunScript(options: {
   preamble: string;
@@ -638,50 +639,25 @@ export function buildRemoteRunScript(options: {
   /** POSIX-quoted user command. */
   command: string;
   runId: string | undefined;
+  /** Shell expression for the claim file, when this run holds a lease. */
+  claimPathExpr?: string;
 }): string {
-  const { runId } = options;
+  const { runId, claimPathExpr } = options;
+  const leased = runId !== undefined && claimPathExpr !== undefined;
   const q = runId === undefined ? '' : shellSingleQuoteRemotePathForSh(runId);
-  // Claim the workspace, refusing it if a *different* run is already using it.
-  //
-  // The local lane lock cannot cover this. It lives in one checkout's `.bica/locks`, but the resource
-  // actually being contended is a directory on the remote host, and several clones on this machine can
-  // resolve to the same one. A lock in `float-javascript-5` says nothing about what a run launched from
-  // `float-javascript` is doing to the same remote path. Letting the workspace hold its own claim makes
-  // exclusion a property of the contended resource itself, so it holds across checkouts and machines
-  // without any shared local state.
-  //
-  // `set -C` makes the create atomic: it fails rather than truncating if the file exists. A marker with
-  // two fields is a finished run's record and is free to take; one field is a run still in progress.
-  const claim =
-    runId === undefined
-      ? ''
-      : shBlock(
-          `if ( set -C; printf '%s' ${q} > ${REMOTE_RUN_FILE} ) 2>/dev/null; then`,
-          '  :',
-          'else',
-          `  _bica_cur=$(cat ${REMOTE_RUN_FILE} 2>/dev/null)`,
-          '  case "$_bica_cur" in',
-          `    ${q}) : ;;`,
-          `    *' '*) printf '%s' ${q} > ${REMOTE_RUN_FILE} 2>/dev/null || true ;;`,
-          '    *)',
-          '      echo "[bica] This remote workspace is already in use by run $_bica_cur. Refusing to run: two runs sharing one workspace cannot both report a trustworthy result." >&2',
-          `      exit ${String(REMOTE_CONTENT_MISMATCH_EXIT)} ;;`,
-          '  esac',
-          'fi',
-        );
-  const verify =
-    runId === undefined
-      ? ''
-      : shBlock(
-          `if [ "$(cat ${REMOTE_RUN_FILE} 2>/dev/null)" != ${q} ]; then`,
-          '  echo "[bica] Another run took this workspace while this command was executing; discarding the result." >&2',
-          `  exit ${String(REMOTE_CONTENT_MISMATCH_EXIT)}`,
-          'fi',
-          `printf '%s %s' ${q} "$_bica_ec" > ${REMOTE_RUN_FILE} 2>/dev/null || true`,
-        );
+  const verify = !leased
+    ? ''
+    : shBlock(
+        `_bica_held=$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)`,
+        `if [ "$_bica_held" != ${q} ]; then`,
+        '  echo "[bica] Another run took this workspace while this command was executing; discarding the result." >&2',
+        `  exit ${String(REMOTE_CONTENT_MISMATCH_EXIT)}`,
+        'fi',
+        `printf '%s %s' "$(cat ${claimPathExpr})" "$_bica_ec" > ${claimPathExpr} 2>/dev/null || true`,
+      );
   return (
     `${options.preamble}${options.cdExpr} || exit ${String(REMOTE_CD_FAILED_EXIT)}\n` +
-    `${claim}${options.command}\n` +
+    `${options.command}\n` +
     shBlock('_bica_ec=$?') +
     verify +
     shBlock('exit "$_bica_ec"')
@@ -700,11 +676,10 @@ export function runRemoteCommand(
   command: string,
   repoRoot: string,
   options?: {
-    /**
-     * Refuse to run unless the workspace's marker matches this run id. Set for lane runs, where a
-     * mismatch means the workspace holds another run's content.
-     */
+    /** Run id of the lease this run holds, for the end-of-run confirmation. */
     assertRunId?: string;
+    /** Shell expression for that lease's file. */
+    claimPathExpr?: string;
   },
 ): number {
   const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
@@ -730,6 +705,7 @@ export function runRemoteCommand(
     cdExpr: cd,
     command,
     runId: options?.assertRunId,
+    claimPathExpr: options?.claimPathExpr,
   });
 
   const shell = loginShellFromEnv();
