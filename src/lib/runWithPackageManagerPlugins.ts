@@ -148,8 +148,10 @@ export async function runRemoteCommandWithPmHooks(options: {
   autoYes: boolean;
   pmOverride: string | undefined;
   confirm: ConfirmFn;
-  /** Lane runs pass a content-derived run id; the remote refuses to run unless its marker matches. */
+  /** Run id of the lease this run holds; the remote confirms it still holds it after the command. */
   assertRunId?: string;
+  /** Shell expression for that lease's file on the remote. */
+  claimPathExpr?: string;
 }): Promise<number> {
   const { prep, remoteArgv, autoYes, pmOverride, confirm: confirmFn } = options;
   const { repoRoot, config } = prep;
@@ -195,7 +197,7 @@ export async function runRemoteCommandWithPmHooks(options: {
           config.remoteWorkspacePath,
           plugin.remoteInstallCommand,
           repoRoot,
-          { assertRunId: options.assertRunId },
+          { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
         ),
       );
       if (installCode !== 0) {
@@ -214,7 +216,7 @@ export async function runRemoteCommandWithPmHooks(options: {
     config.remoteWorkspacePath,
     cmdStr,
     repoRoot,
-    { assertRunId: options.assertRunId },
+    { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
   );
 
   if (plugin) {
