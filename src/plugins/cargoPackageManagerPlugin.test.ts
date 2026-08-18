@@ -5,6 +5,16 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { cargoPackageManagerPlugin as plugin } from './cargoPackageManagerPlugin';
+import type { PackageManagerStateContext } from './types';
+
+/** Fingerprint storage for the default lane, which is where these tests write. */
+function stateCtx(repoRoot: string): PackageManagerStateContext {
+  return {
+    repoRoot,
+    stateDir: path.join(repoRoot, '.bica'),
+    isDefaultLane: true,
+  };
+}
 
 describe('cargoPackageManagerPlugin', () => {
   let dir: string;
@@ -35,7 +45,7 @@ describe('cargoPackageManagerPlugin', () => {
   it('fingerprints Cargo.lock and round-trips the stored hash', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-cargo-'));
     expect(plugin.readLocalFingerprint(dir)).toBeNull();
-    expect(plugin.readStoredHash(dir)).toBeNull();
+    expect(plugin.readStoredHash(stateCtx(dir))).toBeNull();
 
     fs.writeFileSync(path.join(dir, 'Cargo.lock'), 'version = 4\n', 'utf8');
     const expected = crypto
@@ -45,8 +55,8 @@ describe('cargoPackageManagerPlugin', () => {
     const local = plugin.readLocalFingerprint(dir);
     expect(local).toBe(expected);
 
-    plugin.writeStoredHash(dir, local as string);
-    expect(plugin.readStoredHash(dir)).toBe(local);
+    plugin.writeStoredHash(stateCtx(dir), local as string);
+    expect(plugin.readStoredHash(stateCtx(dir))).toBe(local);
     expect(fs.existsSync(path.join(dir, '.bica', 'hashes', 'cargo-fetch'))).toBe(
       true,
     );

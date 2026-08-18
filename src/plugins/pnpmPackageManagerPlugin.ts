@@ -2,11 +2,16 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import type { AutoDiscoverContext, PackageManagerPlugin } from './types';
+import type {
+  AutoDiscoverContext,
+  PackageManagerPlugin,
+  PackageManagerStateContext,
+} from './types';
 
 const LOCKFILE = 'pnpm-lock.yaml';
 
-const PNPM_INSTALL_HASH_RELATIVE = path.join('.bica', 'hashes', 'pnpm-install');
+/** Relative to the lane's state dir, so `.bica/hashes/…` for the default run. */
+const PNPM_INSTALL_HASH_RELATIVE = path.join('hashes', 'pnpm-install');
 
 /** Legacy single hash file from pre–Phase B (migrate read-only). */
 const LEGACY_REMOTE_INSTALL_HASH = path.join('.mutagen', 'remote-install-hash');
@@ -78,12 +83,12 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
   } {
     return evaluatePnpmDiscovery(ctx);
   },
-  installHashRelativePath: PNPM_INSTALL_HASH_RELATIVE,
+  installHashStateRelativePath: PNPM_INSTALL_HASH_RELATIVE,
   readLocalFingerprint(repoRoot: string): string | null {
     return digestFile(repoRoot, LOCKFILE);
   },
-  readStoredHash(repoRoot: string): string | null {
-    const p = path.join(repoRoot, PNPM_INSTALL_HASH_RELATIVE);
+  readStoredHash(ctx: PackageManagerStateContext): string | null {
+    const p = path.join(ctx.stateDir, PNPM_INSTALL_HASH_RELATIVE);
     try {
       const t = fs.readFileSync(p, 'utf8').trim();
       if (t.length > 0) {
@@ -92,16 +97,21 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
     } catch {
       // fall through to legacy path
     }
+    // The legacy file predates lanes and describes the base workspace only. Reading it for a lane
+    // would claim a never-installed lane is up to date.
+    if (!ctx.isDefaultLane) {
+      return null;
+    }
     try {
-      const legacyPath = path.join(repoRoot, LEGACY_REMOTE_INSTALL_HASH);
+      const legacyPath = path.join(ctx.repoRoot, LEGACY_REMOTE_INSTALL_HASH);
       const t = fs.readFileSync(legacyPath, 'utf8').trim();
       return t.length > 0 ? t : null;
     } catch {
       return null;
     }
   },
-  writeStoredHash(repoRoot: string, digest: string): void {
-    const p = path.join(repoRoot, PNPM_INSTALL_HASH_RELATIVE);
+  writeStoredHash(ctx: PackageManagerStateContext, digest: string): void {
+    const p = path.join(ctx.stateDir, PNPM_INSTALL_HASH_RELATIVE);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, `${digest}\n`, 'utf8');
   },

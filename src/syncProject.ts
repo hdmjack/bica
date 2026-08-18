@@ -4,7 +4,13 @@ import * as path from 'node:path';
 import { isPlainObject } from 'es-toolkit';
 import YAML from 'yaml';
 
+import {
+  defaultLaneIdentity,
+  laneRemoteWorkspacePath,
+  laneSessionName,
+} from './lib/lanes';
 import { readLocalBicaSettings } from './localBicaSettings';
+import type { LaneIdentity } from './lib/lanes';
 import type { LocalBicaSettings } from './localBicaSettings';
 
 /** Preferred single-file workspace spec (sync + optional bica:). */
@@ -360,7 +366,10 @@ export function loadRemoteEnvConfig(repoRoot: string): RemoteEnvConfig {
 export interface PrepareResult {
   repoRoot: string;
   projectFilePath: string;
+  /** Session name including the lane suffix, so concurrent lanes never share a session identity. */
   sessionName: string;
+  /** Which lane this run owns. Default lane = the historical single-workspace identity. */
+  lane: LaneIdentity;
   /** Remote sync target: `sshHost:remotePath`. */
   remoteSyncUrl: string;
   /** Glob patterns to rsync remote→local after `bica run`. Empty list = disabled. */
@@ -375,38 +384,53 @@ export interface PrepareResult {
 
 /**
  * Writes the sync project file with local root and remote target.
+ *
+ * `options.lane` scopes the whole result to one lane: the remote workspace gets the lane suffix, the
+ * session is named after it, and the project file is written under the lane's own state directory.
+ * Omitting it yields the default lane, which is byte-for-byte the historical behaviour.
  */
 export function prepareSyncProjectFile(options: {
   verbose?: boolean;
+  lane?: LaneIdentity;
 }): PrepareResult {
   const verbose = Boolean(options.verbose);
   const repoRoot = getRepoRoot();
+  const lane = options.lane ?? defaultLaneIdentity(repoRoot);
   const { absolutePath: sourcePath, displayName } =
     resolveSyncSpecPath(repoRoot);
-  const config = loadRemoteEnvConfig(repoRoot);
+  const baseConfig = loadRemoteEnvConfig(repoRoot);
+  const config: RemoteEnvConfig = {
+    ...baseConfig,
+    remoteWorkspacePath: laneRemoteWorkspacePath(
+      baseConfig.remoteWorkspacePath,
+      lane,
+    ),
+  };
   const remoteSyncUrl = `${config.sshHost}:${config.remoteWorkspacePath}`;
 
   const raw = fs.readFileSync(sourcePath, 'utf8');
   const docUnknown: unknown = YAML.parse(raw);
   const doc = normalizeToSyncSpecYaml(docUnknown, repoRoot, displayName);
 
-  const sessionName = getPrimarySessionName(doc, displayName);
+  const specSessionName = getPrimarySessionName(doc, displayName);
   const sessionUnknown: unknown = Object.getOwnPropertyDescriptor(
     doc.sync,
-    sessionName,
+    specSessionName,
   )?.value;
   if (sessionUnknown === undefined) {
-    throw new Error(`Invalid ${displayName}: missing sync.${sessionName}.`);
+    throw new Error(`Invalid ${displayName}: missing sync.${specSessionName}.`);
   }
   if (typeof sessionUnknown !== 'object' || sessionUnknown === null) {
     throw new Error(
-      `Invalid ${displayName}: sync.${sessionName} must be an object.`,
+      `Invalid ${displayName}: sync.${specSessionName} must be an object.`,
     );
   }
   const session = sessionUnknown as WorkspaceSyncSession;
+  const sessionName = laneSessionName(specSessionName, lane);
 
+  // Only the lane's own session goes in the file: spreading `doc.sync` would re-emit the
+  // unsuffixed session and have every lane's project file claim the same base session name.
   const mergedSync: SyncSpecYaml['sync'] = {
-    ...doc.sync,
     [sessionName]: {
       ...session,
       // Mutagen requires these key names: local root and remote URL.
@@ -415,9 +439,10 @@ export function prepareSyncProjectFile(options: {
     },
   };
 
-  const outDir = path.join(repoRoot, '.bica');
-  fs.mkdirSync(outDir, { recursive: true });
-  const projectFilePath = path.join(repoRoot, MUTAGEN_PROJECT_RELATIVE);
+  const projectFilePath = lane.isDefault
+    ? path.join(repoRoot, MUTAGEN_PROJECT_RELATIVE)
+    : path.join(lane.stateDir, 'project.yml');
+  fs.mkdirSync(path.dirname(projectFilePath), { recursive: true });
   const mutagenDoc = { sync: mergedSync };
   fs.writeFileSync(
     projectFilePath,
@@ -429,12 +454,16 @@ export function prepareSyncProjectFile(options: {
     console.log('Wrote sync project file.');
     console.log(`  local:  ${repoRoot}`);
     console.log(`  remote: ${remoteSyncUrl}`);
+    if (!lane.isDefault) {
+      console.log(`  lane:   ${lane.label}`);
+    }
   }
 
   return {
     repoRoot,
     projectFilePath,
     sessionName,
+    lane,
     remoteSyncUrl,
     returnFlowPaths: doc.returnFlow?.paths ?? [],
     syncIgnorePaths: doc.syncIgnorePaths,

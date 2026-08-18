@@ -9,8 +9,16 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
+import { NO_LANE, resolveBicaPluginConfig } from './bicaWorkspaceConfig';
+import { parseArgs } from './cliArgs';
+import {
+  cmdLanesClean,
+  cmdLanesList,
+  cmdLanesPrepare,
+} from './laneCommands';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
+import { acquireLaneForRun, runPinnedLaneRun } from './lib/laneRun';
+import { isLaneRemotePath } from './lib/lanes';
 import {
   assertMutagenInstalled,
   findAllSessionsForRepo,
@@ -50,6 +58,8 @@ import {
   prepareSyncProjectFile,
   readPrimarySessionNameFromSpec,
 } from './syncProject';
+import type { ParsedGlobals } from './cliArgs';
+import type { PrepareResult } from './syncProject';
 
 /** Commands that require bica.yml (or legacy bica-workspace.yml) at the Git root. */
 const COMMANDS_NEEDING_BICA_SPEC = new Set([
@@ -61,40 +71,8 @@ const COMMANDS_NEEDING_BICA_SPEC = new Set([
   'plugins',
   'ssh',
   'run',
+  'lanes',
 ]);
-
-function parseArgs(argv: string[]): {
-  autoYes: boolean;
-  pm: string | undefined;
-  rest: string[];
-} {
-  const rest: string[] = [];
-  let autoYes = false;
-  let pm: string | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--yes' || a === '-y') {
-      autoYes = true;
-    } else if (a === '--pm') {
-      if (i + 1 >= argv.length) {
-        throw new Error(
-          'usage: --pm requires a package-manager plugin id (e.g. pnpm)',
-        );
-      }
-      const next = argv[i + 1];
-      if (next.startsWith('-')) {
-        throw new Error(
-          'usage: --pm requires a package-manager plugin id (e.g. pnpm)',
-        );
-      }
-      i += 1;
-      pm = next;
-    } else {
-      rest.push(a);
-    }
-  }
-  return { autoYes, pm, rest };
-}
 
 function printHelp(): void {
   console.log(`
@@ -108,6 +86,53 @@ Remote execution
                               intend the remote to see them. Example: bica run pnpm test:run
   ssh                         Interactive ssh, cd to BICA_REMOTE_PATH, then a login shell.
 
+Parallel runs (lanes)
+  A lane is a reusable remote workspace with its own directory, sync session, dependency install
+  and run lock, so several 'bica run' invocations from one checkout can execute at once without
+  crossing. Lanes are reused rather than created per run: a fresh remote workspace has no
+  node_modules (the sync ignores it), and paying an install per run would dwarf the time saved.
+
+  --lane <id>                 Run in that lane. Errors if another run holds it.
+  --lane auto                 Run in the first free lane of the pool. Start N invocations with
+                              --lane auto to fan out; each takes a different lane.
+  --lane none                 Force the default workspace even when config defaults to a lane.
+  --lanes <N>                 Pool size for this invocation (default 4, or parallel.lanes in
+                              bica.yml, or BICA_LANES).
+  --ref <rev>                 Run the *committed* content of a branch/tag/commit instead of the
+                              working tree, via a throwaway git worktree. This is what makes a
+                              multi-branch sweep possible from one checkout: no checkout happens,
+                              so local git can be on any branch (or mid-rebase) while every lane
+                              runs. Uncommitted work is not included. Needs a lane.
+  --return-flow               Force the remote→local artifact pull even with other runs in flight.
+                              By default a lane run pulls when it is the only run (the ordinary
+                              case) and skips when others are live, since each would otherwise
+                              overwrite the last.
+
+  Tired of typing the flags? Put the defaults in bica.yml and 'bica run pnpm lint' is enough:
+
+    run:
+      lane: auto        # or a lane id, or none/false for the default workspace
+      assumeYes: true   # auto-confirm the prompts a run needs (never 'lanes clean')
+
+  Override per invocation with --lane / --lane none, BICA_LANE, and BICA_ASSUME_YES=0.
+
+  lanes list                  Each lane's remote path, whether a run holds it, and whether its
+                              dependencies are installed and current.
+  lanes prepare               Sync + install in every lane so a sweep does not pay install cost
+                              mid-flight. Sequential: concurrent installs contend on one store.
+  lanes clean                 Delete the remote lane workspaces (confirms first; can only ever
+                              target paths ending in -lane-<id>, never the base workspace).
+
+  A lane run pins its content with one rsync instead of a live Mutagen session, so switching branches
+  locally cannot leak the next branch's files into a run already in flight. Each run names its content
+  by git tree OID and the remote re-checks that name after the command, so a run whose workspace was
+  taken by another run reports exit 97 instead of someone else's result. The trade is that edits made
+  after a lane run starts are not picked up by it, and 'bica start' / 'monitor' still act on the
+  default workspace, which a lane run does not use.
+
+  Exit codes worth knowing: 97 = the workspace was replaced mid-command, result discarded, re-run it.
+  96 = the remote workspace could not be entered.
+
 Workspace
   init                        Interactive setup: create bica.yml + .bica/local.yml (SSH/path).
 
@@ -117,9 +142,11 @@ File sync
   start / stop / list / monitor
                               Start, stop, list, or watch workspace file sync.
                               Note: 'bica run' uses an ephemeral session per invocation
-                              (terminates any existing session for this repo before starting,
-                              and tears it down on exit). 'start' is for users who want a
-                              long-lived session — but it will be killed at the next 'bica run'.
+                              (terminates any existing session for this repo *and this remote
+                              workspace* before starting, and tears it down on exit). 'start' is
+                              for users who want a long-lived session — but it will be killed at
+                              the next 'bica run'. Lane runs use no session at all, so they never
+                              disturb a session belonging to the default workspace or another lane.
 
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
@@ -146,6 +173,8 @@ Config precedence (no merging)
 Environment
   BICA_SSH_HOST                  SSH target (optional: .bica/local.yml, ~/.ssh/config, or prompt)
   BICA_REMOTE_PATH               Remote workspace path (default ~/code/<repo folder name>)
+  BICA_LANE                      Default lane for bica run: <id> | auto | none (overrides run.lane)
+  BICA_ASSUME_YES                1/0 = auto-confirm run prompts (overrides run.assumeYes)
   BICA_LOGIN_SHELL               Remote shell for non-interactive commands (default zsh)
   BICA_LOGIN_FLAGS               Flags for that shell (default -lc for zsh)
   BICA_DEBUG                     Set to 1 to print the remote script on stderr before ssh (env-dump hint: always on TTY; with debug, also when stderr is not a TTY)
@@ -156,7 +185,12 @@ Environment
 
 Globals (parsed from the full argv; not forwarded to the remote — put before "run" for clarity)
   -y, --yes              Non-interactive: auto-confirm starting file sync when no session exists yet
+                         (or set run.assumeYes / BICA_ASSUME_YES; 'lanes clean' always needs the flag)
   --pm <id>              Disambiguate package-manager hooks when several could match argv[0]
+  --lane <id|auto|none>  Run in an isolated, reusable remote workspace (see "Parallel runs")
+  --lanes <N>            Lane pool size for --lane auto / the lanes commands
+  --ref <rev>            Run a commit's content rather than the working tree (needs --lane)
+  --return-flow          Opt a lane run back into the remote→local artifact pull
 
 Examples
   bica init
@@ -165,6 +199,12 @@ Examples
   bica credentials sync
   bica credentials sync npmrc
   bica plugins list
+
+  # Verify a stacked chain: one lane per branch, all at once, no checkout at all.
+  bica lanes prepare --lanes 4
+  for b in feat/a feat/b feat/c feat/d; do
+    bica --yes run --lane auto --ref "$b" pnpm validate > "verify-$b.log" 2>&1 &
+  done; wait
 `);
 }
 
@@ -336,6 +376,40 @@ function cmdPluginsList(): void {
   }
 }
 
+async function cmdLanes(
+  tail: string[],
+  options: { autoYes: boolean; poolOverride: number | undefined },
+): Promise<void> {
+  const sub = tail[0] ?? 'list';
+  if (sub === 'list') {
+    cmdLanesList(options.poolOverride);
+    return;
+  }
+  await ensureRemoteSshHostFromEnvOrPrompt();
+  if (sub === 'prepare') {
+    process.exitCode = await cmdLanesPrepare({
+      poolOverride: options.poolOverride,
+      // Same benign prompt as a run (create the remote directory), so config may answer it.
+      autoYes:
+        options.autoYes || resolveBicaPluginConfig(getRepoRoot()).runAssumeYes,
+      confirm,
+    });
+    return;
+  }
+  if (sub === 'clean') {
+    process.exitCode = await cmdLanesClean({
+      poolOverride: options.poolOverride,
+      // Flag only, never `run.assumeYes`. This confirmation guards a recursive delete of remote
+      // directories; a config setting meant to save typing on ordinary runs must not silently
+      // authorise that.
+      autoYes: options.autoYes,
+      confirm,
+    });
+    return;
+  }
+  die('usage: bica lanes [list|prepare|clean] [--lanes N]');
+}
+
 async function cmdSsh(): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
@@ -345,38 +419,46 @@ async function cmdSsh(): Promise<void> {
   process.exitCode = code;
 }
 
-async function cmdRun(
-  autoYes: boolean,
-  pm: string | undefined,
-  tail: string[],
-): Promise<void> {
-  if (tail.length === 0) {
-    die('usage: bica run <command> [args...]\nExample: bica run pnpm test:run');
-  }
-
-  assertMutagenInstalled();
-  await ensureRemoteSshHostFromEnvOrPrompt();
-  const prep = prepareSyncProjectFile({ verbose: false });
+async function runDefaultLane(options: {
+  prep: PrepareResult;
+  autoYes: boolean;
+  pm: string | undefined;
+  tail: string[];
+  captured: boolean;
+  chrome: (text: string) => void;
+}): Promise<number> {
+  const { prep, autoYes, pm, tail, captured, chrome } = options;
   const { repoRoot, projectFilePath, sessionName, remoteSyncUrl } = prep;
 
-  // Captured (piped/redirected) output: suppress decorative `[bica]` chrome and the Mutagen
-  // teardown `\r` spinner so the stream is just the remote command's output + one status line.
-  const captured = !process.stdout.isTTY;
-  const chrome = (text: string): void => {
-    if (!captured) {
-      process.stderr.write(text);
-    }
-  };
-
-  // Ephemeral session: terminate anything bound to this repo (any name / any beta), start fresh
-  // from the current project file, run the command, pull return-flow, terminate. Guarantees the
-  // running session's ignore config matches what bica.yml says right now.
-  const stale = findAllSessionsForRepo(repoRoot);
+  // Ephemeral session: terminate anything bound to this repo *and this remote workspace* (any name),
+  // start fresh from the current project file, run the command, pull return-flow, terminate.
+  // Guarantees the running session's ignore config matches what bica.yml says right now. Scoping to
+  // the remote workspace leaves concurrent lane sessions — same alpha, different beta — untouched.
+  const stale = findAllSessionsForRepo(repoRoot, remoteSyncUrl);
   for (const s of stale) {
     chrome(
       `${warn('[bica]')} ${dim(`Terminating existing sync session ${s.name} for ${repoRoot} before fresh start.`)}\n`,
     );
     mutagenSyncTerminate(s.name);
+  }
+
+  // Sessions on some *other* remote workspace used to be swept up by the unscoped sweep above.
+  // Scoping is what lets lanes coexist, but it means a session left over from a previous
+  // `remotePath` now survives, still pushing this checkout somewhere unexpected. Lane workspaces are
+  // legitimate siblings; anything else is worth naming, since a silently surviving session is the
+  // kind of thing that later looks like bica running the wrong code.
+  const unrelated = findAllSessionsForRepo(repoRoot).filter(
+    (s) =>
+      s.beta !== remoteSyncUrl &&
+      !isLaneRemotePath(
+        prep.config.remoteWorkspacePath,
+        s.beta.slice(s.beta.indexOf(':') + 1),
+      ),
+  );
+  for (const s of unrelated) {
+    chrome(
+      `${warn('[bica]')} ${dim(`Session ${s.name} also syncs this checkout, to ${s.beta}. Left running (not this workspace, not a lane) — 'bica stop' or 'mutagen sync terminate ${s.name}' if it is a leftover.`)}\n`,
+    );
   }
 
   chrome(
@@ -472,27 +554,123 @@ async function cmdRun(
     chrome(`${dim('[bica]')} ${dim('Sync session stopped.')}\n`);
   }
 
+  return code;
+}
+
+async function cmdRun(options: {
+  autoYes: boolean;
+  pm: string | undefined;
+  lane: string | undefined;
+  lanes: number | undefined;
+  returnFlow: boolean;
+  ref: string | undefined;
+  tail: string[];
+}): Promise<void> {
+  const { pm, tail } = options;
+  if (tail.length === 0) {
+    die('usage: bica run <command> [args...]\nExample: bica run pnpm test:run');
+  }
+
+  await ensureRemoteSshHostFromEnvOrPrompt();
+  const repoRoot = getRepoRoot();
+  const config = resolveBicaPluginConfig(repoRoot);
+  const poolSize = options.lanes ?? config.lanePoolSize;
+
+  // Flag beats config beats built-in default. `none` is how config asks for the historical
+  // single-workspace run, which `acquireLaneForRun` spells as an absent lane.
+  const laneRequest = options.lane ?? config.runLane;
+  const laneArg = laneRequest === NO_LANE ? undefined : laneRequest;
+
+  // `--yes` on the command line, or `run.assumeYes` / BICA_ASSUME_YES. This covers only the prompts a
+  // run legitimately needs to answer (create the remote directory, start or replace a sync session).
+  // `bica lanes clean` deliberately ignores it — see cmdLanes.
+  const autoYes = options.autoYes || config.runAssumeYes;
+
+  if (options.ref !== undefined && laneArg === undefined) {
+    // The default workspace is driven by a live Mutagen session mirroring the checkout, so there is
+    // nowhere for a commit's content to go without fighting that session.
+    die(
+      '--ref needs a lane: the default workspace is kept in sync with your checkout by a live\n' +
+        'session, so it always runs the working tree. Use `--lane auto --ref <rev>`, or set\n' +
+        '`run.lane: auto` in bica.yml.',
+    );
+  }
+
+  const { lane, lock } = acquireLaneForRun({
+    repoRoot,
+    laneArg,
+    poolSize,
+  });
+
+  // The lane lock must outlive every other teardown step and survive Ctrl-C, or a killed run leaves
+  // its lane permanently unusable. `exit` fires on all paths; the stale-pid takeover in fileLock is
+  // the backstop for a hard kill that never reaches it.
+  const releaseLock = (): void => {
+    lock.release();
+  };
+  process.on('exit', releaseLock);
+
+  // Captured (piped/redirected) output: suppress decorative `[bica]` chrome and the Mutagen
+  // teardown `\r` spinner so the stream is just the remote command's output + one status line.
+  const captured = !process.stdout.isTTY;
+  const chrome = (text: string): void => {
+    if (!captured) {
+      process.stderr.write(text);
+    }
+  };
+
+  const prep = prepareSyncProjectFile({ verbose: false, lane });
+
+  let code: number;
+  try {
+    if (lane.isDefault) {
+      // Mutagen only powers the default workspace; a lane pins its tree with one rsync instead.
+      assertMutagenInstalled();
+      code = await runDefaultLane({
+        prep,
+        autoYes,
+        pm,
+        tail,
+        captured,
+        chrome,
+      });
+    } else {
+      code = await runPinnedLaneRun({
+        prep,
+        remoteArgv: tail,
+        autoYes,
+        pmOverride: pm,
+        confirm,
+        returnFlowOptIn: options.returnFlow,
+        poolSize,
+        ref: options.ref,
+        chrome,
+      });
+    }
+  } finally {
+    releaseLock();
+    process.removeListener('exit', releaseLock);
+  }
+
   // Always-print status line so silent-success commands are unambiguous; stderr so `2>/dev/null`
   // still yields a clean command-output-only stream. Set exitCode (not process.exit) so piped
   // stdout/stderr flushes before the event loop drains.
-  process.stderr.write(`${remoteExitStatusLine(code)}\n`);
+  process.stderr.write(
+    `${remoteExitStatusLine(code)}${lane.isDefault ? '' : dim(` [lane ${lane.label}]`)}\n`,
+  );
   process.exitCode = code;
 }
 
 async function main(): Promise<void> {
   const raw = process.argv.slice(2);
-  let autoYes = false;
-  let pm: string | undefined;
-  let rest: string[];
+  let globals: ParsedGlobals;
   try {
-    const parsed = parseArgs(raw);
-    autoYes = parsed.autoYes;
-    pm = parsed.pm;
-    rest = parsed.rest;
+    globals = parseArgs(raw);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     die(msg);
   }
+  const { autoYes, pm, rest } = globals;
 
   // Maintainer: tsx watch (see scripts/dev.cjs) re-runs the CLI on save; default argv is this
   // no-op so we do not print the full help page on every file change.
@@ -548,7 +726,21 @@ async function main(): Promise<void> {
         await cmdSsh();
         break;
       case 'run':
-        await cmdRun(autoYes, pm, tail);
+        await cmdRun({
+          autoYes,
+          pm,
+          lane: globals.lane,
+          lanes: globals.lanes,
+          returnFlow: globals.returnFlow,
+          ref: globals.ref,
+          tail,
+        });
+        break;
+      case 'lanes':
+        await cmdLanes(tail, {
+          autoYes,
+          poolOverride: globals.lanes,
+        });
         break;
       case 'build':
         if (tail.length > 0) {
