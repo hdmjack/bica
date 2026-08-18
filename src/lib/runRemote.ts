@@ -640,21 +640,44 @@ export function buildRemoteRunScript(options: {
   runId: string | undefined;
 }): string {
   const { runId } = options;
+  const q = runId === undefined ? '' : shellSingleQuoteRemotePathForSh(runId);
+  // Claim the workspace, refusing it if a *different* run is already using it.
+  //
+  // The local lane lock cannot cover this. It lives in one checkout's `.bica/locks`, but the resource
+  // actually being contended is a directory on the remote host, and several clones on this machine can
+  // resolve to the same one. A lock in `float-javascript-5` says nothing about what a run launched from
+  // `float-javascript` is doing to the same remote path. Letting the workspace hold its own claim makes
+  // exclusion a property of the contended resource itself, so it holds across checkouts and machines
+  // without any shared local state.
+  //
+  // `set -C` makes the create atomic: it fails rather than truncating if the file exists. A marker with
+  // two fields is a finished run's record and is free to take; one field is a run still in progress.
   const claim =
     runId === undefined
       ? ''
       : shBlock(
-          `printf '%s' ${shellSingleQuoteRemotePathForSh(runId)} > ${REMOTE_RUN_FILE} 2>/dev/null || true`,
+          `if ( set -C; printf '%s' ${q} > ${REMOTE_RUN_FILE} ) 2>/dev/null; then`,
+          '  :',
+          'else',
+          `  _bica_cur=$(cat ${REMOTE_RUN_FILE} 2>/dev/null)`,
+          '  case "$_bica_cur" in',
+          `    ${q}) : ;;`,
+          `    *' '*) printf '%s' ${q} > ${REMOTE_RUN_FILE} 2>/dev/null || true ;;`,
+          '    *)',
+          '      echo "[bica] This remote workspace is already in use by run $_bica_cur. Refusing to run: two runs sharing one workspace cannot both report a trustworthy result." >&2',
+          `      exit ${String(REMOTE_CONTENT_MISMATCH_EXIT)} ;;`,
+          '  esac',
+          'fi',
         );
   const verify =
     runId === undefined
       ? ''
       : shBlock(
-          `if [ "$(cat ${REMOTE_RUN_FILE} 2>/dev/null)" != ${shellSingleQuoteRemotePathForSh(runId)} ]; then`,
+          `if [ "$(cat ${REMOTE_RUN_FILE} 2>/dev/null)" != ${q} ]; then`,
           '  echo "[bica] Another run took this workspace while this command was executing; discarding the result." >&2',
           `  exit ${String(REMOTE_CONTENT_MISMATCH_EXIT)}`,
           'fi',
-          `printf '%s %s' ${shellSingleQuoteRemotePathForSh(runId)} "$_bica_ec" > ${REMOTE_RUN_FILE} 2>/dev/null || true`,
+          `printf '%s %s' ${q} "$_bica_ec" > ${REMOTE_RUN_FILE} 2>/dev/null || true`,
         );
   return (
     `${options.preamble}${options.cdExpr} || exit ${String(REMOTE_CD_FAILED_EXIT)}\n` +
