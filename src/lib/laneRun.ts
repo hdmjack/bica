@@ -292,6 +292,15 @@ async function runPinnedLaneRunFrom(
     resolvedRef === undefined
       ? 'working tree'
       : `${resolvedRef.requested} (${resolvedRef.sha.slice(0, 12)})`;
+
+  // Printed unconditionally, not through `chrome`. Callers redirect to a log file, which makes stdout
+  // a pipe and silences the decorative output — so anything only shown on a TTY is invisible to exactly
+  // the audience that needs it. A session downstream of this had resorted to grepping the `pnpm` banner
+  // for the workspace path to satisfy itself a run was its own; this states it outright, for any
+  // command, and pairs it with the content name so the run can be checked against what was intended.
+  process.stderr.write(
+    `${dim('[bica]')} lane ${lane.label}  workspace ${prep.remoteSyncUrl}  content ${sourceLabel}  run ${owner.runId}\n`,
+  );
   chrome(
     `${dim(`[bica:${lane.label}]`)} ${dim(`Pinning ${sourceLabel} to`)} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
   );
