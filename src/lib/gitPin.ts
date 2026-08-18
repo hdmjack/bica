@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { treeOidForCommittish } from './contentIdentity';
@@ -101,25 +102,28 @@ export function resolveGitRef(repoRoot: string, ref: string): ResolvedGitRef {
 }
 
 /**
- * Pinned-worktree directory, keyed by lane *and* pid.
+ * Pinned-worktree directory, outside the repository and keyed by lane *and* pid.
  *
- * The lane lock should already guarantee one run per lane, but this directory is where a lane mix-up
- * turns into two runs rsyncing over each other's checkout — the observed symptom was
- * `rsync exited 23` on `.bica/pins/1` plus `is not a working tree` on teardown. Including the pid
- * means even a failure of lane exclusivity cannot make two runs share a worktree.
+ * Outside because a live `git worktree` inside `repoRoot` is inside the tree that `git add -A` walks,
+ * so the content name would describe bica's own scratch checkout. That is the same trap already fixed
+ * for the throwaway index in `contentIdentity.ts`, where only the convention of gitignoring `.bica`
+ * was hiding it — a correctness property should not depend on a user's `.gitignore`.
+ *
+ * Pid-keyed because this directory is where a lane mix-up turns into two runs rsyncing over each
+ * other's checkout; the observed symptom was `rsync exited 23` plus `is not a working tree` on
+ * teardown. The pid means even a failure of lane exclusivity cannot make two runs share a worktree.
  */
+function pinRoot(): string {
+  return path.join(os.tmpdir(), 'bica-pins');
+}
+
 function pinDir(repoRoot: string, laneLabel: string): string {
-  return path.join(
-    repoRoot,
-    '.bica',
-    'pins',
-    `${laneLabel}-${String(process.pid)}`,
-  );
+  return path.join(pinRoot(), `${laneLabel}-${String(process.pid)}`);
 }
 
 /** Remove pin directories left by processes that are no longer running. */
-function removeOrphanedPinDirs(repoRoot: string): void {
-  const root = path.join(repoRoot, '.bica', 'pins');
+function removeOrphanedPinDirs(): void {
+  const root = pinRoot();
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
@@ -160,7 +164,7 @@ export async function withPinnedWorktree<T>(
   }
   try {
     git(repoRoot, ['worktree', 'prune']);
-    removeOrphanedPinDirs(repoRoot);
+    removeOrphanedPinDirs();
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(path.dirname(dir), { recursive: true });
     const add = git(repoRoot, [
