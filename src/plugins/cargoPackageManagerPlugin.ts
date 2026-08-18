@@ -2,12 +2,17 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import type { AutoDiscoverContext, PackageManagerPlugin } from './types';
+import type {
+  AutoDiscoverContext,
+  PackageManagerPlugin,
+  PackageManagerStateContext,
+} from './types';
 
 const LOCKFILE = 'Cargo.lock';
 const MANIFEST = 'Cargo.toml';
 
-const CARGO_FETCH_HASH_RELATIVE = path.join('.bica', 'hashes', 'cargo-fetch');
+/** Relative to the lane's state dir, so `.bica/hashes/…` for the default run. */
+const CARGO_FETCH_HASH_RELATIVE = path.join('hashes', 'cargo-fetch');
 
 /**
  * argv1 values that resolve / mutate the lockfile and so should refresh the recorded fingerprint.
@@ -56,12 +61,12 @@ export const cargoPackageManagerPlugin: PackageManagerPlugin = {
   } {
     return evaluateCargoDiscovery(ctx);
   },
-  installHashRelativePath: CARGO_FETCH_HASH_RELATIVE,
+  installHashStateRelativePath: CARGO_FETCH_HASH_RELATIVE,
   readLocalFingerprint(repoRoot: string): string | null {
     return digestFile(repoRoot, LOCKFILE);
   },
-  readStoredHash(repoRoot: string): string | null {
-    const p = path.join(repoRoot, CARGO_FETCH_HASH_RELATIVE);
+  readStoredHash(ctx: PackageManagerStateContext): string | null {
+    const p = path.join(ctx.stateDir, CARGO_FETCH_HASH_RELATIVE);
     try {
       const t = fs.readFileSync(p, 'utf8').trim();
       return t.length > 0 ? t : null;
@@ -69,8 +74,8 @@ export const cargoPackageManagerPlugin: PackageManagerPlugin = {
       return null;
     }
   },
-  writeStoredHash(repoRoot: string, digest: string): void {
-    const p = path.join(repoRoot, CARGO_FETCH_HASH_RELATIVE);
+  writeStoredHash(ctx: PackageManagerStateContext, digest: string): void {
+    const p = path.join(ctx.stateDir, CARGO_FETCH_HASH_RELATIVE);
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, `${digest}\n`, 'utf8');
   },

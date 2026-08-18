@@ -4,12 +4,14 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { pnpmPackageManagerPlugin } from '../plugins/pnpmPackageManagerPlugin';
+import { defaultLaneIdentity } from './lanes';
 import {
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
   runRemoteCommand,
 } from './runRemote';
 import { runRemoteCommandWithPmHooks } from './runWithPackageManagerPlugins';
+import type { PackageManagerStateContext } from '../plugins/types';
 import type { PrepareResult } from '../syncProject';
 
 vi.mock('./runRemote', () => ({
@@ -34,11 +36,21 @@ function writePnpmWorkspace(repoRoot: string, lockfileBody: string): void {
   fs.writeFileSync(path.join(repoRoot, 'pnpm-lock.yaml'), lockfileBody, 'utf8');
 }
 
+/** Fingerprint storage for the default lane, which is what these tests exercise. */
+function stateCtx(repoRoot: string): PackageManagerStateContext {
+  return {
+    repoRoot,
+    stateDir: path.join(repoRoot, '.bica'),
+    isDefaultLane: true,
+  };
+}
+
 function makePrep(repoRoot: string): PrepareResult {
   return {
     repoRoot,
     projectFilePath: path.join(repoRoot, '.bica', 'project.yml'),
     sessionName: 'test-session',
+    lane: defaultLaneIdentity(repoRoot),
     remoteSyncUrl: 'test-host:/remote/repo',
     returnFlowPaths: [],
     syncIgnorePaths: [],
@@ -93,7 +105,7 @@ describe('runRemoteCommandWithPmHooks', () => {
 
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
-      expect(pnpmPackageManagerPlugin.readStoredHash(repoRoot)).toBe(fp);
+      expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(fp);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -105,7 +117,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const fpOld = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fpOld).not.toBeNull();
-      pnpmPackageManagerPlugin.writeStoredHash(repoRoot, fpOld!);
+      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot), fpOld!);
 
       fs.writeFileSync(
         path.join(repoRoot, 'pnpm-lock.yaml'),
@@ -138,7 +150,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
-      pnpmPackageManagerPlugin.writeStoredHash(repoRoot, fp!);
+      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot), fp!);
 
       const prep = makePrep(repoRoot);
       const code = await runRemoteCommandWithPmHooks({
@@ -185,7 +197,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const fpOld = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fpOld).not.toBeNull();
-      pnpmPackageManagerPlugin.writeStoredHash(repoRoot, fpOld!);
+      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot), fpOld!);
 
       fs.writeFileSync(
         path.join(repoRoot, 'pnpm-lock.yaml'),
@@ -214,8 +226,7 @@ describe('runRemoteCommandWithPmHooks', () => {
     const repoRoot = makeTempRepo();
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
-      pnpmPackageManagerPlugin.writeStoredHash(
-        repoRoot,
+      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot),
         pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!,
       );
 
@@ -244,8 +255,7 @@ describe('runRemoteCommandWithPmHooks', () => {
     const repoRoot = makeTempRepo();
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
-      pnpmPackageManagerPlugin.writeStoredHash(
-        repoRoot,
+      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot),
         pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!,
       );
 
@@ -311,7 +321,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
-      expect(pnpmPackageManagerPlugin.readStoredHash(repoRoot)).toBe(fp);
+      expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(fp);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
