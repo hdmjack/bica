@@ -8,7 +8,9 @@ This tree is designed to live in **its own repository**. The copy under `float-j
 
 Remote commands **must** include the `run` subcommand (e.g. **`bica run pnpm test`**). There is no shorthand like `bica pnpm test`.
 
-Only the word `run` is interpreted locally. **Every token after `run` is argv on the remote** (POSIX-quoted, no shell injection). Globals `-y` / `--yes` and `--pm <id>` are parsed from the **whole** command line and are not sent to the remote — put them **before** `run` for clarity (e.g. `bica --yes run pnpm validate`).
+Only the word `run` is interpreted locally. **Every token after `run` is argv on the remote** (POSIX-quoted, no shell injection). Globals `-y` / `--yes`, `--pm <id>`, `--lane <id|auto>`, `--lanes <N>`, `--ref <rev>` and `--return-flow` are parsed from the **whole** command line and are not sent to the remote — put them **before** `run` for clarity (e.g. `bica --yes run pnpm validate`).
+
+Several `bica run` invocations from one checkout can execute concurrently, each in its own remote workspace — see [Parallel runs (lanes)](#parallel-runs-lanes).
 
 ## Install
 
@@ -98,11 +100,187 @@ git:
 
 When enabled, `bica run` does a one-shot `rsync -az --delete` of local `.git` → remote right before the command, mirroring history/HEAD/refs exactly. Keep `.git` in `sync.ignore.paths` (this is a one-shot rsync, not a continuous Mutagen watch — avoids `index.lock` churn). Toggle per-run with `BICA_GIT_SYNC=1`/`0`. Requires `rsync` on PATH; if missing, bica warns and skips.
 
+## Parallel runs (lanes)
+
+A single `bica run` owns the whole remote workspace: `remotePath` names one directory, and the run's
+sync session is keyed to the repository, so a second concurrent invocation would sync a different
+working tree into the same directory *and* terminate the first one's session. Verifying a stacked
+branch chain one branch at a time is therefore serial, and a chain long enough makes a full sweep
+expensive enough to skip — which is how real failures reach CI unverified.
+
+A **lane** is a reusable remote workspace with its own directory, session name, dependency install and
+run lock. Several `bica run` invocations from one checkout can hold different lanes at once.
+
+```bash
+bica lanes prepare --lanes 4          # one-time: sync + install in each lane
+
+for b in feat/a feat/b feat/c feat/d; do
+  bica --yes run --lane auto --ref "$b" pnpm validate > "verify-$b.log" 2>&1 &
+done
+wait
+```
+
+`--lane auto` takes the first free lane; `--lane <id>` takes a named one and errors if a run holds
+it. Pool size comes from `--lanes N`, `BICA_LANES`, or `parallel.lanes` in `bica.yml` (default 4).
+
+### Making it the default
+
+Typing `--lane auto --yes` every time gets old. Put the defaults in `bica.yml`:
+
+```yaml
+run:
+  lane: auto        # a lane id, `auto`, or `none`/`false` for the default workspace
+  assumeYes: true   # auto-confirm the prompts a run needs
+```
+
+Then `bica run pnpm lint` is enough. Override per invocation with `--lane <id>`, `--lane none`,
+`BICA_LANE`, or `BICA_ASSUME_YES=0`. Flag beats env beats YAML, as everywhere else in bica.
+
+Two things worth knowing before you turn `lane: auto` on:
+
+- **`assumeYes` never authorises `bica lanes clean`.** That confirmation guards a recursive delete of
+  remote directories, so it always wants an explicit `-y` on the command line. A setting meant to save
+  typing on everyday runs must not quietly consent to deleting things.
+- **`bica start` / `stop` / `monitor` act on the default workspace**, which lane runs do not use. A
+  long-lived session you started will sit there unused rather than being killed by the next run.
+
+Return-flow still works for ordinary single runs. A lane run pulls artifacts back when it is the only
+run in flight — the normal case — and skips only when other runs are live, since several would each
+overwrite the last. `--return-flow` forces it. (Two runs starting in the same instant can both decide
+they are alone; the window is milliseconds and the outcome is the same last-writer-wins you get from
+two sequential runs.)
+
+### Why lanes are reused rather than created per run
+
+The sync ignores `node_modules`, so a brand-new remote workspace has no dependencies and must install
+before it can run anything. Paying that per run would dwarf the time parallelism saves. Lanes are a
+small pool of long-lived workspaces instead, so the install is once per lane — `bica lanes prepare`
+gets it out of the way up front, and `bica lanes list` shows which lanes are warm:
+
+```
+pool size: 4
+base workspace: devbox:~/code/float-javascript
+
+  1        free  warm
+           devbox:~/code/float-javascript-lane-1
+  2        busy  warm
+           devbox:~/code/float-javascript-lane-2
+           held by pid 40812 (since 2026-08-17T11:04:09.221Z): bica run --lane auto --ref feat/b …
+```
+
+`bica lanes clean` removes the remote lane workspaces (after confirming). It can only ever target
+paths ending in `-lane-<id>`, never the base workspace.
+
+### Disk cost — don't measure it with `du`
+
+A lane holds a full `node_modules`, so lanes look alarmingly expensive: `du -sh` reports ~1.8G per
+lane, and `du -shc` across four lanes reports 7.7G as though nothing were shared. **Both numbers are
+wrong.**
+
+On APFS, pnpm's default `packageImportMethod: auto` resolves to `clone` — copy-on-write via
+`clonefile`. Cloned files get their own inode with `nlink=1`, so `du` neither recognises them as shared
+nor dedupes them the way it dedupes hardlinks; it counts every cloned block in full, once per lane.
+Checking physical extents (`F_LOG2PHYS_EXT`) shows the store and all four lanes pointing at the
+*same* device offsets. An exhaustive walk of one lane's 156,817 files found 99.8% of its 1.35 GiB
+clone-shared, with 2.6 MiB genuinely unique (its `.modules.yaml`, `.pnpm/lock.yaml`, and a few patched
+packages).
+
+The real cost of a lane is that 2.6 MiB plus APFS metadata for ~197k filesystem objects — expect
+low hundreds of MB, not ~2G. Measure it at the container level, where allocated blocks are counted
+once:
+
+```bash
+diskutil info /System/Volumes/Data | grep 'Container Free Space'   # before and after
+```
+
+Two consequences:
+
+- Don't size the pool around `du` output. If lanes appear to be consuming tens of gigabytes, check
+  container free space before believing it. `bica lanes list` shows which lanes exist; `bica lanes
+  clean` reclaims them.
+- Don't force `packageImportMethod: hardlink` to "fix" this. Hardlinks make the store and the lane the
+  same inode, so anything that writes in place — a patch, a postinstall, a build — corrupts the shared
+  store. Clone is both safer and already what you get.
+
+If lane install *time* becomes the problem, pnpm's `enableGlobalVirtualStore` is the feature aimed at
+exactly this (its own docs recommend it for parallel checkouts and multi-agent development). It is
+experimental, with known ESM `NODE_PATH` and TypeScript inference edge cases, so treat it as an
+optimisation to try rather than a default.
+
+### `--ref`: what a sweep actually needs
+
+One checkout holds one branch, so a sweep cannot pin thirteen branches from the working tree — and a
+`git checkout` landing while another lane is still syncing leaves that lane holding a mix of two
+branches. `--ref <branch|tag|commit>` reads the content out of the object database via a throwaway
+`git worktree`, so **no checkout happens at all**: local git can sit on any branch, or mid-rebase,
+while every lane runs. Uncommitted work is not part of a `--ref` run; that is the right semantics for
+verifying a branch chain and the wrong one for "run what I have open".
+
+With `git.sync` on, a `--ref` run also repoints the lane's remote `HEAD` at the pinned ref, so
+`vitest --changed`-style commands resolve the branch being verified rather than whatever is checked
+out locally.
+
+### What a lane run does differently
+
+- **One rsync instead of a live session.** A lane pins its content at the start rather than
+  continuously following the checkout, which is what makes concurrency safe. The trade: edits made
+  after a lane run starts are not picked up by it. Interactive development keeps using the default
+  (no `--lane`) run, which is unchanged — live Mutagen session, return-flow on, same behaviour as
+  before lanes existed.
+- **Every run names the content it verified.** A git tree OID, taken from the ref for `--ref` runs and
+  from a throwaway index (`git write-tree`, so your real index and HEAD are untouched) otherwise. The
+  name is printed, so a caller can compare what was verified against what they meant to verify.
+- **Live-tree runs abort if the tree moves.** Without `--ref`, bica compares that OID either side of
+  the transfer and refuses if it changed, naming both values. There is no retry: you want to know your
+  tree is moving under you, not have bica quietly try again. Caveat: `git add -A` respects
+  `.gitignore`, so the OID names *tracked* content — rsync still ships ignored files, but changes to
+  them do not alter the name.
+- **The remote refuses to report a stolen result.** The run writes its name into `.bica-run` in the
+  workspace and re-checks it after the command. If another run replaced the workspace mid-command, the
+  result is discarded with **exit 97** rather than reported. This is what keeps the lane lock out of
+  the correctness story: a lock failure costs a re-run, not a wrong answer.
+- **Return-flow follows whether you are alone.** It mirrors remote artifacts into the local tree with
+  `--delete`, so it describes exactly one branch. One run at a time pulls as usual; with other runs in
+  flight it skips, because each would overwrite the last. `--return-flow` forces it, and pulls are
+  serialised so two lanes cannot rsync into the same tree at once.
+- **Sibling sessions are left alone.** `bica run` still clears stale sync sessions before starting,
+  but only those pointed at *its own* remote workspace. A session for this checkout pointed somewhere
+  that is neither this workspace nor a lane (typically a leftover from an earlier `remotePath`) is
+  reported rather than terminated.
+
+### Plugin concurrency
+
+Remote installs are serialised across lanes: each lane installs into its own workspace, but they
+share one content-addressed store on the host. `bica lanes prepare` avoids the situation entirely;
+the lock covers a cold lane installed mid-sweep. Nothing else needs serialising — credentials plugins
+run only under `bica credentials sync`, never as part of `bica run`, and remote-shell plugins only
+build a shell string.
+
+### Two concurrent default runs
+
+The default workspace is locked too. A second `bica run` without `--lane` fails immediately, naming
+the process that holds it, rather than silently executing against another run's files.
+
+### Verifying it
+
+`scripts/verify-parallel.sh` checks isolation rather than mere concurrency: a known-green and
+known-red ref run at once must each report their own outcome; the lanes' remote `HEAD`s must differ
+afterwards; two runs told to share a lane must have exactly one refused; a run raced against a
+churning tree must fail loudly; and a sweep must beat the serial equivalent.
+
+```bash
+scripts/verify-parallel.sh --green main --red feat/known-broken \
+  --sweep feat/a,feat/b,feat/c,feat/d -- pnpm validate
+```
+
 ## Environment
 
 | Variable | Purpose |
 | --- | --- |
 | `BICA_SSH_HOST` | SSH target (or TTY prompt) |
+| `BICA_LANES` | Lane pool size for `--lane auto` (overrides `parallel.lanes`; default 4) |
+| `BICA_LANE` | Default lane for `bica run`: `<id>` \| `auto` \| `none` (overrides `run.lane`) |
+| `BICA_ASSUME_YES` | `1`/`0` = auto-confirm `bica run` prompts (overrides `run.assumeYes`; never applies to `lanes clean`) |
 | `BICA_REMOTE_PATH` | Remote workspace path (default `~/code/<repo folder name>`) |
 | `BICA_LOGIN_SHELL` | Remote shell for non-interactive commands (default `zsh`) |
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
