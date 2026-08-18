@@ -602,9 +602,10 @@ async function cmdRun(options: {
     poolSize,
   });
 
-  // The lane lock must outlive every other teardown step and survive Ctrl-C, or a killed run leaves
-  // its lane permanently unusable. `exit` fires on all paths; the stale-pid takeover in fileLock is
-  // the backstop for a hard kill that never reaches it.
+  // Released after every other teardown step. Note what this does *not* guarantee: Node does not run
+  // `exit` listeners when it terminates on an unhandled SIGINT, so Ctrl-C leaves the lock behind and it
+  // is the stale-pid takeover in fileLock that recovers it — as it is for a hard kill. The listener
+  // covers normal and error exits only.
   const releaseLock = (): void => {
     lock.release();
   };
@@ -642,7 +643,6 @@ async function cmdRun(options: {
         pmOverride: pm,
         confirm,
         returnFlowOptIn: options.returnFlow,
-        poolSize,
         ref: options.ref,
         chrome,
       });

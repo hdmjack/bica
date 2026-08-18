@@ -1,4 +1,3 @@
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
@@ -7,7 +6,6 @@ import {
   acquireLockWithWait,
   describeLockHolder,
   isProcessAlive,
-  readLockHolder,
   tryAcquireLock,
 } from './fileLock';
 import {
@@ -55,65 +53,6 @@ const RETURN_FLOW_LOCK_TIMEOUT_MS = 120_000;
 export interface AcquiredLane {
   lane: LaneIdentity;
   lock: HeldLock;
-}
-
-/**
- * How many `bica run` invocations for this checkout are live right now, this one included.
- *
- * Read-only on purpose: it inspects lock files and checks whether the recorded pid is alive, rather
- * than acquiring, so it neither steals a stale lock nor disturbs a running lane.
- */
-export function countRunsInFlight(repoRoot: string, poolSize: number): number {
-  const candidates = [
-    defaultLaneIdentity(repoRoot).lockFilePath,
-    ...laneIdsForPool(poolSize).map(
-      (id) => laneIdentity(repoRoot, id).lockFilePath,
-    ),
-  ];
-  // Lanes outside the current pool still hold real runs (the pool may have shrunk since they started).
-  try {
-    for (const entry of fs.readdirSync(lockRootDir(repoRoot), {
-      withFileTypes: true,
-    })) {
-      if (entry.isFile() && entry.name.endsWith('.lock')) {
-        candidates.push(path.join(lockRootDir(repoRoot), entry.name));
-      }
-    }
-  } catch {
-    // No lock directory yet — the candidate list above is already complete.
-  }
-
-  let live = 0;
-  for (const filePath of new Set(candidates)) {
-    // Coordination locks (`_return-flow`, `_git-worktree`, `_remote-install`) are held for a phase,
-    // not a run, so counting them would overstate how many runs are in flight.
-    if (path.basename(filePath).startsWith('_') && !filePath.endsWith('_default.lock')) {
-      continue;
-    }
-    const holder = readLockHolder(filePath);
-    if (holder !== null && isProcessAlive(holder.pid)) {
-      live += 1;
-    }
-  }
-  return live;
-}
-
-/**
- * Whether a lane run should pull return-flow artifacts back into the local tree.
- *
- * `--return-flow` forces it on. Otherwise it follows whether this run is *alone*: return-flow mirrors
- * with `--delete`, so it describes exactly one branch's artifacts. One run at a time is the ordinary
- * case and pulling is correct there — switching it off unconditionally for lanes would silently
- * regress snapshot return the moment lanes became the default. Several runs at once is the case that
- * cannot be made coherent, because each would overwrite the last.
- *
- * Decided once, before the push, so the push exclusions, the remote refresh and the pull all agree.
- */
-export function shouldPullReturnFlow(options: {
-  explicitOptIn: boolean;
-  runsInFlight: number;
-}): boolean {
-  return options.explicitOptIn || options.runsInFlight <= 1;
 }
 
 function returnFlowLockPath(repoRoot: string): string {
@@ -181,9 +120,9 @@ export function acquireLaneForRun(options: {
  * Run a command in a lane against a pinned copy of the working tree: push once, run, optionally pull.
  * Returns the remote command's exit code, or a non-zero bica-side code when the push failed.
  *
- * Return-flow follows {@link shouldPullReturnFlow}: on when this run is alone (the ordinary case),
- * off when other runs are in flight, forced on by `--return-flow`. When it runs, the pull is
- * serialised so two lanes cannot rsync into the same tree at once.
+ * Return-flow happens only with `--return-flow`. It mirrors remote artifacts into the local tree with
+ * `--delete`, so it describes exactly one content state; with more than one lane running there is no
+ * coherent answer, and the pull is serialised even when asked for.
  */
 export async function runPinnedLaneRun(options: {
   prep: PrepareResult;
@@ -193,19 +132,15 @@ export async function runPinnedLaneRun(options: {
   confirm: ConfirmFn;
   /** `--return-flow` was passed. Absent, the decision follows whether this run is alone. */
   returnFlowOptIn: boolean;
-  /** Lane pool size, for counting how many runs are in flight. */
-  poolSize: number;
   /** `--ref`: pin the lane to this git ref's committed content instead of the live working tree. */
   ref: string | undefined;
   chrome: (text: string) => void;
 }): Promise<number> {
   const { prep } = options;
-  const runsInFlight = countRunsInFlight(prep.repoRoot, options.poolSize);
-  const returnFlow = shouldPullReturnFlow({
-    explicitOptIn: options.returnFlowOptIn,
-    runsInFlight,
-  });
-  const resolvedOptions = { ...options, returnFlow, runsInFlight };
+  // Explicit opt-in, full stop. This used to guess by counting runs in flight, which was racy by its
+  // own admission -- two runs starting together could both conclude they were alone -- and a guess that
+  // is usually right is the worst kind here, because return-flow mirrors with `--delete`.
+  const resolvedOptions = { ...options, returnFlow: options.returnFlowOptIn };
   if (options.ref === undefined) {
     return runPinnedLaneRunFrom(resolvedOptions, undefined, undefined);
   }
@@ -224,7 +159,6 @@ async function runPinnedLaneRunFrom(
     pmOverride: string | undefined;
     confirm: ConfirmFn;
     returnFlow: boolean;
-    runsInFlight: number;
     chrome: (text: string) => void;
   },
   sourceDir: string | undefined,
@@ -412,7 +346,7 @@ async function runPinnedLaneRunFrom(
     }
   } else if (prep.returnFlowPaths.length > 0) {
     chrome(
-      `${dim(`[bica:${lane.label}]`)} ${dim(`Return-flow skipped: ${String(options.runsInFlight)} runs in flight would each overwrite the last (pass --return-flow to force).`)}\n`,
+      `${dim(`[bica:${lane.label}]`)} ${dim('Return-flow is off for lane runs; pass --return-flow to pull artifacts back.')}\n`,
     );
   }
 
