@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildRemoteRunScript, REMOTE_CD_FAILED_EXIT } from './runRemote';
 
@@ -94,5 +94,64 @@ describe('buildRemoteRunScript — with a run id', () => {
 
   it('keeps the preamble first, so tooling is on PATH before anything runs', () => {
     expect(script.startsWith(BASE.preamble)).toBe(true);
+  });
+});
+
+describe('the workspace holds its own claim, across checkouts', () => {
+  // The local lane lock is per-checkout, but the contended resource is a remote directory that
+  // several clones can resolve to. These tests run the generated script with a real shell, because
+  // the claim is shell logic and the only trustworthy check of shell logic is to execute it.
+  function runIn(dir: string, runId: string, command = 'true'): number {
+    const script = buildRemoteRunScript({
+      preamble: '',
+      cdExpr: `cd ${JSON.stringify(dir)}`,
+      command,
+      runId,
+    });
+    const r = spawnSync('sh', ['-c', script], { cwd: dir, encoding: 'utf8' });
+    return r.status ?? -1;
+  }
+
+  let dir = '';
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-claim-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('claims a free workspace', () => {
+    expect(runIn(dir, 'run-a')).toBe(0);
+    expect(fs.readFileSync(path.join(dir, '.bica-run'), 'utf8')).toBe('run-a 0');
+  });
+
+  it('refuses a workspace another run is still using', () => {
+    // A single-field marker means a run in progress. This is the cross-checkout case: nothing local
+    // could have told this run that another clone was already here.
+    fs.writeFileSync(path.join(dir, '.bica-run'), 'other-run-in-progress', 'utf8');
+    expect(runIn(dir, 'run-b')).toBe(97);
+  });
+
+  it('does not run the command when it refuses', () => {
+    // The whole point: a run that did not execute its own command must not report a verdict.
+    fs.writeFileSync(path.join(dir, '.bica-run'), 'other-run-in-progress', 'utf8');
+    runIn(dir, 'run-b', `touch ${JSON.stringify(path.join(dir, 'ran'))}`);
+    expect(fs.existsSync(path.join(dir, 'ran'))).toBe(false);
+  });
+
+  it('takes over a workspace whose previous run finished', () => {
+    // Two fields is a completed run's record, not a live claim; refusing it would wedge the lane.
+    fs.writeFileSync(path.join(dir, '.bica-run'), 'earlier-run 0', 'utf8');
+    expect(runIn(dir, 'run-c')).toBe(0);
+  });
+
+  it('is re-entrant for the same run id', () => {
+    // The install step and the user command are separate ssh invocations of the same run.
+    fs.writeFileSync(path.join(dir, '.bica-run'), 'run-d', 'utf8');
+    expect(runIn(dir, 'run-d')).toBe(0);
+  });
+
+  it('still surfaces the command exit code once it holds the claim', () => {
+    expect(runIn(dir, 'run-e', 'exit 3')).toBe(3);
   });
 });
