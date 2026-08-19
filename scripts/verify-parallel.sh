@@ -189,8 +189,14 @@ section "5  Wall clock: N refs concurrently vs one ref alone"
 if [[ ${#SWEEP_REFS[@]} -eq 0 ]]; then
   note "skipped: pass --sweep ref1,ref2,... to measure a real sweep"
 else
+  # Overhead is measured with the *same ref* as the single run that follows, and immediately before
+  # it, so both push identical content into the same lane. A null run against different content -- a
+  # live tree, say, when the lane last held a ref -- measures the size of that difference instead, and
+  # can come out larger than the full run it is supposed to be a component of. It did, which is how
+  # this was caught.
+  "$BICA" --yes run --lane 1 --ref "${SWEEP_REFS[0]}" true >"$OUT/warm.log" 2>&1 || true
   start=$SECONDS
-  "$BICA" --yes run --lane 1 true >"$OUT/overhead.log" 2>&1 || true
+  "$BICA" --yes run --lane 1 --ref "${SWEEP_REFS[0]}" true >"$OUT/overhead.log" 2>&1 || true
   overhead=$((SECONDS - start))
 
   start=$SECONDS
@@ -210,6 +216,8 @@ else
     note "Concurrent runs share one network link and one remote host, so when transport dominates they"
     note "serialise no matter how well lanes work, and any ratio measured here describes the transport."
     note "Re-run with a command that takes several times ${overhead}s -- the workload lanes exist for."
+    note "(Overhead here is a warm lane already holding this ref. A lane switching to different content"
+    note " pays the rsync delta on top, which is why a sweep's first run into each lane costs more.)"
   else
     start=$SECONDS
     for ref in "${SWEEP_REFS[@]}"; do
