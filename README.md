@@ -166,8 +166,13 @@ working tree into the same directory *and* terminate the first one's session. Ve
 branch chain one branch at a time is therefore serial, and a chain long enough makes a full sweep
 expensive enough to skip — which is how real failures reach CI unverified.
 
-A **lane** is a reusable remote workspace with its own directory, session name, dependency install and
-run lock. Several `bica run` invocations from one checkout can hold different lanes at once.
+A **lane** is a reusable remote workspace with its own directory, session name and dependency install.
+Several `bica run` invocations can hold different lanes at once.
+
+Lanes belong to the **remote host, not to a checkout**. A lane held by a run from a sibling clone is
+held for you too, and `--lane auto` skips it and takes the next free one. That is deliberate: the thing
+being contended is a directory on a shared machine, so anything scoped to one clone would be blind to
+exactly the collisions that matter.
 
 ```bash
 bica lanes prepare --lanes 4          # one-time: sync + install in each lane
@@ -295,8 +300,9 @@ out locally.
   them do not alter the name.
 - **The remote refuses to report a stolen result.** The run writes its name into `.bica-run` in the
   workspace and re-checks it after the command. If another run replaced the workspace mid-command, the
-  result is discarded with **exit 97** rather than reported. This is what keeps the lane lock out of
-  the correctness story: a lock failure costs a re-run, not a wrong answer.
+  result is discarded with **exit 97** rather than reported. The lease is taken *before* the sync, so a
+  second run refuses rather than overwriting the first one's files; the check afterwards catches a
+  workspace taken part-way through.
 - **Return-flow follows whether you are alone.** It mirrors remote artifacts into the local tree with
   `--delete`, so it describes exactly one branch. One run at a time pulls as usual; with other runs in
   flight it skips, because each would overwrite the last. `--return-flow` forces it, and pulls are
@@ -316,8 +322,9 @@ build a shell string.
 
 ### Two concurrent default runs
 
-The default workspace is locked too. A second `bica run` without `--lane` fails immediately, naming
-the process that holds it, rather than silently executing against another run's files.
+The default workspace is leased too. A second `bica run` without `--lane` fails immediately, naming the
+run that holds it — including one launched from a different clone — rather than silently executing
+against another run's files.
 
 ### Verifying it
 

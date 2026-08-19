@@ -88,10 +88,13 @@ Remote execution
   ssh                         Interactive ssh, cd to BICA_REMOTE_PATH, then a login shell.
 
 Parallel runs (lanes)
-  A lane is a reusable remote workspace with its own directory, sync session, dependency install
-  and run lock, so several 'bica run' invocations from one checkout can execute at once without
-  crossing. Lanes are reused rather than created per run: a fresh remote workspace has no
-  node_modules (the sync ignores it), and paying an install per run would dwarf the time saved.
+  A lane is a reusable remote workspace with its own directory, sync session and dependency install,
+  so several 'bica run' invocations can execute at once without crossing. Lanes are reused rather
+  than created per run: a fresh remote workspace has no node_modules (the sync ignores it), and
+  paying an install per run would dwarf the time saved.
+
+  Lanes belong to the remote host, not to a checkout. A lane in use by a run from another clone is
+  in use for you as well, and --lane auto simply takes the next free one.
 
   --lane <id>                 Run in that lane. Errors if another run holds it.
   --lane auto                 Run in the first free lane of the pool. Start N invocations with
