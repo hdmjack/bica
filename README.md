@@ -265,6 +265,24 @@ Two consequences:
   same inode, so anything that writes in place — a patch, a postinstall, a build — corrupts the shared
   store. Clone is both safer and already what you get.
 
+**What a lane actually costs, measured by removal.** `du` cannot see APFS clone-sharing, so the only
+honest method is to delete something and watch `Container Free Space`. On this repo:
+
+| part | `du` says | real |
+| --- | --- | --- |
+| `node_modules` | 1.8 G | **73 MB** — clone-shared with the pnpm store |
+| `dist` | 201 M | **248 MB** — built on the remote, no sharing |
+| source tree | — | **116 MB** |
+| `.git` (only with `git.sync`) | 532 M | **561 MB** — a plain rsync copy |
+
+So a warm lane running typechecks is roughly **440 MB**, or **1 GB with `git.sync` on**. The number
+people expect to dominate — `node_modules` — is the cheapest part, and the two that actually cost are
+the two `du` reports accurately.
+
+`dist` is per-workspace by design: it is in `sync.ignore.paths` precisely so each side builds its own
+and never typechecks against stale declarations. That is the right call, and it means a pool of N
+lanes holds N copies of the build output. On a fleet with 35 workspaces that came to 5.1 GB.
+
 **`git.sync` is the exception, and it is not cheap.** The clone-sharing above applies to
 `node_modules`, which pnpm materialises with `clonefile`. `git.sync` is a plain `rsync` of your `.git`,
 so each lane that uses it holds a genuine copy — measured at 381–536MB per lane on this repo, real
