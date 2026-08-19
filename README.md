@@ -289,10 +289,32 @@ so each lane that uses it holds a genuine copy — measured at 381–536MB per l
 bytes rather than shared blocks. Six lanes carrying one is roughly 3GB. Enable it only for the lanes
 that need `--changed`-style commands, and remember `bica lanes clean` reclaims it.
 
-If lane install *time* becomes the problem, pnpm's `enableGlobalVirtualStore` is the feature aimed at
-exactly this (its own docs recommend it for parallel checkouts and multi-agent development). It is
-experimental, with known ESM `NODE_PATH` and TypeScript inference edge cases, so treat it as an
-optimisation to try rather than a default.
+### Shrinking a lane further: pnpm's global virtual store
+
+Most of a lane's `node_modules` cost is not package data — it is ~197,000 filesystem objects. pnpm's
+`enableGlobalVirtualStore` moves the virtual store into the global store and leaves symlinks behind.
+Measured on this repo, one lane:
+
+| | default | global virtual store |
+| --- | --- | --- |
+| filesystem objects | 196,655 | **2,590** |
+| real disk | 74 MB | **2 MB** |
+| install, warm store | ~29 s | **~14 s** |
+| `pnpm test:run libs/src/acl` | passes | **1,166 tests pass** |
+
+Two things to know before enabling it, both found by trying it rather than by reading:
+
+- **It has to be set consistently, not per invocation.** bica's own fingerprint-driven auto-install
+  does not carry an ad-hoc `npm_config_*` env var, so it will reinstall the workspace in the default
+  layout and undo the global store. Put it in pnpm config (`pnpm-workspace.yaml` or `.npmrc`) so every
+  install agrees, or do not use it at all.
+- It remains experimental, with a documented ESM `NODE_PATH` issue and a TypeScript inference bug
+  ([pnpm#9739](https://github.com/pnpm/pnpm/issues/9739)). The suite above passing is evidence for this
+  workspace, not a general guarantee.
+
+Worth weighing against the other costs: at 27 lanes this saves roughly 2 GB, where `dist` accounts for
+5 GB and `git.sync` for 561 MB per lane. Turning `git.sync` off for lanes that do not need `--changed`
+is the larger and safer win.
 
 ### `--ref`: what a sweep actually needs
 
