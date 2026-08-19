@@ -270,11 +270,20 @@ export function tryResolveRemoteWorkspaceAbsolutePath(
 export function runRemoteScriptOverStdin(
   sshHost: string,
   script: string,
+  options?: {
+    /**
+     * Source the remote login files. Off by default -- probes are faster without them and do not care.
+     * Required for anything that invokes tooling installed by a version manager, because that tooling
+     * only exists on PATH once the login shell has activated it.
+     */
+    login?: boolean;
+  },
 ): { status: number; stdout: string; stderr: string } {
   const shell = loginShellFromEnv();
+  const login = options?.login === true;
   const runner = shell.includes('bash')
-    ? [shell, '--noprofile', '--norc', '-s']
-    : [shell, '-f', '-s'];
+    ? [shell, ...(login ? ['-l'] : ['--noprofile', '--norc']), '-s']
+    : [shell, ...(login ? ['-l'] : ['-f']), '-s'];
   const result = spawnSync('ssh', ['-T', sshHost, ...runner], {
     input: script,
     encoding: 'utf8',
@@ -512,15 +521,27 @@ export function buildMiseTrustScript(remoteWorkspacePath: string): string {
     `cd ${dir} 2>/dev/null || exit 0\n` +
     'command -v mise >/dev/null 2>&1 || exit 0\n' +
     '[ -f mise.toml ] || [ -f .mise.toml ] || exit 0\n' +
-    'mise trust --yes >/dev/null 2>&1 || true\n'
+    'mise trust --yes >/dev/null 2>&1 || exit 0\n' +
+    // Say so. A step that is silent whether or not it worked cannot be verified, and this one was
+    // broken twice over without anyone noticing.
+    "printf 'BICA_MISE_TRUSTED\\n'\n"
   );
 }
 
 export function remoteTrustMiseWorkspace(
   sshHost: string,
   remoteWorkspacePath: string,
-): void {
-  runRemoteScriptOverStdin(sshHost, buildMiseTrustScript(remoteWorkspacePath));
+): boolean {
+  // A login shell, because `mise` is put on PATH by the remote login files. Run without them the
+  // script's own `command -v mise` guard fails and it exits 0 having trusted nothing -- which is what
+  // it did, silently, even after the transport bug that also broke it was fixed. Two independent
+  // faults in one best-effort step that reports nothing on success is what kept it broken.
+  const r = runRemoteScriptOverStdin(
+    sshHost,
+    buildMiseTrustScript(remoteWorkspacePath),
+    { login: true },
+  );
+  return r.status === 0 && r.stdout.includes('BICA_MISE_TRUSTED');
 }
 
 /**

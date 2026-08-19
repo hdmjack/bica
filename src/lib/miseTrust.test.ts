@@ -36,8 +36,15 @@ describe('buildMiseTrustScript', () => {
   });
 
   it('never fails the run, whatever mise decides', () => {
-    // This is a convenience step before the real command; its failure must not mask the run's result.
-    expect(buildMiseTrustScript('~/x')).toMatch(/mise trust --yes .*\|\| true/);
+    // A convenience step before the real command; its failure must not mask the run's result. It exits
+    // 0 without printing the marker, so the caller learns nothing was trusted and carries on.
+    expect(buildMiseTrustScript('~/x')).toMatch(/mise trust --yes .*\|\| exit 0/);
+  });
+
+  it('announces success, so a step that silently does nothing cannot hide', () => {
+    // It hid twice: once behind an ssh transport bug, once behind running in a shell where mise is not
+    // on PATH. Both were invisible because success and failure looked identical from outside.
+    expect(buildMiseTrustScript('~/x')).toContain('BICA_MISE_TRUSTED');
   });
 
   it('produces no output on success, so it cannot pollute captured stdout', () => {
