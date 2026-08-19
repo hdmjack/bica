@@ -87,9 +87,32 @@ export function workingTreeOid(repoRoot: string): string | null {
   );
   try {
     const env = { GIT_INDEX_FILE: indexFile };
-    if (git(repoRoot, ['read-tree', 'HEAD'], env).status !== 0) {
+
+    // Seed from the repository's real index rather than `read-tree HEAD`.
+    //
+    // Both produce the same tree, but `read-tree` writes an index with no stat information, so the
+    // `add -A` that follows cannot tell which files are unchanged and re-hashes every one of them. On
+    // an 11k-file monorepo that measured 2.34s against 0.14s for the seeded form — and this runs twice
+    // per live-tree run, either side of the transfer, so it was roughly a third of the fixed cost of a
+    // lane run for no benefit at all.
+    //
+    // Copying leaves the real index untouched; nothing here ever writes through to it.
+    let seeded = false;
+    const realIndex = git(repoRoot, ['rev-parse', '--git-path', 'index']);
+    if (realIndex.status === 0) {
+      const from = path.resolve(repoRoot, realIndex.stdout.trim());
+      try {
+        fs.copyFileSync(from, indexFile);
+        seeded = true;
+      } catch {
+        // No index yet (a fresh clone that has never staged anything), or it is unreadable. The
+        // fallback below is correct, only slower.
+      }
+    }
+    if (!seeded && git(repoRoot, ['read-tree', 'HEAD'], env).status !== 0) {
       return null;
     }
+
     if (git(repoRoot, ['add', '-A'], env).status !== 0) {
       return null;
     }
