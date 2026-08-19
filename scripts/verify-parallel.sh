@@ -22,7 +22,9 @@
 #   4  A live-tree run raced against a tree that keeps changing must fail loudly, not report a
 #      result derived from a half-synced mix of two states. NOTE: this greps bica's own wording, so if
 #      that message changes, update the grep or this check silently becomes inconclusive.
-#   5  Wall-clock for N refs concurrently vs one ref alone, including any install cost.
+#   5  Wall-clock for N refs concurrently vs one ref alone. Measures per-run overhead first and
+#      declines to judge when the command is smaller than it, because concurrency cannot compress
+#      transport and a ratio measured there says nothing about whether lanes work.
 #
 set -uo pipefail
 
@@ -178,29 +180,59 @@ else
 fi
 
 section "5  Wall clock: N refs concurrently vs one ref alone"
+# This check used to divide two wall-clock numbers and call it a verdict. That is unsound, and it
+# misled its author three times in one day: a lane run has a fixed cost (content hash, tree rsync, a
+# handful of ssh round-trips) that concurrency cannot reduce, so for a command cheaper than that cost
+# the measurement is of transport, not of verification, and it will report FAIL however well lanes
+# work. Measure the overhead, subtract it, and decline to judge when the command is too small to say
+# anything -- an honest "cannot tell" beats a confident wrong answer.
 if [[ ${#SWEEP_REFS[@]} -eq 0 ]]; then
   note "skipped: pass --sweep ref1,ref2,... to measure a real sweep"
 else
   start=$SECONDS
-  "$BICA" --yes run --lane 1 --ref "${SWEEP_REFS[0]}" "${CMD[@]}" >"$OUT/single.log" 2>&1 || true
-  single=$((SECONDS - start))
+  "$BICA" --yes run --lane 1 true >"$OUT/overhead.log" 2>&1 || true
+  overhead=$((SECONDS - start))
 
   start=$SECONDS
-  for ref in "${SWEEP_REFS[@]}"; do
-    "$BICA" --yes run --lane auto --lanes "$LANES" --ref "$ref" "${CMD[@]}" \
-      >"$OUT/sweep-$(printf '%s' "$ref" | tr '/' '-').log" 2>&1 &
-  done
-  wait
-  sweep=$((SECONDS - start))
+  "$BICA" --yes run --lane 1 --ref "${SWEEP_REFS[0]}" "${CMD[@]}" >"$OUT/single.log" 2>&1 || true
+  single=$((SECONDS - start))
+  command_time=$((single - overhead))
+  [[ $command_time -lt 0 ]] && command_time=0
 
   n=${#SWEEP_REFS[@]}
-  note "one ref alone:        ${single}s"
-  note "$n refs concurrently: ${sweep}s"
-  note "serial equivalent:    $((single * n))s (${n} x one ref)"
-  if [[ $sweep -lt $((single * n)) ]]; then
-    pass "the sweep beat the serial equivalent"
+  note "per-run overhead:     ${overhead}s  (sync + hashing + ssh; concurrency cannot reduce this)"
+  note "command alone:        ~${command_time}s"
+  note "one ref end to end:   ${single}s"
+
+  if [[ $command_time -le $overhead ]]; then
+    note ""
+    note "NOT JUDGED: the command (~${command_time}s) is no larger than the per-run overhead (${overhead}s)."
+    note "Concurrent runs share one network link and one remote host, so when transport dominates they"
+    note "serialise no matter how well lanes work, and any ratio measured here describes the transport."
+    note "Re-run with a command that takes several times ${overhead}s -- the workload lanes exist for."
   else
-    fail "the sweep was no faster than running the refs one after another"
+    start=$SECONDS
+    for ref in "${SWEEP_REFS[@]}"; do
+      "$BICA" --yes run --lane auto --lanes "$LANES" --ref "$ref" "${CMD[@]}" \
+        >"$OUT/sweep-$(printf '%s' "$ref" | tr '/' '-').log" 2>&1 &
+    done
+    wait
+    sweep=$((SECONDS - start))
+
+    serial=$((single * n))
+    # Best case: every run's command overlaps, so the sweep costs one command plus each run's own
+    # unavoidable overhead. Reporting it turns a bare pass/fail into "how much of the available win
+    # did we get", which is the number worth tracking.
+    ideal=$((command_time + overhead * n))
+    note "$n refs concurrently: ${sweep}s"
+    note "serial equivalent:    ${serial}s (${n} x one ref)"
+    note "best case:            ~${ideal}s (commands fully overlapped)"
+    if [[ $sweep -lt $serial ]]; then
+      pass "the sweep beat the serial equivalent (saved $((serial - sweep))s of ${serial}s)"
+    else
+      fail "the sweep was no faster than running the refs one after another"
+      note "with the command larger than overhead this is a real result, not a measurement artefact"
+    fi
   fi
   note "pool size was $LANES; a sweep wider than the pool queues, so raise --lanes to fan out further"
 fi
