@@ -313,7 +313,18 @@ async function runPinnedLaneRunFrom(
 
   // The tree (and so `mise.toml`) is on the remote now, which is what `mise trust` needs to see.
   if (dirReady.created) {
-    remoteTrustMiseWorkspace(prep.config.sshHost, prep.config.remoteWorkspacePath);
+    const trusted = remoteTrustMiseWorkspace(
+      prep.config.sshHost,
+      prep.config.remoteWorkspacePath,
+    );
+    if (trusted) {
+      // Unconditional, not via `chrome`: that helper hides itself when stdout is piped, and this step
+      // spent its whole life invisible. Confirming it worked only on a TTY would repeat the fault that
+      // let two separate bugs in it go unnoticed. It fires once per lane creation, so it is not noise.
+      process.stderr.write(
+        `${dim(`[bica:${lane.label}]`)} ${dim('Trusted this new workspace with mise.')}\n`,
+      );
+    }
   }
 
   if (resolveBicaPluginConfig(prep.repoRoot).syncGit) {
