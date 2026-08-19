@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildPinnedPushArgs } from './pinnedSync';
+import { buildPinnedPushArgs, parseDeletedPaths } from './pinnedSync';
 
 function args(overrides: {
   syncIgnorePaths?: string[];
@@ -89,5 +89,34 @@ describe('buildPinnedPushArgs', () => {
   it('ends with source then dest', () => {
     const out = args({});
     expect(out.slice(-2)).toEqual(['/repo/', 'host:~/code/repo-lane-1/']);
+  });
+});
+
+describe('parseDeletedPaths', () => {
+  it('picks deletions out of itemised output', () => {
+    const out = [
+      '.d..t...... ./',
+      '*deleting   ui/src/icons/essentials/IconActivity.tsx',
+      '>f.st...... src/app.ts',
+      '*deleting   dist/bundle.js',
+    ].join('\n');
+    expect(parseDeletedPaths(out)).toEqual([
+      'ui/src/icons/essentials/IconActivity.tsx',
+      'dist/bundle.js',
+    ]);
+  });
+
+  it('finds nothing when nothing was deleted', () => {
+    expect(parseDeletedPaths('>f+++++++++ a.ts\n.d..t...... ./\n')).toEqual([]);
+  });
+
+  it('handles paths containing spaces', () => {
+    expect(parseDeletedPaths('*deleting   some dir/a file.ts')).toEqual([
+      'some dir/a file.ts',
+    ]);
+  });
+
+  it('is empty for empty output', () => {
+    expect(parseDeletedPaths('')).toEqual([]);
   });
 });
