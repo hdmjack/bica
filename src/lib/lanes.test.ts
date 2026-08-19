@@ -50,13 +50,6 @@ describe('defaultLaneIdentity', () => {
     expect(lane.stateDir).toBe(path.join(REPO, '.bica'));
   });
 
-  it('locks under a stem that is not a legal lane id, so no lane can collide with it', () => {
-    const defaultLock = path.basename(defaultLaneIdentity(REPO).lockFilePath);
-    const stem = defaultLock.replace(/\.lock$/, '');
-    expect(() => {
-      assertValidLaneId(stem);
-    }).toThrow();
-  });
 });
 
 describe('laneIdentity', () => {
@@ -66,11 +59,6 @@ describe('laneIdentity', () => {
     );
   });
 
-  it('gives each lane its own lock file', () => {
-    expect(laneIdentity(REPO, '1').lockFilePath).not.toBe(
-      laneIdentity(REPO, '2').lockFilePath,
-    );
-  });
 });
 
 describe('laneRemoteWorkspacePath', () => {

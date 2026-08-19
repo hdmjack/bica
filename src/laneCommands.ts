@@ -2,7 +2,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
-import { describeLockHolder, tryAcquireLock } from './lib/fileLock';
+import {
+  describeClaim,
+  describeSelfAsOwner,
+  remoteAcquireClaim,
+  remoteReleaseClaim,
+} from './lib/remoteClaim';
 import {
   isLaneRemotePath,
   laneIdentity,
@@ -100,12 +105,15 @@ export function cmdLanesList(poolOverride: number | undefined): void {
     const lane = laneIdentity(repoRoot, id);
     const remotePath = laneRemoteWorkspacePath(base.remoteWorkspacePath, lane);
     const inPool = laneIdsForPool(poolSize).includes(id);
-    // Probing by taking the lock and immediately releasing it is the only honest read: a lock file
-    // whose holder has died is free, and only acquisition knows that.
-    const probe = tryAcquireLock(lane.lockFilePath);
-    const busy = probe === null;
-    const holder = busy ? describeLockHolder(lane.lockFilePath) : null;
-    probe?.release();
+    // Ask the resource itself. A lane is busy if its remote workspace is leased -- by any checkout on
+    // any machine -- which is not something a local file can answer.
+    const owner = describeSelfAsOwner(`probe-${String(process.pid)}`);
+    const probe = remoteAcquireClaim(base.sshHost, remotePath, owner);
+    const busy = !probe.ok;
+    const holder = busy ? describeClaim(probe) : null;
+    if (probe.ok) {
+      remoteReleaseClaim(base.sshHost, remotePath, owner);
+    }
 
     const state = busy ? warn('busy') : dim('free');
     console.log(
@@ -139,15 +147,20 @@ export async function cmdLanesPrepare(options: {
   let failures = 0;
   for (const id of laneIdsForPool(poolSize)) {
     const lane = laneIdentity(repoRoot, id);
-    const lock = tryAcquireLock(lane.lockFilePath);
-    if (lock === null) {
+    const prep = prepareSyncProjectFile({ verbose: false, lane });
+    const owner = describeSelfAsOwner(`prepare-${id}-${String(process.pid)}`);
+    const leased = remoteAcquireClaim(
+      prep.config.sshHost,
+      prep.config.remoteWorkspacePath,
+      owner,
+    );
+    if (!leased.ok) {
       process.stderr.write(
-        `${warn('[bica]')} ${dim(`Lane ${id} is busy (${describeLockHolder(lane.lockFilePath)}); skipping.`)}\n`,
+        `${warn('[bica]')} ${dim(`Lane ${id} is in use by ${describeClaim(leased)}; skipping.`)}\n`,
       );
       continue;
     }
     try {
-      const prep = prepareSyncProjectFile({ verbose: false, lane });
       process.stderr.write(
         `${dim(`[bica:${id}]`)} preparing ${prep.remoteSyncUrl}\n`,
       );
@@ -199,7 +212,11 @@ export async function cmdLanesPrepare(options: {
         plugin.writeStoredHash(ctx, local);
       }
     } finally {
-      lock.release();
+      remoteReleaseClaim(
+        prep.config.sshHost,
+        prep.config.remoteWorkspacePath,
+        owner,
+      );
     }
   }
 
@@ -260,11 +277,11 @@ export async function cmdLanesClean(options: {
 
   let failures = 0;
   for (const t of targets) {
-    const lane = laneIdentity(repoRoot, t.id);
-    const lock = tryAcquireLock(lane.lockFilePath);
-    if (lock === null) {
+    const owner = describeSelfAsOwner(`clean-${t.id}-${String(process.pid)}`);
+    const leased = remoteAcquireClaim(base.sshHost, t.remotePath, owner);
+    if (!leased.ok) {
       process.stderr.write(
-        `${warn('[bica]')} ${dim(`Lane ${t.id} is busy; not removing it.`)}\n`,
+        `${warn('[bica]')} ${dim(`Lane ${t.id} is in use by ${describeClaim(leased)}; not removing it.`)}\n`,
       );
       failures += 1;
       continue;
@@ -284,7 +301,7 @@ export async function cmdLanesClean(options: {
       });
       process.stderr.write(`${dim(`[bica:${t.id}]`)} ${dim('removed')}\n`);
     } finally {
-      lock.release();
+      remoteReleaseClaim(base.sshHost, t.remotePath, owner);
     }
   }
   return failures > 0 ? 1 : 0;
