@@ -97,7 +97,9 @@ describe('runRemoteCommandWithPmHooks', () => {
       expect(code).toBe(0);
       expect(confirm).not.toHaveBeenCalled();
       expect(runRemote).toHaveBeenCalledTimes(2);
-      expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
+      expect(runRemote.mock.calls[0]?.[2]).toBe(
+        pnpmPackageManagerPlugin.remoteInstallCommand,
+      );
       expect(runRemote.mock.calls[0]?.[3]).toBe(repoRoot);
       expect(runRemote.mock.calls[1]?.[2]).toContain('pnpm');
       expect(runRemote.mock.calls[1]?.[2]).toContain('test');
@@ -138,7 +140,9 @@ describe('runRemoteCommandWithPmHooks', () => {
 
       expect(confirm).not.toHaveBeenCalled();
       expect(runRemote).toHaveBeenCalledTimes(2);
-      expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
+      expect(runRemote.mock.calls[0]?.[2]).toBe(
+        pnpmPackageManagerPlugin.remoteInstallCommand,
+      );
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -216,7 +220,9 @@ describe('runRemoteCommandWithPmHooks', () => {
 
       expect(code).toBe(0);
       expect(runRemote).toHaveBeenCalledTimes(2);
-      expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
+      expect(runRemote.mock.calls[0]?.[2]).toBe(
+        pnpmPackageManagerPlugin.remoteInstallCommand,
+      );
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -318,7 +324,9 @@ describe('runRemoteCommandWithPmHooks', () => {
 
       expect(confirm).not.toHaveBeenCalled();
       expect(runRemote).toHaveBeenCalledTimes(2);
-      expect(runRemote.mock.calls[0]?.[2]).toBe('pnpm install');
+      expect(runRemote.mock.calls[0]?.[2]).toBe(
+        pnpmPackageManagerPlugin.remoteInstallCommand,
+      );
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
       expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(fp);

@@ -121,5 +121,14 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
     }
     return INSTALL_FIRST_ARGS.has(remoteArgv[1] ?? '');
   },
-  remoteInstallCommand: 'pnpm install',
+  // `CI=true` because this install always runs over ssh with no TTY. When pnpm needs to recreate
+  // `node_modules` -- a changed layout, a switch of linker mode -- it asks for confirmation, and
+  // without a TTY it aborts with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY, which reads as a broken
+  // install rather than a missing flag. Observed while testing an alternative store layout.
+  //
+  // The side effect is deliberate: under CI, `pnpm install` behaves as `--frozen-lockfile`. That is
+  // the right default here, because bica triggers this install from a *lockfile* fingerprint, so the
+  // lockfile is the thing being reproduced. The alternative -- pnpm silently updating the lockfile on
+  // the remote so it no longer matches the local one -- is the worse failure.
+  remoteInstallCommand: 'CI=true pnpm install',
 };
