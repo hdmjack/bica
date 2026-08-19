@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
@@ -143,6 +144,50 @@ export function acquireLaneForRun(options: {
 }
 
 /**
+ * Point out generated files the push removed from the remote.
+ *
+ * A mirror deletes anything the remote has and the source does not. When that something was produced
+ * *on* the remote by an install step, the run then executes against files that existed a moment
+ * earlier — one session lost an afternoon to 333 `TS2307`s from exactly this, because the icons its
+ * postinstall generates are not in `sync.ignore.paths`.
+ *
+ * Only gitignored deletions are reported. A tracked file disappearing is ordinary branch difference
+ * and saying so on every ref switch would be noise; a gitignored one is content no local copy will
+ * restore, which is the shape of the problem.
+ *
+ * Deliberately a warning and not a repair. The obvious repair — invalidate the install fingerprint so
+ * the next step regenerates them — would fire on nearly every `--ref` run, because a ref worktree
+ * contains no gitignored files at all and so legitimately deletes every one of them. That would mean
+ * a full install per run, which is the cost lanes exist to avoid. Naming the files lets the user add
+ * them to `sync.ignore.paths` once, which fixes it properly.
+ */
+function warnAboutDeletedGeneratedFiles(
+  repoRoot: string,
+  deleted: readonly string[],
+): void {
+  if (deleted.length === 0) {
+    return;
+  }
+  const check = spawnSync('git', ['check-ignore', '--stdin'], {
+    cwd: repoRoot,
+    input: deleted.join('\n'),
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const ignored = (check.stdout ?? '').split('\n').filter((l) => l.trim() !== '');
+  if (ignored.length === 0) {
+    return;
+  }
+  const shown = ignored.slice(0, 5).map((p) => `    ${p}`).join('\n');
+  const more = ignored.length > 5 ? `\n    …and ${String(ignored.length - 5)} more` : '';
+  process.stderr.write(
+    `${warn('[bica]')} ${dim(`The sync removed ${String(ignored.length)} gitignored file(s) from the remote workspace:`)}\n${shown}${more}\n` +
+      `${dim('    These exist on the remote but not locally, so the mirror deletes them. If an install or')}\n` +
+      `${dim('    build step produces them there, add them to sync.ignore.paths so each side keeps its own.')}\n`,
+  );
+}
+
+/**
  * Run a command in a lane against a pinned copy of the working tree: push once, run, optionally pull.
  * Returns the remote command's exit code, or a non-zero bica-side code when the push failed.
  *
@@ -247,6 +292,8 @@ async function runPinnedLaneRunFrom(
     return 1;
   }
   const runId = options.owner.runId;
+
+  warnAboutDeletedGeneratedFiles(prep.repoRoot, push.deleted);
 
   // The tree (and so `mise.toml`) is on the remote now, which is what `mise trust` needs to see.
   if (dirReady.created) {

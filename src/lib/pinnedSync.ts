@@ -75,6 +75,10 @@ export function buildPinnedPushArgs(options: {
   return [
     '-az',
     '--delete',
+    // Itemised output so deletions are visible. A file the remote had and the source does not is
+    // removed silently otherwise, and when it is something the remote *generated* that is how a run
+    // ends up compiling against files that existed a moment ago.
+    '-i',
     ...includes.map((p) => `--filter=+ ${p}`),
     ...Array.from(new Set(excludes)).map((p) => `--filter=- ${p}`),
     options.source,
@@ -96,6 +100,20 @@ export interface PinnedPushResult {
   treeOidBefore?: string;
   /** Content name observed after. Differs from `treeOidBefore` exactly when `torn` is set. */
   treeOidAfter?: string;
+  /** Paths the push removed from the remote workspace. */
+  deleted: string[];
+}
+
+/** Pull the `*deleting <path>` lines out of itemised rsync output. */
+export function parseDeletedPaths(rsyncStdout: string): string[] {
+  const out: string[] = [];
+  for (const line of rsyncStdout.split('\n')) {
+    const m = /^\*deleting\s+(.+?)\s*$/.exec(line);
+    if (m !== null) {
+      out.push(m[1]);
+    }
+  }
+  return out;
 }
 
 /**
@@ -148,18 +166,25 @@ export function pushPinnedWorkingTree(options: {
     process.stderr.write(
       `${warn('[bica]')} ${dim(`pinned sync rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
     );
-    return { ok: false, exitCode: code, treeOidBefore: before ?? undefined };
+    return { ok: false, exitCode: code, treeOidBefore: before ?? undefined, deleted: [] };
   }
 
   // An immutable source needs no re-check, and a checkout git cannot describe gets no content name —
   // in neither case is there a comparison to fail.
+  const deleted = parseDeletedPaths(result.stdout ?? '');
   if (options.knownTreeOid !== undefined || !isLiveTree || before === null) {
-    return { ok: true, exitCode: 0, treeOidBefore: before ?? undefined };
+    return { ok: true, exitCode: 0, treeOidBefore: before ?? undefined, deleted };
   }
 
   const after = workingTreeOid(options.repoRoot);
   if (after === null || before === after) {
-    return { ok: true, exitCode: 0, treeOidBefore: before, treeOidAfter: after ?? undefined };
+    return {
+      ok: true,
+      exitCode: 0,
+      treeOidBefore: before,
+      treeOidAfter: after ?? undefined,
+      deleted,
+    };
   }
   return {
     ok: false,
@@ -167,5 +192,6 @@ export function pushPinnedWorkingTree(options: {
     exitCode: 0,
     treeOidBefore: before,
     treeOidAfter: after,
+    deleted,
   };
 }
