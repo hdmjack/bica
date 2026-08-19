@@ -1,115 +1,162 @@
-import * as fs from 'node:fs';
 import * as os from 'node:os';
-import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
-import { readLockHolder, tryAcquireLock } from './fileLock';
 import { acquireLaneForRun } from './laneRun';
-import { defaultLaneIdentity, laneIdentity } from './lanes';
-import type { HeldLock } from './fileLock';
+import type { LeaseOps } from './laneRun';
+import type { ClaimOwner, ClaimResult } from './remoteClaim';
 
-let repoRoot = '';
-const opened: HeldLock[] = [];
+const REPO = '/repo';
+const BASE = '~/code/repo';
 
-beforeEach(() => {
-  repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-lane-run-'));
-});
-
-afterEach(() => {
-  while (opened.length > 0) {
-    opened.pop()?.release();
-  }
-  fs.rmSync(repoRoot, { recursive: true, force: true });
-});
-
-function take(lockFilePath: string): void {
-  const lock = tryAcquireLock(lockFilePath);
-  if (lock === null) {
-    throw new Error(`test setup could not take ${lockFilePath}`);
-  }
-  opened.push(lock);
+/**
+ * A stand-in for the remote host: a map of workspace path to its current holder. Selection is pure
+ * decision-making over this, so it can be exercised without SSH — the round-trips themselves are
+ * covered by the live checks.
+ */
+function fakeLease(initial: Record<string, ClaimOwner> = {}): LeaseOps & {
+  held: Record<string, ClaimOwner>;
+  calls: string[];
+} {
+  const held: Record<string, ClaimOwner> = { ...initial };
+  const calls: string[] = [];
+  return {
+    held,
+    calls,
+    acquire(remotePath, owner): ClaimResult {
+      calls.push(remotePath);
+      const current = held[remotePath];
+      if (current !== undefined) {
+        return { ok: false, heldBy: current, raw: 'held' };
+      }
+      held[remotePath] = owner;
+      return { ok: true };
+    },
+    break(remotePath, expected) {
+      if (held[remotePath]?.runId === expected.runId) {
+        delete held[remotePath];
+      }
+    },
+    release(remotePath, owner) {
+      if (held[remotePath]?.runId === owner.runId) {
+        delete held[remotePath];
+      }
+    },
+  };
 }
 
-function acquire(laneArg: string | undefined, poolSize = 3): ReturnType<typeof acquireLaneForRun> {
-  const result = acquireLaneForRun({ repoRoot, laneArg, poolSize });
-  opened.push(result.lock);
-  return result;
+/**
+ * A run that is genuinely still alive. It has to use a real live pid: this host's own claims are
+ * checked with `kill -0`, so a made-up pid would be judged dead, the lease broken, and the test would
+ * be asserting the takeover path while appearing to assert contention.
+ */
+const otherRun = (tag: number): ClaimOwner => ({
+  runId: `other-${String(tag)}`,
+  host: os.hostname(),
+  pid: process.pid,
+});
+
+function acquire(lease: LeaseOps, laneArg: string | undefined, poolSize = 3) {
+  return acquireLaneForRun({
+    repoRoot: REPO,
+    baseRemotePath: BASE,
+    laneArg,
+    poolSize,
+    runIdFor: (l) => `${l.label}-1`,
+    lease,
+  });
 }
-
-describe('acquireLaneForRun — default workspace', () => {
-  it('claims the default lane and holds its lock', () => {
-    const { lane } = acquire(undefined);
-    expect(lane.isDefault).toBe(true);
-    expect(readLockHolder(lane.lockFilePath)?.pid).toBe(process.pid);
-  });
-
-  it('refuses when another run already owns the checkout, and points at lanes', () => {
-    // Two default runs would sync different trees into one remote directory and each would report a
-    // result derived from the other's files. An upfront error is the whole point of the lock.
-    take(defaultLaneIdentity(repoRoot).lockFilePath);
-    expect(() => acquire(undefined)).toThrow(/--lane auto/);
-  });
-});
-
-describe('acquireLaneForRun — explicit lane', () => {
-  it('claims the named lane', () => {
-    const { lane } = acquire('2');
-    expect(lane.id).toBe('2');
-  });
-
-  it('refuses a busy lane and names the holder', () => {
-    take(laneIdentity(repoRoot, '2').lockFilePath);
-    expect(() => acquire('2')).toThrow(/Lane "2" is already in use/);
-    expect(() => acquire('2')).toThrow(new RegExp(String(process.pid)));
-  });
-
-  it('rejects an invalid lane id before anything is created', () => {
-    expect(() => acquire('../escape')).toThrow(/Invalid lane id/);
-  });
-
-  it('does not treat a busy lane as blocking a different one', () => {
-    take(laneIdentity(repoRoot, '1').lockFilePath);
-    expect(acquire('2').lane.id).toBe('2');
-  });
-});
 
 describe('acquireLaneForRun — auto', () => {
-  it('takes the first lane in the pool', () => {
-    expect(acquire('auto').lane.id).toBe('1');
+  it('takes the first lane whose workspace is free', () => {
+    const lease = fakeLease();
+    expect(acquire(lease, 'auto').lane.id).toBe('1');
   });
 
-  it('advances past busy lanes', () => {
-    take(laneIdentity(repoRoot, '1').lockFilePath);
-    take(laneIdentity(repoRoot, '2').lockFilePath);
-    expect(acquire('auto').lane.id).toBe('3');
+  it('advances past a lane held by another run, rather than refusing', () => {
+    // The old lock-based selection refused here, because each checkout counted lanes on its own and
+    // could not see a sibling clone holding lane 1. Advancing is the whole point of `auto`.
+    const lease = fakeLease({ '~/code/repo-lane-1': otherRun(4242) });
+    expect(acquire(lease, 'auto').lane.id).toBe('2');
   });
 
-  it('hands concurrent callers different lanes', () => {
-    const ids = [acquire('auto').lane.id, acquire('auto').lane.id, acquire('auto').lane.id];
+  it('advances past several held lanes', () => {
+    const lease = fakeLease({
+      '~/code/repo-lane-1': otherRun(1),
+      '~/code/repo-lane-2': otherRun(2),
+    });
+    expect(acquire(lease, 'auto').lane.id).toBe('3');
+  });
+
+  it('hands successive callers different lanes', () => {
+    const lease = fakeLease();
+    const ids = [
+      acquire(lease, 'auto').lane.id,
+      acquire(lease, 'auto').lane.id,
+      acquire(lease, 'auto').lane.id,
+    ];
     expect(new Set(ids).size).toBe(3);
   });
 
-  it('errors with the pool size when every lane is busy', () => {
-    for (const id of ['1', '2', '3']) {
-      take(laneIdentity(repoRoot, id).lockFilePath);
-    }
-    expect(() => acquire('auto')).toThrow(/All 3 lanes are busy/);
+  it('names every holder when the pool is exhausted', () => {
+    const lease = fakeLease({
+      '~/code/repo-lane-1': otherRun(1),
+      '~/code/repo-lane-2': otherRun(2),
+      '~/code/repo-lane-3': otherRun(3),
+    });
+    expect(() => acquire(lease, 'auto')).toThrow(/All 3 lanes are in use/);
+    expect(() => acquire(lease, 'auto')).toThrow(/other-1/);
   });
 
-  it('respects the pool size it is given', () => {
-    take(laneIdentity(repoRoot, '1').lockFilePath);
-    expect(() => acquire('auto', 1)).toThrow(/All 1 lanes are busy/);
+  it('reclaims a lane whose holder is gone, without consuming a different lane', () => {
+    // pid 2^31-1 is above every platform's pid_max, so it can never be running.
+    const dead: ClaimOwner = { runId: 'dead', host: os.hostname(), pid: 2147483647 };
+    const lease = fakeLease({ '~/code/repo-lane-1': dead });
+    expect(acquire(lease, 'auto').lane.id).toBe('1');
   });
 
-  it('reuses a lane whose previous holder died', () => {
-    const lane = laneIdentity(repoRoot, '1');
-    fs.mkdirSync(path.dirname(lane.lockFilePath), { recursive: true });
-    fs.writeFileSync(
-      lane.lockFilePath,
-      JSON.stringify({ pid: 2147483647, acquiredAt: 'then', command: 'killed run' }),
-      'utf8',
-    );
-    // A hard-killed run must not retire its lane permanently.
-    expect(acquire('auto').lane.id).toBe('1');
+  it('honours a live lease from another machine, which it cannot interrogate', () => {
+    const remote: ClaimOwner = { runId: 'far', host: 'some-other-box', pid: 2147483647 };
+    const lease = fakeLease({ '~/code/repo-lane-1': remote });
+    // Even though that pid is dead *here*, it says nothing about the machine that owns it.
+    expect(acquire(lease, 'auto').lane.id).toBe('2');
+  });
+});
+
+describe('acquireLaneForRun — explicit and default', () => {
+  it('takes the named lane', () => {
+    expect(acquire(fakeLease(), '2').lane.id).toBe('2');
+  });
+
+  it('refuses a named lane that is held, and says who holds it', () => {
+    const lease = fakeLease({ '~/code/repo-lane-2': otherRun(77) });
+    expect(() => acquire(lease, '2')).toThrow(/Lane "2" is in use/);
+    expect(() => acquire(lease, '2')).toThrow(/other-77/);
+  });
+
+  it('leases the base workspace for the default run', () => {
+    const lease = fakeLease();
+    const got = acquire(lease, undefined);
+    expect(got.lane.isDefault).toBe(true);
+    expect(lease.held[BASE]).toBeDefined();
+  });
+
+  it('refuses the default workspace when another run holds it', () => {
+    const lease = fakeLease({ [BASE]: otherRun(9) });
+    expect(() => acquire(lease, undefined)).toThrow(/this checkout's remote workspace is in use/i);
+  });
+
+  it('rejects an invalid lane id before touching the host', () => {
+    const lease = fakeLease();
+    expect(() => acquire(lease, '../escape')).toThrow(/Invalid lane id/);
+    expect(lease.calls).toEqual([]);
+  });
+});
+
+describe('releasing', () => {
+  it('frees the workspace for the next caller', () => {
+    const lease = fakeLease();
+    const first = acquire(lease, 'auto');
+    first.release();
+    expect(acquire(lease, 'auto').lane.id).toBe('1');
   });
 });

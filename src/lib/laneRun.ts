@@ -2,12 +2,7 @@ import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { dim, syncRemoteTarget, warn } from '../terminalStyle';
-import {
-  acquireLockWithWait,
-  describeLockHolder,
-  isProcessAlive,
-  tryAcquireLock,
-} from './fileLock';
+import { acquireLockWithWait, isProcessAlive } from './fileLock';
 import {
   resolveGitRef,
   setRemoteHeadForPin,
@@ -18,6 +13,7 @@ import {
   defaultLaneIdentity,
   laneIdentity,
   laneIdsForPool,
+  laneRemoteWorkspacePath,
   lockRootDir,
 } from './lanes';
 import { shortOid } from './contentIdentity';
@@ -26,10 +22,8 @@ import {
   claimPathExpr,
   describeClaim,
   describeSelfAsOwner,
-  remoteAcquireClaim,
-  remoteBreakClaim,
-  remoteReleaseClaim,
 } from './remoteClaim';
+import type { ClaimOwner, ClaimResult } from './remoteClaim';
 import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
@@ -41,7 +35,6 @@ import {
   ensureRemoteWorkspaceDirectory,
   runRemoteCommandWithPmHooks,
 } from './runWithPackageManagerPlugins';
-import type { HeldLock } from './fileLock';
 import type { ResolvedGitRef } from './gitPin';
 import type { LaneIdentity } from './lanes';
 import type { ConfirmFn } from '../plugins/types';
@@ -50,70 +43,103 @@ import type { PrepareResult } from '../syncProject';
 /** How long a queued return-flow pull waits for the lane ahead of it to finish its pull. */
 const RETURN_FLOW_LOCK_TIMEOUT_MS = 120_000;
 
-export interface AcquiredLane {
-  lane: LaneIdentity;
-  lock: HeldLock;
-}
 
 function returnFlowLockPath(repoRoot: string): string {
   return path.join(lockRootDir(repoRoot), '_return-flow.lock');
 }
 
+/** How a lane was obtained, and how to give it back. */
+export interface AcquiredLane {
+  lane: LaneIdentity;
+  owner: ClaimOwner;
+  release: () => void;
+}
+
+/** Injectable so selection can be tested without an SSH host. */
+export interface LeaseOps {
+  acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
+  break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
+  release: (remoteWorkspacePath: string, owner: ClaimOwner) => void;
+}
+
 /**
- * Claim a lane for this run and hold its lock for the run's lifetime.
+ * Claim a lane for this run by leasing its remote workspace.
  *
- * The lock is what makes concurrency safe rather than merely possible: without it two runs can still
- * choose the same lane, sync different trees into one remote directory, and each report a result
- * derived from the other's files. Holding it converts that into an error before anything syncs.
+ * Selection used to consult a lock file under `<checkout>/.bica/locks`, which was wrong in two ways
+ * at once. It could not see a run from a sibling clone — the case that actually bit, since the
+ * contended resource is a directory on a shared host — and because each checkout counted lanes
+ * independently, two clones would both pick lane 1 and the second would be *refused* rather than
+ * advancing to lane 2. Leasing the workspace fixes both: `auto` walks the pool asking the resource
+ * itself, and moves on when a lane is genuinely taken by anyone, from anywhere.
  *
- * - `laneArg` unset — the default workspace. Contention is an error naming the holder, because the
- *   caller asked for *this* workspace specifically.
- * - `laneArg === 'auto'` — the first lane in the pool whose lock is free. Contention is expected and
- *   simply advances to the next candidate; running out means the pool is smaller than the fan-out.
- * - an explicit lane id — that lane, or an error naming the holder.
+ * A lease left by a process that no longer exists is broken and retried once, so a killed run costs
+ * the next one a round-trip rather than the lane.
  */
 export function acquireLaneForRun(options: {
   repoRoot: string;
+  /** Base remote workspace path, before any lane suffix. */
+  baseRemotePath: string;
   laneArg: string | undefined;
   poolSize: number;
+  runIdFor: (lane: LaneIdentity) => string;
+  lease: LeaseOps;
 }): AcquiredLane {
-  const { repoRoot, laneArg, poolSize } = options;
+  const { repoRoot, baseRemotePath, laneArg, poolSize, lease } = options;
 
-  if (laneArg === undefined) {
-    const lane = defaultLaneIdentity(repoRoot);
-    const lock = tryAcquireLock(lane.lockFilePath);
-    if (lock === null) {
-      throw new Error(
-        `Another bica run already owns this checkout's remote workspace: ${describeLockHolder(lane.lockFilePath)}\n` +
-          'Concurrent runs need their own workspace — start them with `bica run --lane auto ...`.',
-      );
+  const tryLane = (lane: LaneIdentity): AcquiredLane | ClaimResult => {
+    const remotePath = laneRemoteWorkspacePath(baseRemotePath, lane);
+    const owner = describeSelfAsOwner(options.runIdFor(lane));
+    let result = lease.acquire(remotePath, owner);
+    if (!result.ok && claimIsStale(result.heldBy, isProcessAlive)) {
+      if (result.heldBy !== null) {
+        lease.break(remotePath, result.heldBy);
+      }
+      result = lease.acquire(remotePath, owner);
     }
-    return { lane, lock };
-  }
+    if (!result.ok) {
+      return result;
+    }
+    return {
+      lane,
+      owner,
+      release: () => {
+        lease.release(remotePath, owner);
+      },
+    };
+  };
 
   if (laneArg === AUTO_LANE) {
+    const refusals: string[] = [];
     for (const id of laneIdsForPool(poolSize)) {
-      const lane = laneIdentity(repoRoot, id);
-      const lock = tryAcquireLock(lane.lockFilePath);
-      if (lock !== null) {
-        return { lane, lock };
+      const got = tryLane(laneIdentity(repoRoot, id));
+      if ('lane' in got) {
+        return got;
       }
+      refusals.push(`  lane ${id}: ${describeClaim(got)}`);
     }
     throw new Error(
-      `All ${String(poolSize)} lanes are busy. Wait for a run to finish, or raise the pool size ` +
-        '(`parallel.lanes` in bica.yml, `BICA_LANES`, or `--lanes N`).',
+      `All ${String(poolSize)} lanes are in use:\n${refusals.join('\n')}\n` +
+        'Wait for one to finish, or raise the pool size (`parallel.lanes` in bica.yml, `BICA_LANES`, ' +
+        'or `--lanes N`). Lanes are shared across every checkout pointing at the same remote host.',
     );
   }
 
-  const lane = laneIdentity(repoRoot, laneArg);
-  const lock = tryAcquireLock(lane.lockFilePath);
-  if (lock === null) {
-    throw new Error(
-      `Lane "${laneArg}" is already in use: ${describeLockHolder(lane.lockFilePath)}\n` +
-        'Pick another lane, or use `--lane auto` to take the first free one.',
-    );
+  const lane =
+    laneArg === undefined
+      ? defaultLaneIdentity(repoRoot)
+      : laneIdentity(repoRoot, laneArg);
+  const got = tryLane(lane);
+  if ('lane' in got) {
+    return got;
   }
-  return { lane, lock };
+  const which = lane.isDefault
+    ? "this checkout's remote workspace"
+    : `Lane "${lane.label}"`;
+  throw new Error(
+    `${which} is in use by ${describeClaim(got)}.\n` +
+      'Syncing into it would overwrite that run\'s files, so neither result would be trustworthy. ' +
+      'Use `--lane auto` to take the first free lane, or wait for it to finish.',
+  );
 }
 
 /**
@@ -134,6 +160,8 @@ export async function runPinnedLaneRun(options: {
   returnFlowOptIn: boolean;
   /** `--ref`: pin the lane to this git ref's committed content instead of the live working tree. */
   ref: string | undefined;
+  /** Lease taken during lane selection; this run already owns the workspace. */
+  owner: ClaimOwner;
   chrome: (text: string) => void;
 }): Promise<number> {
   const { prep } = options;
@@ -159,6 +187,7 @@ async function runPinnedLaneRunFrom(
     pmOverride: string | undefined;
     confirm: ConfirmFn;
     returnFlow: boolean;
+    owner: ClaimOwner;
     chrome: (text: string) => void;
   },
   sourceDir: string | undefined,
@@ -177,51 +206,9 @@ async function runPinnedLaneRunFrom(
     return dirReady.code;
   }
 
-  // The lease is taken here, *before* the rsync, because the rsync is what destroys another run's
-  // work. Claiming after it would let this run overwrite a live run's files and only then discover the
-  // conflict -- which is exactly what happened: the victim exited 97 and the thief exited 0.
-  const owner = describeSelfAsOwner(
-    resolvedRef === undefined
-      ? `${lane.label}-${String(process.pid)}`
-      : `${shortOid(resolvedRef.treeOid)}-${String(process.pid)}`,
-  );
-  let claim = remoteAcquireClaim(
-    prep.config.sshHost,
-    prep.config.remoteWorkspacePath,
-    owner,
-  );
-  if (!claim.ok && claimIsStale(claim.heldBy, isProcessAlive)) {
-    // The holder is gone. Break exactly the claim we inspected and try once more.
-    if (claim.heldBy !== null) {
-      remoteBreakClaim(prep.config.sshHost, prep.config.remoteWorkspacePath, claim.heldBy);
-    }
-    claim = remoteAcquireClaim(
-      prep.config.sshHost,
-      prep.config.remoteWorkspacePath,
-      owner,
-    );
-  }
-  if (!claim.ok) {
-    process.stderr.write(
-      `${warn('[bica]')} ${prep.remoteSyncUrl} is in use by ${describeClaim(claim)}. ` +
-        'Refusing to run: syncing into it would overwrite that run\'s files, and neither result would ' +
-        'then be trustworthy. Use a different lane, or wait for it to finish.\n',
-    );
-    return REMOTE_CONTENT_MISMATCH_EXIT;
-  }
+  // The lease was taken during lane selection, before anything was synced, and is released by the
+  // caller. By the time we get here the workspace is ours.
   const claimExpr = claimPathExpr(prep.config.remoteWorkspacePath);
-  // Released on every path below. A hard kill still strands it, but that is recoverable without a
-  // clock: the claim names this machine and this pid, so the next run finds the owner gone and breaks it.
-  const releaseClaim = (): void => {
-    remoteReleaseClaim(prep.config.sshHost, prep.config.remoteWorkspacePath, owner);
-  };
-  try {
-    return await runLeasedCommand();
-  } finally {
-    releaseClaim();
-  }
-
-  async function runLeasedCommand(): Promise<number> {
   const sourceLabel =
     resolvedRef === undefined
       ? 'working tree'
@@ -233,7 +220,7 @@ async function runPinnedLaneRunFrom(
   // for the workspace path to satisfy itself a run was its own; this states it outright, for any
   // command, and pairs it with the content name so the run can be checked against what was intended.
   process.stderr.write(
-    `${dim('[bica]')} lane ${lane.label}  workspace ${prep.remoteSyncUrl}  content ${sourceLabel}  run ${owner.runId}\n`,
+    `${dim('[bica]')} lane ${lane.label}  workspace ${prep.remoteSyncUrl}  content ${sourceLabel}  run ${options.owner.runId}\n`,
   );
   chrome(
     `${dim(`[bica:${lane.label}]`)} ${dim(`Pinning ${sourceLabel} to`)} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
@@ -259,7 +246,7 @@ async function runPinnedLaneRunFrom(
     }
     return 1;
   }
-  const runId = owner.runId;
+  const runId = options.owner.runId;
 
   // The tree (and so `mise.toml`) is on the remote now, which is what `mise trust` needs to see.
   if (dirReady.created) {
@@ -351,5 +338,4 @@ async function runPinnedLaneRunFrom(
   }
 
   return code;
-  }
 }

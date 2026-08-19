@@ -18,6 +18,7 @@ import {
 } from './laneCommands';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import { acquireLaneForRun, runPinnedLaneRun } from './lib/laneRun';
+import { sshLeaseOps } from './lib/remoteClaim';
 import { isLaneRemotePath } from './lib/lanes';
 import {
   assertMutagenInstalled,
@@ -596,10 +597,16 @@ async function cmdRun(options: {
     );
   }
 
-  const { lane, lock } = acquireLaneForRun({
+  // The lease has to be taken before anything is synced, so lane selection resolves the base remote
+  // path itself rather than waiting for prepareSyncProjectFile.
+  const baseRemote = loadRemoteEnvConfig(repoRoot);
+  const { lane, owner, release } = acquireLaneForRun({
     repoRoot,
+    baseRemotePath: baseRemote.remoteWorkspacePath,
     laneArg,
     poolSize,
+    runIdFor: (l) => `${l.label}-${String(process.pid)}`,
+    lease: sshLeaseOps(baseRemote.sshHost),
   });
 
   // Released after every other teardown step. Note what this does *not* guarantee: Node does not run
@@ -607,7 +614,7 @@ async function cmdRun(options: {
   // is the stale-pid takeover in fileLock that recovers it — as it is for a hard kill. The listener
   // covers normal and error exits only.
   const releaseLock = (): void => {
-    lock.release();
+    release();
   };
   process.on('exit', releaseLock);
 
@@ -644,6 +651,7 @@ async function cmdRun(options: {
         confirm,
         returnFlowOptIn: options.returnFlow,
         ref: options.ref,
+        owner,
         chrome,
       });
     }

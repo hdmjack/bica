@@ -25,9 +25,6 @@ export const MAX_LANE_POOL_SIZE = 32;
 /** Sentinel `--lane` value meaning "pick the first free lane in the pool". */
 export const AUTO_LANE = 'auto';
 
-/** Lock filename stem for the default (non-lane) run. Not a legal lane id, so it cannot collide. */
-const DEFAULT_LANE_LOCK_STEM = '_default';
-
 /**
  * Lane ids become part of a remote directory name and a Mutagen session name, so they are
  * restricted to lowercase alphanumerics and dashes — no separators, no leading dash, no expansion
@@ -44,8 +41,6 @@ export interface LaneIdentity {
   suffix: string;
   /** Absolute local directory holding this lane's bica state (install fingerprints, project file). */
   stateDir: string;
-  /** Absolute path of the local lock file that serialises runs on this lane. */
-  lockFilePath: string;
   /** Short label for log lines (`default` or the lane id). */
   label: string;
 }
@@ -87,7 +82,6 @@ export function defaultLaneIdentity(repoRoot: string): LaneIdentity {
     isDefault: true,
     suffix: '',
     stateDir: path.join(repoRoot, '.bica'),
-    lockFilePath: path.join(lockRootDir(repoRoot), `${DEFAULT_LANE_LOCK_STEM}.lock`),
     label: 'default',
   };
 }
@@ -99,7 +93,6 @@ export function laneIdentity(repoRoot: string, laneId: string): LaneIdentity {
     isDefault: false,
     suffix: `-lane-${laneId}`,
     stateDir: path.join(lanesRootDir(repoRoot), laneId),
-    lockFilePath: path.join(lockRootDir(repoRoot), `${laneId}.lock`),
     label: laneId,
   };
 }

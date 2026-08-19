@@ -182,6 +182,23 @@ export function claimIsStale(
   return !isProcessAlive(heldBy.pid);
 }
 
+/** The real lease operations against a host, for callers that are not tests. */
+export function sshLeaseOps(sshHost: string): {
+  acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
+  break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
+  release: (remoteWorkspacePath: string, owner: ClaimOwner) => void;
+} {
+  return {
+    acquire: (p, owner) => remoteAcquireClaim(sshHost, p, owner),
+    break: (p, held) => {
+      remoteBreakClaim(sshHost, p, held);
+    },
+    release: (p, owner) => {
+      remoteReleaseClaim(sshHost, p, owner);
+    },
+  };
+}
+
 /** Human-readable, for the refusal message. */
 export function describeClaim(result: ClaimResult): string {
   if (result.ok) {
