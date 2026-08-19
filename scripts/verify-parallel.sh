@@ -11,9 +11,10 @@
 #   scripts/verify-parallel.sh --green main --red feat/known-broken -- pnpm validate
 #
 # Checks, in order:
-#   0  The green ref passes alone, establishing that it is a usable baseline. Two independent attempts
-#      at this harness failed check 1 because "green" was not green; without this, that failure is
-#      indistinguishable from lanes crossing, which is the one thing check 1 exists to show.
+#   0  The green ref passes alone and the red ref fails alone, establishing that the contrast is real.
+#      Three separate runs of this harness have failed check 1 on bad inputs -- twice a "green" ref
+#      that was not green, once a "red" ref that was not red for the command being used. Each looks
+#      exactly like lanes crossing, which is the one thing check 1 exists to show.
 #   1  Green and red run concurrently in separate lanes; each must report its own outcome.
 #   2  The lanes' remote HEADs must differ afterwards — direct evidence the content did not cross,
 #      rather than an inference from exit codes.
@@ -83,7 +84,7 @@ remote_head() {
 section "Warming the lane pool (one-time install cost, kept out of the timings below)"
 "$BICA" --yes lanes prepare --lanes "$LANES" || note "lanes prepare reported a problem; continuing so the checks still run"
 
-section "0  Preflight — is the green ref actually green, run entirely alone?"
+section "0  Preflight — are the green and red refs actually green and red, run alone?"
 # Two independent attempts at this harness failed check 1 because the "green" ref was not green: once
 # because it needed an install the lane did not have, once because the command used --max-warnings 0
 # and the ref carried a pre-existing warning. Both look identical to "results crossed between lanes",
@@ -99,10 +100,29 @@ else
   note "Fix the ref or the command before reading anything into checks 1-2. Common causes:"
   note "  - the ref needs an install the lane does not have yet (run 'bica lanes prepare')"
   note "  - the command is stricter than the ref is clean (e.g. --max-warnings 0 with warnings)"
-  note "Also confirm the red ref fails for the reason you intend, not incidentally."
   section "Result"
   printf 'logs: %s\n' "$OUT"
   printf '\033[31maborted: no usable green baseline\033[0m\n'
+  exit 1
+fi
+
+# And the red ref, symmetrically. A red ref that is not red for *this command* passes in check 1, and
+# check 1 reports that as results crossing between lanes -- the most alarming conclusion available,
+# from an input mistake. This happened: a red branch carrying a deliberate lint error was verified with
+# a test command that never reads the file. A note in this header told the operator to check it, and a
+# note is not a check.
+"$BICA" --yes run --lane 1 --ref "$RED" "${CMD[@]}" >"$OUT/preflight-red.log" 2>&1
+red_preflight=$?
+if [ $red_preflight -ne 0 ]; then
+  pass "red ref fails alone in a lane — the contrast is real"
+else
+  fail "red ref PASSED alone — it is not red for this command, so check 1 cannot mean anything"
+  note "log: $OUT/preflight-red.log"
+  note "The command has to be one the red ref actually fails. A lint error will not be caught by a"
+  note "test command, and vice versa; make the failure and the command match."
+  section "Result"
+  printf 'logs: %s\n' "$OUT"
+  printf '\033[31maborted: red ref is not red for this command\033[0m\n'
   exit 1
 fi
 
