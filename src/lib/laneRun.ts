@@ -49,6 +49,22 @@ function returnFlowLockPath(repoRoot: string): string {
   return path.join(lockRootDir(repoRoot), '_return-flow.lock');
 }
 
+/**
+ * Exit code for "refused to start: the workspace is in use, nothing ran".
+ *
+ * Distinct from 97, which means "ran, then found the workspace had been taken, so the result was
+ * discarded". Callers are frequently agents reading exit codes and the two want different reactions:
+ * 98 says try another lane or wait, 97 says re-run this one. It also gives the verification harness
+ * something stable to assert on -- it previously grepped the refusal text, and silently stopped
+ * matching the moment that wording changed.
+ */
+export const LANE_IN_USE_EXIT = 98;
+
+/** Thrown when every candidate workspace is leased. Carries the exit code so callers need not parse. */
+export class LaneInUseError extends Error {
+  readonly exitCode = LANE_IN_USE_EXIT;
+}
+
 /** How a lane was obtained, and how to give it back. */
 export interface AcquiredLane {
   lane: LaneIdentity;
@@ -118,7 +134,7 @@ export function acquireLaneForRun(options: {
       }
       refusals.push(`  lane ${id}: ${describeClaim(got)}`);
     }
-    throw new Error(
+    throw new LaneInUseError(
       `All ${String(poolSize)} lanes are in use:\n${refusals.join('\n')}\n` +
         'Wait for one to finish, or raise the pool size (`parallel.lanes` in bica.yml, `BICA_LANES`, ' +
         'or `--lanes N`). Lanes are shared across every checkout pointing at the same remote host.',
@@ -136,7 +152,7 @@ export function acquireLaneForRun(options: {
   const which = lane.isDefault
     ? "this checkout's remote workspace"
     : `Lane "${lane.label}"`;
-  throw new Error(
+  throw new LaneInUseError(
     `${which} is in use by ${describeClaim(got)}.\n` +
       'Syncing into it would overwrite that run\'s files, so neither result would be trustworthy. ' +
       'Use `--lane auto` to take the first free lane, or wait for it to finish.',

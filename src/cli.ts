@@ -17,7 +17,11 @@ import {
   cmdLanesPrepare,
 } from './laneCommands';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
-import { acquireLaneForRun, runPinnedLaneRun } from './lib/laneRun';
+import {
+  acquireLaneForRun,
+  LaneInUseError,
+  runPinnedLaneRun,
+} from './lib/laneRun';
 import { sshLeaseOps } from './lib/remoteClaim';
 import { isLaneRemotePath } from './lib/lanes';
 import {
@@ -134,8 +138,10 @@ Parallel runs (lanes)
   after a lane run starts are not picked up by it, and 'bica start' / 'monitor' still act on the
   default workspace, which a lane run does not use.
 
-  Exit codes worth knowing: 97 = the workspace was replaced mid-command, result discarded, re-run it.
-  96 = the remote workspace could not be entered.
+  Exit codes worth knowing, since none of them are verdicts on your code:
+    98  refused to start -- the workspace is leased by another run. Nothing ran; try another lane.
+    97  ran, but the workspace was taken part-way through, so the result was discarded. Re-run.
+    96  the remote workspace could not be entered.
 
 Workspace
   init                        Interactive setup: create bica.yml + .bica/local.yml (SSH/path).
@@ -603,14 +609,27 @@ async function cmdRun(options: {
   // The lease has to be taken before anything is synced, so lane selection resolves the base remote
   // path itself rather than waiting for prepareSyncProjectFile.
   const baseRemote = loadRemoteEnvConfig(repoRoot);
-  const { lane, owner, release } = acquireLaneForRun({
-    repoRoot,
-    baseRemotePath: baseRemote.remoteWorkspacePath,
-    laneArg,
-    poolSize,
-    runIdFor: (l) => `${l.label}-${String(process.pid)}`,
-    lease: sshLeaseOps(baseRemote.sshHost),
-  });
+  let acquired;
+  try {
+    acquired = acquireLaneForRun({
+      repoRoot,
+      baseRemotePath: baseRemote.remoteWorkspacePath,
+      laneArg,
+      poolSize,
+      runIdFor: (l) => `${l.label}-${String(process.pid)}`,
+      lease: sshLeaseOps(baseRemote.sshHost),
+    });
+  } catch (e: unknown) {
+    // A busy workspace is not a bica failure, and it is not a verdict on the code either. Give it its
+    // own exit code so a caller can tell "try elsewhere" from "something broke".
+    if (e instanceof LaneInUseError) {
+      process.stderr.write(`${e.message}\n`);
+      process.exitCode = e.exitCode;
+      return;
+    }
+    throw e;
+  }
+  const { lane, owner, release } = acquired;
 
   // Released after every other teardown step. Note what this does *not* guarantee: Node does not run
   // `exit` listeners when it terminates on an unhandled SIGINT, so Ctrl-C leaves the lock behind and it

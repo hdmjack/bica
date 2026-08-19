@@ -149,8 +149,10 @@ sleep 2
 "$BICA" --yes run --lane 1 --ref "$RED" "${CMD[@]}" >"$OUT/share-b.log" 2>&1
 b_status=$?
 wait "$a_pid" || true
-if [[ $b_status -ne 0 ]] && grep -q 'already in use' "$OUT/share-b.log"; then
-  pass "the second run was refused with a lock error naming the holder"
+# Assert the exit code, not the wording. This grepped the refusal text and stopped matching the moment
+# that text changed -- a false failure on a working mechanism, which is the same trap check 4 fell into.
+if [[ $b_status -eq 98 ]]; then
+  pass "the second run was refused with exit 98, naming the holder"
 else
   fail "the second run was not refused (exit $b_status) — two runs can share a workspace, so check 1 proves nothing"
   note "see $OUT/share-b.log"
