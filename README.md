@@ -265,6 +265,12 @@ Two consequences:
   same inode, so anything that writes in place — a patch, a postinstall, a build — corrupts the shared
   store. Clone is both safer and already what you get.
 
+**`git.sync` is the exception, and it is not cheap.** The clone-sharing above applies to
+`node_modules`, which pnpm materialises with `clonefile`. `git.sync` is a plain `rsync` of your `.git`,
+so each lane that uses it holds a genuine copy — measured at 381–536MB per lane on this repo, real
+bytes rather than shared blocks. Six lanes carrying one is roughly 3GB. Enable it only for the lanes
+that need `--changed`-style commands, and remember `bica lanes clean` reclaims it.
+
 If lane install *time* becomes the problem, pnpm's `enableGlobalVirtualStore` is the feature aimed at
 exactly this (its own docs recommend it for parallel checkouts and multi-agent development). It is
 experimental, with known ESM `NODE_PATH` and TypeScript inference edge cases, so treat it as an
