@@ -413,57 +413,6 @@ export function remoteMkdirWorkspace(
   return code;
 }
 
-/**
- * `rm -rf` a workspace workspace on the SSH host, passed as argv so no shell ever sees the path.
- *
- * Recursive remote deletion is the one genuinely destructive thing bica does, so the path is checked
- * twice: the caller must prove it derived from the configured base path plus a `-workspace-<id>` suffix
- * (see `isLaneRemotePath`), and this function refuses anything that does not resolve to an absolute
- * path of at least two segments — never `/`, never a bare `$HOME`, never the base workspace.
- */
-export function remoteRemoveLaneDirectory(
-  sshHost: string,
-  remoteLanePath: string,
-): { ok: boolean; reason?: string } {
-  const absolute = tryResolveRemoteWorkspaceAbsolutePath(
-    sshHost,
-    remoteLanePath,
-  );
-  if (absolute === null) {
-    return {
-      ok: false,
-      reason: `could not resolve ${remoteLanePath} to an absolute remote path`,
-    };
-  }
-  const clean = sanitizeRemotePosixAbsolutePath(absolute);
-  const segments = clean.split('/').filter(Boolean);
-  if (!path.posix.isAbsolute(clean) || segments.length < 2) {
-    return {
-      ok: false,
-      reason: `refusing to remove ${clean}: too close to the filesystem root`,
-    };
-  }
-  if (!/-workspace-[a-z0-9-]+$/.test(clean)) {
-    return {
-      ok: false,
-      reason: `refusing to remove ${clean}: not a workspace workspace path`,
-    };
-  }
-  for (const rm of ['/bin/rm', '/usr/bin/rm']) {
-    const { status, stderr } = spawnSshArgvSync(
-      sshTArgv(sshHost, rm, '-rf', '--', clean),
-      'quiet',
-    );
-    if (status === 0) {
-      return { ok: true };
-    }
-    if (status !== 127 && status !== 126) {
-      return { ok: false, reason: stderr.trim() || `ssh exited ${String(status)}` };
-    }
-  }
-  return { ok: false, reason: 'no usable rm on the remote host' };
-}
-
 /** Exit code the remote uses when another run took the workspace while this one was executing. */
 export const REMOTE_CONTENT_MISMATCH_EXIT = 97;
 
