@@ -51,11 +51,6 @@ const NODE_BICA_YML = `sync:
 # git:
 #   sync: true
 
-# run: defaults for \`bica run\`. assumeYes auto-confirms the prompts a run legitimately needs,
-# such as creating the remote workspace directory the first time.
-# run:
-#   assumeYes: true
-
 bica:
   pluginMode: auto
 `;
@@ -77,11 +72,6 @@ returnFlow:
   paths:
     - "target/debug/${binName}"
     - "target/debug/*.dylib"
-
-# run: defaults for \`bica run\`. assumeYes auto-confirms the prompts a run legitimately needs,
-# such as creating the remote workspace directory the first time.
-# run:
-#   assumeYes: true
 
 bica:
   pluginMode: auto

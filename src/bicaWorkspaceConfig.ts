@@ -10,7 +10,6 @@ const ENV_PACKAGE_MANAGER_PLUGINS = 'BICA_PACKAGE_MANAGER_PLUGINS';
 const ENV_CREDENTIALS_PLUGINS = 'BICA_CREDENTIALS_PLUGINS';
 const ENV_REMOTE_SHELL_PLUGINS = 'BICA_REMOTE_SHELL_PLUGINS';
 const ENV_GIT_SYNC = 'BICA_GIT_SYNC';
-const ENV_ASSUME_YES = 'BICA_ASSUME_YES';
 
 export interface BicaYamlSection {
   pluginMode?: string;
@@ -36,29 +35,6 @@ function readGitSyncFromYaml(doc: unknown): boolean | undefined {
     throw new Error('git.sync must be a boolean (true/false)');
   }
   return sync;
-}
-
-/**
- * Read the top-level `run:` block — per-repo defaults for `bica run`, so the common invocation does
- * not need flags. `run:` is a sibling of `bica:`.
- */
-function readRunDefaultsFromYaml(doc: unknown): { assumeYes?: boolean } {
-  if (!isPlainObject(doc) || !('run' in doc)) {
-    return {};
-  }
-  const runUnknown: unknown = doc.run;
-  if (!isPlainObject(runUnknown)) {
-    throw new Error('run: must be an object (run.assumeYes)');
-  }
-  const out: { assumeYes?: boolean } = {};
-  if ('assumeYes' in runUnknown) {
-    const assumeYes: unknown = runUnknown.assumeYes;
-    if (typeof assumeYes !== 'boolean') {
-      throw new Error('run.assumeYes must be a boolean (true/false)');
-    }
-    out.assumeYes = assumeYes;
-  }
-  return out;
 }
 
 /** Parse a boolean-ish env var: "1"/"true" → true, "0"/"false" → false, unset → undefined. */
@@ -176,8 +152,6 @@ export interface ResolvedBicaPluginConfig {
    * history/HEAD/refs as local. Defaults to false.
    */
   syncGit: boolean;
-  /** Default `--yes`: auto-confirm the prompts a run needs, such as creating the remote directory. */
-  runAssumeYes: boolean;
 }
 
 /**
@@ -224,16 +198,11 @@ export function resolveBicaPluginConfig(
   const envGitSync = parseBoolEnv(process.env[ENV_GIT_SYNC]);
   const syncGit = envGitSync ?? yamlGitSync ?? false;
 
-  const yamlRun = readRunDefaultsFromYaml(doc);
-  const envAssumeYes = parseBoolEnv(process.env[ENV_ASSUME_YES]);
-  const runAssumeYes = envAssumeYes ?? yamlRun.assumeYes ?? false;
-
   return {
     pluginMode,
     packageManagerPluginIds,
     credentialsPluginIds,
     remoteShellPluginIds,
     syncGit,
-    runAssumeYes,
   };
 }
