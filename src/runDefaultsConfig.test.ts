@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { NO_LANE, resolveBicaPluginConfig } from './bicaWorkspaceConfig';
+import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 
 const BASE_SYNC = `sync:
   mode: one-way-replica
@@ -13,7 +13,7 @@ const BASE_SYNC = `sync:
 `;
 
 let repoRoot = '';
-const TOUCHED_ENV = ['BICA_LANE', 'BICA_ASSUME_YES', 'BICA_LANES'] as const;
+const TOUCHED_ENV = ['BICA_ASSUME_YES'] as const;
 
 beforeEach(() => {
   repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-run-defaults-'));
@@ -34,31 +34,17 @@ function writeSpec(extra = ''): void {
 }
 
 describe('run defaults — no config', () => {
-  it('keeps the historical behaviour: default workspace, prompts on', () => {
+  it('keeps the historical behaviour: prompts on', () => {
     writeSpec();
     const c = resolveBicaPluginConfig(repoRoot);
-    expect(c.runLane).toBe(NO_LANE);
     expect(c.runAssumeYes).toBe(false);
   });
 });
 
 describe('run defaults — bica.yml', () => {
-  it('reads run.lane and run.assumeYes', () => {
-    writeSpec('run:\n  lane: auto\n  assumeYes: true\n');
-    const c = resolveBicaPluginConfig(repoRoot);
-    expect(c.runLane).toBe('auto');
-    expect(c.runAssumeYes).toBe(true);
-  });
-
-  it('accepts a named lane', () => {
-    writeSpec('run:\n  lane: verify\n');
-    expect(resolveBicaPluginConfig(repoRoot).runLane).toBe('verify');
-  });
-
-  it('treats `lane: false` as the default workspace', () => {
-    // `false` is what a YAML author naturally writes for "no lane".
-    writeSpec('run:\n  lane: false\n');
-    expect(resolveBicaPluginConfig(repoRoot).runLane).toBe(NO_LANE);
+  it('reads run.assumeYes', () => {
+    writeSpec('run:\n  assumeYes: true\n');
+    expect(resolveBicaPluginConfig(repoRoot).runAssumeYes).toBe(true);
   });
 
   it('rejects a non-boolean assumeYes rather than coercing it', () => {
@@ -66,11 +52,6 @@ describe('run defaults — bica.yml', () => {
     expect(() => resolveBicaPluginConfig(repoRoot)).toThrow(
       /run.assumeYes must be a boolean/,
     );
-  });
-
-  it('rejects an empty lane', () => {
-    writeSpec('run:\n  lane: ""\n');
-    expect(() => resolveBicaPluginConfig(repoRoot)).toThrow(/run.lane must be/);
   });
 
   it('rejects a non-object run block', () => {
@@ -82,18 +63,6 @@ describe('run defaults — bica.yml', () => {
 });
 
 describe('run defaults — env overrides YAML', () => {
-  it('BICA_LANE replaces run.lane', () => {
-    writeSpec('run:\n  lane: auto\n');
-    process.env.BICA_LANE = '3';
-    expect(resolveBicaPluginConfig(repoRoot).runLane).toBe('3');
-  });
-
-  it('BICA_LANE=none opts a lane-by-default repo back out', () => {
-    writeSpec('run:\n  lane: auto\n');
-    process.env.BICA_LANE = NO_LANE;
-    expect(resolveBicaPluginConfig(repoRoot).runLane).toBe(NO_LANE);
-  });
-
   it('BICA_ASSUME_YES=0 turns config-enabled auto-confirm back off', () => {
     writeSpec('run:\n  assumeYes: true\n');
     process.env.BICA_ASSUME_YES = '0';

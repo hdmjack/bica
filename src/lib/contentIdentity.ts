@@ -6,9 +6,9 @@ import * as path from 'node:path';
 /**
  * Naming the content a run verifies.
  *
- * The original design identified a run by *where* it ran — lane 1, lane 2. A slot is an arbitrary
- * name, so slots have to be handed out exclusively, which is why allocation needed a lock, and why a
- * bug in that lock could silently give two runs one workspace. Naming a run by its *content* removes
+ * The original design identified a run by *where* it ran — one slot, another slot. A slot is an arbitrary
+ * name, so slots have to be handed out exclusively, which is why allocation needed a lock, and why a bug
+ * in that lock could silently give two runs one workspace. Naming a run by its *content* removes
  * that whole class: a git tree OID says exactly what was verified, is cheap to compute, can be printed
  * for the caller to check against what they meant to verify, and can be asserted on the remote before
  * the command runs. Correctness then rests on the name, not on the lock.
@@ -94,7 +94,7 @@ export function workingTreeOid(repoRoot: string): string | null {
     // `add -A` that follows cannot tell which files are unchanged and re-hashes every one of them. On
     // an 11k-file monorepo that measured 2.34s against 0.14s for the seeded form — and this runs twice
     // per live-tree run, either side of the transfer, so it was roughly a third of the fixed cost of a
-    // lane run for no benefit at all.
+    // workspace run for no benefit at all.
     //
     // Copying leaves the real index untouched; nothing here ever writes through to it.
     let seeded = false;

@@ -11,7 +11,7 @@ import type {
 const LOCKFILE = 'Cargo.lock';
 const MANIFEST = 'Cargo.toml';
 
-/** Relative to the lane's state dir, so `.bica/hashes/…` for the default run. */
+/** Relative to the workspace's state dir, so `.bica/hashes/…` for the default run. */
 const CARGO_FETCH_HASH_RELATIVE = path.join('hashes', 'cargo-fetch');
 
 /**

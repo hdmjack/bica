@@ -4,18 +4,14 @@ import { workingTreeOid } from './contentIdentity';
 import { dim, warn } from '../terminalStyle';
 
 /**
- * Pinned (one-shot) working-tree sync, used by lane runs instead of a live Mutagen session.
+ * Pinned (one-shot) working-tree sync, used by pinned runs instead of a live Mutagen session.
  *
- * A lane run must execute the tree as it stood when the run started. A live session cannot promise
- * that: it is *designed* to keep pushing later edits, so checking out the next branch locally —
- * exactly what a per-branch sweep does — would push that branch's files into a lane that is still
- * running the previous one. One `rsync` at the start pins the content by construction, and dropping
- * the session also removes the ephemeral-session collision (`bica run` terminating its predecessor)
- * that blocked concurrency in the first place.
+ * A pinned run must execute the content as it stood when the run started. A live session cannot
+ * promise that: it is *designed* to keep pushing later edits, so a checkout landing mid-run would push
+ * those files in behind it. One `rsync` at the start pins the content by construction.
  *
- * The trade is deliberate: no live sync inside a lane. Edits made after a lane run starts are not
- * picked up by that run. Interactive development keeps using the default (non-lane) run, which is
- * unchanged.
+ * The trade is deliberate: edits made after a pinned run starts are not picked up by it. Ordinary
+ * `bica run` keeps using the live session and is unchanged.
  */
 
 /** Local-only bica state (locks, install fingerprints, generated project files). Never pushed. */
@@ -35,9 +31,9 @@ const NEVER_PUSHED_PATHS: readonly string[] = ['.git'];
  * earlier rule excluded. rsync resolves filters first-match-wins, so negations become `+` rules
  * emitted *before* the `-` rules they override.
  *
- * `--delete` makes the lane an exact mirror of the pinned tree, so a file removed on this branch is
- * removed in the lane too. It is safe next to the excludes because rsync never deletes inside an
- * excluded tree — the lane's `node_modules` survives, which is the whole point of reusing lanes.
+ * `--delete` makes the workspace an exact mirror of the pinned tree, so a file removed on this branch is
+ * removed in the workspace too. It is safe next to the excludes because rsync never deletes inside an
+ * excluded tree — the workspace's `node_modules` survives, which is the whole point of reusing it.
  * `--delete-excluded` would destroy that and is deliberately not used.
  *
  * Pure, for testability.
@@ -117,7 +113,7 @@ export function parseDeletedPaths(rsyncStdout: string): string[] {
 }
 
 /**
- * Push the pinned content to the lane's remote workspace, and confirm that what landed is what was
+ * Push the pinned content to the remote workspace, and confirm that what landed is what was
  * named.
  *
  * The content is identified by a git tree OID either side of the transfer. Equal OIDs mean the source

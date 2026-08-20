@@ -17,17 +17,17 @@ export interface CredentialsSyncContext {
 /**
  * Where a package-manager plugin records what the *remote* workspace has installed.
  *
- * Each lane is a separate remote workspace with its own `node_modules`, so the fingerprint has to be
- * per-lane: a single shared file would let lane 2 conclude its dependencies are current because
- * lane 1 installed. `stateDir` is `<repo>/.bica` for the default run and `<repo>/.bica/lanes/<id>`
- * for a lane, which keeps the default lane's file exactly where earlier versions wrote it.
+ * Each workspace is a separate remote workspace with its own `node_modules`, so the fingerprint has to be
+ * per-workspace: a single shared file would let workspace 2 conclude its dependencies are current because
+ * workspace 1 installed. `stateDir` is `<repo>/.bica` for the default run and `<repo>/.bica/workspaces/<id>`
+ * for a workspace, which keeps the default workspace's file exactly where earlier versions wrote it.
  */
 export interface PackageManagerStateContext {
   repoRoot: string;
-  /** Absolute directory holding this lane's bica state. */
+  /** Absolute directory holding this workspace's bica state. */
   stateDir: string;
-  /** False for lane runs; gates fallbacks to pre-lane fingerprint locations. */
-  isDefaultLane: boolean;
+  /** Gates the fallback to the pre-`.bica` fingerprint location. */
+  isDefaultWorkspace: boolean;
 }
 
 /**

@@ -7,7 +7,7 @@ import {
   resolveActivePackageManagerPlugins,
 } from '../resolveActivePlugins';
 import { acquireLockWithWait } from './fileLock';
-import { lockRootDir } from './lanes';
+import { lockRootDir } from './workspacePaths';
 import {
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
@@ -18,18 +18,16 @@ import type {
   PackageManagerPlugin,
   PackageManagerStateContext,
 } from '../plugins/types';
-import type { LaneIdentity } from './lanes';
 import type { PrepareResult } from '../syncProject';
 
-/** Fingerprint storage for one lane's remote workspace. */
+/** Where the record of what the remote workspace has installed lives. */
 export function packageManagerStateContext(
   repoRoot: string,
-  lane: LaneIdentity,
 ): PackageManagerStateContext {
   return {
     repoRoot,
-    stateDir: lane.stateDir,
-    isDefaultLane: lane.isDefault,
+    stateDir: path.join(repoRoot, '.bica'),
+    isDefaultWorkspace: true,
   };
 }
 
@@ -55,16 +53,15 @@ function needsInitialRemoteInstall(
   return stored === null && local !== null;
 }
 
-/** A cold lane's install can be slow, and every other lane waiting on it is doing useful work. */
+/** A cold workspace's install can be slow, and every other workspace waiting on it is doing useful work. */
 const REMOTE_INSTALL_LOCK_TIMEOUT_MS = 30 * 60_000;
 
 /**
- * Serialise remote installs across lanes.
+ * Serialise remote installs across workspaces.
  *
- * Installs are the one phase concurrent lane runs genuinely contend on: each lane installs into its
- * own workspace, but they share one content-addressed store on the host. `bica lanes prepare` exists
- * so a sweep does not hit this at all; this lock covers the case where it was skipped and a cold lane
- * is installed mid-sweep. Nothing else in a run needs serialising — credentials plugins run only
+ * Installs are the one phase concurrent pinned runs genuinely contend on: each workspace installs
+ * separately, but they share one content-addressed store on the host. This covers a cold workspace being installed while another run is
+ * already installing. Nothing else in a run needs serialising — credentials plugins run only
  * under `bica credentials sync`, never as part of `bica run`, and remote-shell plugins only build a
  * shell string.
  *
@@ -81,7 +78,7 @@ async function withRemoteInstallLock(
   );
   if (lock === null) {
     process.stderr.write(
-      '[bica] Still waiting on another lane\'s remote install after 30m; installing anyway.\n',
+      '[bica] Still waiting on another workspace\'s remote install after 30m; installing anyway.\n',
     );
     return install();
   }
@@ -104,7 +101,7 @@ function maybeWriteCredentialsHint(plugin: PackageManagerPlugin): void {
 export interface RemoteWorkspaceReadiness {
   /** 0 when the workspace is usable; otherwise the failure code to return from the run. */
   code: number;
-  /** True only when this call created the directory — the moment one-time lane setup belongs. */
+  /** True only when this call created the directory — the moment one-time workspace setup belongs. */
   created: boolean;
 }
 
@@ -155,7 +152,7 @@ export async function runRemoteCommandWithPmHooks(options: {
 }): Promise<number> {
   const { prep, remoteArgv, autoYes, pmOverride, confirm: confirmFn } = options;
   const { repoRoot, config } = prep;
-  const stateCtx = packageManagerStateContext(repoRoot, prep.lane);
+  const stateCtx = packageManagerStateContext(repoRoot);
 
   const dirReady = await ensureRemoteWorkspaceDirectory(
     config.sshHost,
@@ -173,7 +170,7 @@ export async function runRemoteCommandWithPmHooks(options: {
 
   // A workspace we just created has no node_modules, whatever the local fingerprint claims. The
   // fingerprint records what a *remote* workspace has installed but lives locally, so anything that
-  // removes the remote directory -- `bica lanes clean`, a manual rm, a wiped host -- leaves it
+  // removes the remote directory -- `bica workspaces clean`, a manual rm, a wiped host -- leaves it
   // asserting an install that no longer exists. The next run would then skip the install and execute
   // against an empty workspace. Clearing it on creation keeps the claim tied to something real.
   if (dirReady.created) {

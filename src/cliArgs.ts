@@ -9,13 +9,9 @@
 export interface ParsedGlobals {
   autoYes: boolean;
   pm: string | undefined;
-  /** `--lane <id|auto>`; undefined means the default single workspace. */
-  lane: string | undefined;
-  /** `--lanes N`: lane pool size for this invocation. */
-  lanes: number | undefined;
-  /** `--return-flow`: opt a lane run back into pulling remote artifacts. */
+  /** `--return-flow`: pull remote artifacts back for a pinned run. */
   returnFlow: boolean;
-  /** `--ref <rev>`: pin a lane run to a commit instead of the live working tree. */
+  /** `--ref <rev>`: run a commit's content instead of the live working tree. */
   ref: string | undefined;
   rest: string[];
 }
@@ -35,8 +31,6 @@ export function parseArgs(argv: string[]): ParsedGlobals {
   const rest: string[] = [];
   let autoYes = false;
   let pm: string | undefined;
-  let lane: string | undefined;
-  let lanes: number | undefined;
   let returnFlow = false;
   let ref: string | undefined;
   for (let i = 0; i < argv.length; i++) {
@@ -51,20 +45,9 @@ export function parseArgs(argv: string[]): ParsedGlobals {
     } else if (a === '--ref') {
       ref = requireValue(argv, i, '--ref', 'a git ref (branch, tag or commit)');
       i += 1;
-    } else if (a === '--lane') {
-      lane = requireValue(argv, i, '--lane', 'a lane id or "auto"');
-      i += 1;
-    } else if (a === '--lanes') {
-      const raw = requireValue(argv, i, '--lanes', 'a lane pool size (integer)');
-      const n = Number(raw);
-      if (!Number.isInteger(n)) {
-        throw new Error('usage: --lanes requires a lane pool size (integer)');
-      }
-      lanes = n;
-      i += 1;
     } else {
       rest.push(a);
     }
   }
-  return { autoYes, pm, lane, lanes, returnFlow, ref, rest };
+  return { autoYes, pm, returnFlow, ref, rest };
 }

@@ -5,7 +5,7 @@ import * as path from 'node:path';
 
 import { treeOidForCommittish } from './contentIdentity';
 import { acquireLockWithWait, isProcessAlive } from './fileLock';
-import { lockRootDir } from './lanes';
+import { lockRootDir } from './workspacePaths';
 import {
   sanitizeRemotePosixAbsolutePath,
   shellSingleQuoteRemotePathForSh,
@@ -14,13 +14,13 @@ import {
 import { dim, warn } from '../terminalStyle';
 
 /**
- * Pinning a lane to a git ref instead of the live working tree.
+ * Pinning a run to a git ref instead of the live working tree.
  *
  * The live tree cannot serve a multi-branch sweep: one checkout holds one branch, so verifying
- * thirteen means thirteen `git checkout`s, and a checkout that lands while another lane is still
- * syncing leaves that lane holding a mix of two branches. Reading the content straight out of the
+ * thirteen means thirteen `git checkout`s, and a checkout that lands mid-sync would
+ * leave the workspace holding a mix of two branches. Reading the content straight out of the
  * object database removes the race rather than detecting it — the local tree is never touched, never
- * consulted, and can be on any branch (or mid-rebase) while every lane runs.
+ * consulted, and can be on any branch (or mid-rebase) while every pinned runs.
  *
  * The mechanism is a throwaway detached `git worktree`. It costs no clone (worktrees share the object
  * store), it materialises exactly the ref's committed content, and rsyncing from it gives `--delete`
@@ -31,7 +31,7 @@ import { dim, warn } from '../terminalStyle';
  * for "run what I have open", which is what the default (live-tree) path is for.
  */
 
-/** Worktree creation touches shared `.git` bookkeeping, so lanes take turns. */
+/** Worktree creation touches shared `.git` bookkeeping, so runs take turns. */
 const GIT_WORKTREE_LOCK_TIMEOUT_MS = 60_000;
 
 function gitLockPath(repoRoot: string): string {
@@ -67,7 +67,7 @@ export interface ResolvedGitRef {
   treeOid: string;
   /**
    * Fully-qualified branch ref (`refs/heads/…`) when the request names a local branch, else null.
-   * Used to give the lane's remote `.git` the same symbolic HEAD, so `--changed`-style commands
+   * Used to give the remote `.git` the same symbolic HEAD, so `--changed`-style commands
    * resolve the branch rather than a detached commit.
    */
   branchRef: string | null;
@@ -102,23 +102,23 @@ export function resolveGitRef(repoRoot: string, ref: string): ResolvedGitRef {
 }
 
 /**
- * Pinned-worktree directory, outside the repository and keyed by lane *and* pid.
+ * Pinned-worktree directory, outside the repository and keyed by pid.
  *
- * Outside because a live `git worktree` inside `repoRoot` is inside the tree that `git add -A` walks,
- * so the content name would describe bica's own scratch checkout. That is the same trap already fixed
- * for the throwaway index in `contentIdentity.ts`, where only the convention of gitignoring `.bica`
- * was hiding it — a correctness property should not depend on a user's `.gitignore`.
+ * Outside because a live `git worktree` inside `repoRoot` sits inside the tree that `git add -A`
+ * walks, so the content name would end up describing bica's own scratch checkout. That is the same
+ * trap already fixed for the throwaway index in `contentIdentity.ts`, where only the convention of
+ * gitignoring `.bica` was hiding it — a correctness property should not rest on a user's `.gitignore`.
  *
- * Pid-keyed because this directory is where a lane mix-up turns into two runs rsyncing over each
- * other's checkout; the observed symptom was `rsync exited 23` plus `is not a working tree` on
- * teardown. The pid means even a failure of lane exclusivity cannot make two runs share a worktree.
+ * Pid-keyed so two runs from the same checkout can never rsync over each other's worktree, whatever
+ * else goes wrong. The observed symptom when they did was `rsync exited 23` plus `is not a working
+ * tree` on teardown.
  */
 function pinRoot(): string {
   return path.join(os.tmpdir(), 'bica-pins');
 }
 
-function pinDir(repoRoot: string, laneLabel: string): string {
-  return path.join(pinRoot(), `${laneLabel}-${String(process.pid)}`);
+function pinDir(): string {
+  return path.join(pinRoot(), `pin-${String(process.pid)}`);
 }
 
 /** Remove pin directories left by processes that are no longer running. */
@@ -145,21 +145,21 @@ function removeOrphanedPinDirs(): void {
  *
  * `git worktree prune` runs first so a worktree orphaned by an earlier hard kill does not block the
  * path. Creation and removal are serialised because both write shared `.git/worktrees` bookkeeping,
- * and several lanes starting at once would otherwise collide there.
+ * and several runs starting at once would otherwise collide there.
  */
 export async function withPinnedWorktree<T>(
-  options: { repoRoot: string; laneLabel: string; resolved: ResolvedGitRef },
+  options: { repoRoot: string; resolved: ResolvedGitRef },
   body: (worktreePath: string) => Promise<T>,
 ): Promise<T> {
-  const { repoRoot, laneLabel, resolved } = options;
-  const dir = pinDir(repoRoot, laneLabel);
+  const { repoRoot, resolved } = options;
+  const dir = pinDir();
 
   const lock = await acquireLockWithWait(gitLockPath(repoRoot), {
     timeoutMs: GIT_WORKTREE_LOCK_TIMEOUT_MS,
   });
   if (lock === null) {
     throw new Error(
-      'Timed out waiting to create a pinned worktree (another lane held the git lock for over 60s).',
+      'Timed out waiting to create a pinned worktree (another run held the git lock for over 60s).',
     );
   }
   try {
@@ -207,10 +207,10 @@ export async function withPinnedWorktree<T>(
 }
 
 /**
- * Point the lane's remote `.git` at the pinned ref.
+ * Point the remote `.git` at the pinned ref.
  *
  * `git.sync` rsyncs the *local* `.git`, whose HEAD is whatever the caller has checked out — not the
- * ref this lane is running. Without this, a `--ref` run with `git.sync` on would have
+ * ref this workspace is running. Without this, a `--ref` run with `git.sync` on would have
  * `vitest --changed` compute its changed-file set against the wrong branch and quietly verify the
  * wrong thing. Best-effort: a failure warns instead of failing the run, and only affects
  * git-dependent commands.
@@ -229,7 +229,7 @@ export function setRemoteHeadForPin(options: {
   );
   if (absolute === null) {
     process.stderr.write(
-      `${warn('[bica]')} ${dim(`Could not resolve ${options.remoteWorkspacePath} on the remote; leaving the lane's HEAD alone.`)}\n`,
+      `${warn('[bica]')} ${dim(`Could not resolve ${options.remoteWorkspacePath} on the remote; leaving the workspace's HEAD alone.`)}\n`,
     );
     return false;
   }
@@ -255,7 +255,7 @@ export function setRemoteHeadForPin(options: {
     return true;
   }
   process.stderr.write(
-    `${warn('[bica]')} ${dim(`Could not point the lane's remote HEAD at ${resolved.requested}; git-dependent commands (--changed) may resolve the wrong branch: ${(result.stderr ?? '').trim()}`)}\n`,
+    `${warn('[bica]')} ${dim(`Could not point the remote HEAD at ${resolved.requested}; git-dependent commands (--changed) may resolve the wrong branch: ${(result.stderr ?? '').trim()}`)}\n`,
   );
   return false;
 }

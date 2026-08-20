@@ -9,14 +9,7 @@ import {
   setRemoteHeadForPin,
   withPinnedWorktree,
 } from './gitPin';
-import {
-  AUTO_LANE,
-  defaultLaneIdentity,
-  laneIdentity,
-  laneIdsForPool,
-  laneRemoteWorkspacePath,
-  lockRootDir,
-} from './lanes';
+import { lockRootDir } from './workspacePaths';
 import { shortOid } from './contentIdentity';
 import {
   claimIsStale,
@@ -37,11 +30,10 @@ import {
   runRemoteCommandWithPmHooks,
 } from './runWithPackageManagerPlugins';
 import type { ResolvedGitRef } from './gitPin';
-import type { LaneIdentity } from './lanes';
 import type { ConfirmFn } from '../plugins/types';
 import type { PrepareResult } from '../syncProject';
 
-/** How long a queued return-flow pull waits for the lane ahead of it to finish its pull. */
+/** How long a queued return-flow pull waits for another run's pull to finish. */
 const RETURN_FLOW_LOCK_TIMEOUT_MS = 120_000;
 
 
@@ -54,9 +46,8 @@ function returnFlowLockPath(repoRoot: string): string {
  *
  * Distinct from 97, which means "ran, then found the workspace had been taken, so the result was
  * discarded". Callers are frequently agents reading exit codes and the two want different reactions:
- * 98 says try another lane or wait, 97 says re-run this one. It also gives the verification harness
- * something stable to assert on -- it previously grepped the refusal text, and silently stopped
- * matching the moment that wording changed.
+ * 98 says wait, 97 says re-run this one. Asserting on the code rather than the message also keeps a
+ * checker from silently decoupling when the wording changes, which has happened twice.
  */
 export const LANE_IN_USE_EXIT = 98;
 
@@ -65,14 +56,13 @@ export class LaneInUseError extends Error {
   readonly exitCode = LANE_IN_USE_EXIT;
 }
 
-/** How a lane was obtained, and how to give it back. */
-export interface AcquiredLane {
-  lane: LaneIdentity;
+/** The workspace lease this run holds, and how to give it back. */
+export interface AcquiredWorkspace {
   owner: ClaimOwner;
   release: () => void;
 }
 
-/** Injectable so selection can be tested without an SSH host. */
+/** Injectable so acquisition can be tested without an SSH host. */
 export interface LeaseOps {
   acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
   break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
@@ -80,83 +70,57 @@ export interface LeaseOps {
 }
 
 /**
- * Claim a lane for this run by leasing its remote workspace.
+ * Exit code for "refused to start: the workspace is in use, nothing ran".
  *
- * Selection used to consult a lock file under `<checkout>/.bica/locks`, which was wrong in two ways
- * at once. It could not see a run from a sibling clone — the case that actually bit, since the
- * contended resource is a directory on a shared host — and because each checkout counted lanes
- * independently, two clones would both pick lane 1 and the second would be *refused* rather than
- * advancing to lane 2. Leasing the workspace fixes both: `auto` walks the pool asking the resource
- * itself, and moves on when a lane is genuinely taken by anyone, from anywhere.
- *
- * A lease left by a process that no longer exists is broken and retried once, so a killed run costs
- * the next one a round-trip rather than the lane.
+ * Distinct from 97, which means "ran, then found the workspace had been taken, so the result was
+ * discarded". Callers are frequently agents reading exit codes and the two want opposite reactions:
+ * 98 says wait or use another checkout, 97 says re-run this one.
  */
-export function acquireLaneForRun(options: {
-  repoRoot: string;
-  /** Base remote workspace path, before any lane suffix. */
-  baseRemotePath: string;
-  laneArg: string | undefined;
-  poolSize: number;
-  runIdFor: (lane: LaneIdentity) => string;
+export const WORKSPACE_IN_USE_EXIT = 98;
+
+/** Thrown when the workspace is already leased. Carries the exit code so callers need not parse text. */
+export class WorkspaceInUseError extends Error {
+  readonly exitCode = WORKSPACE_IN_USE_EXIT;
+}
+
+/**
+ * Lease the remote workspace for the lifetime of this run.
+ *
+ * The lease lives on the remote, not in the checkout, because that is where the contended thing is.
+ * Several clones on one machine can resolve to the same remote directory, so a lock under
+ * `<checkout>/.bica` cannot see the run that would actually collide with you — which is exactly how
+ * two clones once ran each other's commands and both reported success.
+ *
+ * A lease whose owner no longer exists is broken and retried once, so a killed run costs the next one
+ * a round-trip rather than the workspace.
+ */
+export function acquireWorkspace(options: {
+  remoteWorkspacePath: string;
+  runId: string;
   lease: LeaseOps;
-}): AcquiredLane {
-  const { repoRoot, baseRemotePath, laneArg, poolSize, lease } = options;
-
-  const tryLane = (lane: LaneIdentity): AcquiredLane | ClaimResult => {
-    const remotePath = laneRemoteWorkspacePath(baseRemotePath, lane);
-    const owner = describeSelfAsOwner(options.runIdFor(lane));
-    let result = lease.acquire(remotePath, owner);
-    if (!result.ok && claimIsStale(result.heldBy, isProcessAlive)) {
-      if (result.heldBy !== null) {
-        lease.break(remotePath, result.heldBy);
-      }
-      result = lease.acquire(remotePath, owner);
+}): AcquiredWorkspace {
+  const { remoteWorkspacePath, lease } = options;
+  const owner = describeSelfAsOwner(options.runId);
+  let result = lease.acquire(remoteWorkspacePath, owner);
+  if (!result.ok && claimIsStale(result.heldBy, isProcessAlive)) {
+    if (result.heldBy !== null) {
+      lease.break(remoteWorkspacePath, result.heldBy);
     }
-    if (!result.ok) {
-      return result;
-    }
-    return {
-      lane,
-      owner,
-      release: () => {
-        lease.release(remotePath, owner);
-      },
-    };
-  };
-
-  if (laneArg === AUTO_LANE) {
-    const refusals: string[] = [];
-    for (const id of laneIdsForPool(poolSize)) {
-      const got = tryLane(laneIdentity(repoRoot, id));
-      if ('lane' in got) {
-        return got;
-      }
-      refusals.push(`  lane ${id}: ${describeClaim(got)}`);
-    }
-    throw new LaneInUseError(
-      `All ${String(poolSize)} lanes are in use:\n${refusals.join('\n')}\n` +
-        'Wait for one to finish, or raise the pool size (`parallel.lanes` in bica.yml, `BICA_LANES`, ' +
-        'or `--lanes N`). Lanes are shared across every checkout pointing at the same remote host.',
+    result = lease.acquire(remoteWorkspacePath, owner);
+  }
+  if (!result.ok) {
+    throw new WorkspaceInUseError(
+      `This remote workspace is in use by ${describeClaim(result)}.\n` +
+        'Syncing into it would overwrite that run\'s files, so neither result would be trustworthy. ' +
+        'Wait for it to finish, or run from a checkout with a different remotePath.',
     );
   }
-
-  const lane =
-    laneArg === undefined
-      ? defaultLaneIdentity(repoRoot)
-      : laneIdentity(repoRoot, laneArg);
-  const got = tryLane(lane);
-  if ('lane' in got) {
-    return got;
-  }
-  const which = lane.isDefault
-    ? "this checkout's remote workspace"
-    : `Lane "${lane.label}"`;
-  throw new LaneInUseError(
-    `${which} is in use by ${describeClaim(got)}.\n` +
-      'Syncing into it would overwrite that run\'s files, so neither result would be trustworthy. ' +
-      'Use `--lane auto` to take the first free lane, or wait for it to finish.',
-  );
+  return {
+    owner,
+    release: () => {
+      lease.release(remoteWorkspacePath, owner);
+    },
+  };
 }
 
 /**
@@ -174,8 +138,8 @@ export function acquireLaneForRun(options: {
  * Deliberately a warning and not a repair. The obvious repair — invalidate the install fingerprint so
  * the next step regenerates them — would fire on nearly every `--ref` run, because a ref worktree
  * contains no gitignored files at all and so legitimately deletes every one of them. That would mean
- * a full install per run, which is the cost lanes exist to avoid. Naming the files lets the user add
- * them to `sync.ignore.paths` once, which fixes it properly.
+ * a full install per run. Naming the files lets the user add them to `sync.ignore.paths` once,
+ * which fixes it properly.
  */
 function warnAboutDeletedGeneratedFiles(
   repoRoot: string,
@@ -204,14 +168,13 @@ function warnAboutDeletedGeneratedFiles(
 }
 
 /**
- * Run a command in a lane against a pinned copy of the working tree: push once, run, optionally pull.
+ * Run a command against a pinned copy of the content: push once, run, optionally pull.
  * Returns the remote command's exit code, or a non-zero bica-side code when the push failed.
  *
  * Return-flow happens only with `--return-flow`. It mirrors remote artifacts into the local tree with
- * `--delete`, so it describes exactly one content state; with more than one lane running there is no
- * coherent answer, and the pull is serialised even when asked for.
+ * `--delete`, so it describes exactly one content state; the pull is serialised even when asked for.
  */
-export async function runPinnedLaneRun(options: {
+export async function runPinned(options: {
   prep: PrepareResult;
   remoteArgv: string[];
   autoYes: boolean;
@@ -219,9 +182,9 @@ export async function runPinnedLaneRun(options: {
   confirm: ConfirmFn;
   /** `--return-flow` was passed. Absent, the decision follows whether this run is alone. */
   returnFlowOptIn: boolean;
-  /** `--ref`: pin the lane to this git ref's committed content instead of the live working tree. */
+  /** `--ref`: run this git ref's committed content instead of the live working tree. */
   ref: string | undefined;
-  /** Lease taken during lane selection; this run already owns the workspace. */
+  /** Lease taken before anything was synced; this run already owns the workspace. */
   owner: ClaimOwner;
   chrome: (text: string) => void;
 }): Promise<number> {
@@ -231,16 +194,16 @@ export async function runPinnedLaneRun(options: {
   // is usually right is the worst kind here, because return-flow mirrors with `--delete`.
   const resolvedOptions = { ...options, returnFlow: options.returnFlowOptIn };
   if (options.ref === undefined) {
-    return runPinnedLaneRunFrom(resolvedOptions, undefined, undefined);
+    return runPinnedFrom(resolvedOptions, undefined, undefined);
   }
   const resolved = resolveGitRef(prep.repoRoot, options.ref);
   return withPinnedWorktree(
-    { repoRoot: prep.repoRoot, laneLabel: prep.lane.label, resolved },
-    (worktreePath) => runPinnedLaneRunFrom(resolvedOptions, worktreePath, resolved),
+    { repoRoot: prep.repoRoot, resolved },
+    (worktreePath) => runPinnedFrom(resolvedOptions, worktreePath, resolved),
   );
 }
 
-async function runPinnedLaneRunFrom(
+async function runPinnedFrom(
   options: {
     prep: PrepareResult;
     remoteArgv: string[];
@@ -255,7 +218,6 @@ async function runPinnedLaneRunFrom(
   resolvedRef: ResolvedGitRef | undefined,
 ): Promise<number> {
   const { prep, chrome } = options;
-  const lane = prep.lane;
 
   const dirReady = await ensureRemoteWorkspaceDirectory(
     prep.config.sshHost,
@@ -267,7 +229,7 @@ async function runPinnedLaneRunFrom(
     return dirReady.code;
   }
 
-  // The lease was taken during lane selection, before anything was synced, and is released by the
+  // The lease was taken during workspace selection, before anything was synced, and is released by the
   // caller. By the time we get here the workspace is ours.
   const claimExpr = claimPathExpr(prep.config.remoteWorkspacePath);
   const sourceLabel =
@@ -281,10 +243,10 @@ async function runPinnedLaneRunFrom(
   // for the workspace path to satisfy itself a run was its own; this states it outright, for any
   // command, and pairs it with the content name so the run can be checked against what was intended.
   process.stderr.write(
-    `${dim('[bica]')} lane ${lane.label}  workspace ${prep.remoteSyncUrl}  content ${sourceLabel}  run ${options.owner.runId}\n`,
+    `${dim('[bica]')} workspace ${prep.remoteSyncUrl}  content ${sourceLabel}  run ${options.owner.runId}\n`,
   );
   chrome(
-    `${dim(`[bica:${lane.label}]`)} ${dim(`Pinning ${sourceLabel} to`)} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
+    `${dim('[bica]')} ${dim(`Pinning ${sourceLabel} to`)} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
   );
   const push = pushPinnedWorkingTree({
     repoRoot: prep.repoRoot,
@@ -297,7 +259,7 @@ async function runPinnedLaneRunFrom(
   if (!push.ok) {
     if (push.torn === true) {
       process.stderr.write(
-        `${warn('[bica]')} The working tree changed while syncing lane ${lane.label}: ` +
+        `${warn('[bica]')} The working tree changed while syncing: ` +
           `${shortOid(push.treeOidBefore ?? '?')} → ${shortOid(push.treeOidAfter ?? '?')}. ` +
           'Refusing to run, because what landed on the remote is a mix of both and a result from it ' +
           'would look exactly like a real verification.\n' +
@@ -320,18 +282,18 @@ async function runPinnedLaneRunFrom(
     if (trusted) {
       // Unconditional, not via `chrome`: that helper hides itself when stdout is piped, and this step
       // spent its whole life invisible. Confirming it worked only on a TTY would repeat the fault that
-      // let two separate bugs in it go unnoticed. It fires once per lane creation, so it is not noise.
+      // let two separate bugs in it go unnoticed. It fires once per workspace creation, so it is not noise.
       process.stderr.write(
-        `${dim(`[bica:${lane.label}]`)} ${dim('Trusted this new workspace with mise.')}\n`,
+        `${dim('[bica]')} ${dim('Trusted this new workspace with mise.')}\n`,
       );
     }
   }
 
   if (resolveBicaPluginConfig(prep.repoRoot).syncGit) {
-    chrome(`${dim(`[bica:${lane.label}]`)} ${dim('Syncing .git → remote (git.sync)…')}\n`);
+    chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     pushGitToRemote(prep);
     if (resolvedRef !== undefined) {
-      // The pushed .git carries the *local* checkout's HEAD; repoint it at what this lane runs.
+      // The pushed .git carries the *local* checkout's HEAD; repoint it at what this pinned runs.
       setRemoteHeadForPin({
         sshHost: prep.config.sshHost,
         remoteWorkspacePath: prep.config.remoteWorkspacePath,
@@ -342,7 +304,7 @@ async function runPinnedLaneRunFrom(
 
   if (options.returnFlow && prep.returnFlowPaths.length > 0) {
     chrome(
-      `${dim(`[bica:${lane.label}]`)} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
+      `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
     );
     pushReturnFlowToRemote(prep);
   }
@@ -377,12 +339,12 @@ async function runPinnedLaneRunFrom(
     // What is being thrown away is its result, because another run replaced the workspace contents
     // part-way through, so that output describes some mixture of two content states.
     process.stderr.write(
-      `${warn('[bica]')} Another run replaced lane ${lane.label}'s contents while this command was ` +
+      `${warn('[bica]')} Another run replaced this workspace's contents while the command was ` +
         'executing. The command ran and its output is above, but the result is discarded: it describes ' +
         'a mixture of two content states, not the tree this run claimed to verify. Nothing here is a ' +
         'verdict on your code — re-run it.\n' +
-        "The lane lock exists to prevent this, so it is worth reporting; the point of the check is that " +
-        'a lock failure costs you a re-run rather than a wrong answer.\n',
+        'The lease exists to prevent this, so it is worth reporting; the point of the check is that a\n' +
+        'lease failure costs you a re-run rather than a wrong answer.\n',
     );
   }
 
@@ -393,12 +355,12 @@ async function runPinnedLaneRunFrom(
     });
     if (rfLock === null) {
       process.stderr.write(
-        `${warn('[bica]')} ${dim('Timed out waiting for another lane to finish its return-flow pull; skipping this one.')}\n`,
+        `${warn('[bica]')} ${dim('Timed out waiting for another workspace to finish its return-flow pull; skipping this one.')}\n`,
       );
     } else {
       try {
         chrome(
-          `${dim(`[bica:${lane.label}]`)} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
+          `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
         );
         pullReturnFlow(prep);
       } finally {
@@ -407,7 +369,7 @@ async function runPinnedLaneRunFrom(
     }
   } else if (prep.returnFlowPaths.length > 0) {
     chrome(
-      `${dim(`[bica:${lane.label}]`)} ${dim('Return-flow is off for lane runs; pass --return-flow to pull artifacts back.')}\n`,
+      `${dim('[bica]')} ${dim('Return-flow is off for pinned runs; pass --return-flow to pull artifacts back.')}\n`,
     );
   }
 
