@@ -41,21 +41,6 @@ function returnFlowLockPath(repoRoot: string): string {
   return path.join(lockRootDir(repoRoot), '_return-flow.lock');
 }
 
-/**
- * Exit code for "refused to start: the workspace is in use, nothing ran".
- *
- * Distinct from 97, which means "ran, then found the workspace had been taken, so the result was
- * discarded". Callers are frequently agents reading exit codes and the two want different reactions:
- * 98 says wait, 97 says re-run this one. Asserting on the code rather than the message also keeps a
- * checker from silently decoupling when the wording changes, which has happened twice.
- */
-export const LANE_IN_USE_EXIT = 98;
-
-/** Thrown when every candidate workspace is leased. Carries the exit code so callers need not parse. */
-export class LaneInUseError extends Error {
-  readonly exitCode = LANE_IN_USE_EXIT;
-}
-
 /** The workspace lease this run holds, and how to give it back. */
 export interface AcquiredWorkspace {
   owner: ClaimOwner;
