@@ -166,6 +166,30 @@ working tree into the same directory *and* terminate the first one's session. Ve
 branch chain one branch at a time is therefore serial, and a chain long enough makes a full sweep
 expensive enough to skip — which is how real failures reach CI unverified.
 
+### First: do you need lanes at all?
+
+Lanes isolate runs against **different content**. Several commands against the *same* files do not need
+them — they need one workspace and one copy of the files:
+
+```bash
+bica --yes run --lane auto sh -c '
+  pnpm lint > .l.log 2>&1 & L=$!
+  pnpm typecheck > .t.log 2>&1 & T=$!
+  pnpm test:run > .v.log 2>&1 & V=$!
+  wait $L; rl=$?; wait $T; rt=$?; wait $V; rv=$?
+  for f in l t v; do echo "== $f =="; cat .$f.log; done
+  [ $rl -eq 0 ] && [ $rt -eq 0 ] && [ $rv -eq 0 ]
+'
+```
+
+Measured on this repo, three checks that way against one lane each: **32 s vs 43 s**, one third of the
+disk, one tree sync instead of three, and one `dist` build instead of three identical ones. The three
+tools write to disjoint places — eslint to `.eslintcache`, tsc to `dist/`, vitest to
+`node_modules/.vite` — so they do not interfere.
+
+Reach for a lane per unit of work only when the *content* differs, which is what the rest of this
+section is about.
+
 A **lane** is a reusable remote workspace with its own directory, session name and dependency install.
 Several `bica run` invocations can hold different lanes at once.
 
