@@ -50,6 +50,8 @@ export interface PackageManagerPlugin {
   readLocalFingerprint(repoRoot: string): string | null;
   readStoredHash(ctx: PackageManagerStateContext): string | null;
   writeStoredHash(ctx: PackageManagerStateContext, digest: string): void;
+  /** Forget the recorded install, so the next run reinstalls. Used when the workspace is recreated. */
+  clearStoredHash(ctx: PackageManagerStateContext): void;
   /** True when remote argv denotes an install/add that should refresh the fingerprint. */
   isInstallArgv(remoteArgv: string[]): boolean;
   /** Single remote shell command to run a full install (POSIX-safe; no user argv). */

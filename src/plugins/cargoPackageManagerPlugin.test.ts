@@ -77,4 +77,25 @@ describe('cargoPackageManagerPlugin', () => {
   it('runs a locked fetch as its remote install command', () => {
     expect(plugin.remoteInstallCommand).toBe('cargo fetch --locked');
   });
+
+  it('clearStoredHash forgets a recorded install, so a recreated workspace reinstalls', () => {
+    // The fingerprint describes a *remote* workspace but lives locally, so removing that workspace
+    // leaves it asserting an install that no longer exists. Without this the next run skips the
+    // install and executes against an empty directory.
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-cargo-'));
+    fs.writeFileSync(path.join(dir, 'Cargo.lock'), 'version = 4\n', 'utf8');
+    const local = plugin.readLocalFingerprint(dir);
+    plugin.writeStoredHash(stateCtx(dir), local as string);
+    expect(plugin.readStoredHash(stateCtx(dir))).toBe(local);
+
+    plugin.clearStoredHash(stateCtx(dir));
+    expect(plugin.readStoredHash(stateCtx(dir))).toBeNull();
+  });
+
+  it('clearStoredHash is a no-op when nothing was recorded', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-cargo-'));
+    expect(() => {
+      plugin.clearStoredHash(stateCtx(dir));
+    }).not.toThrow();
+  });
 });
