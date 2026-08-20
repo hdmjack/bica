@@ -8,11 +8,6 @@ import {
   describeLockHolder,
   isProcessAlive,
 } from './fileLock';
-import {
-  resolveGitRef,
-  setRemoteHeadForPin,
-  withPinnedWorktree,
-} from './gitPin';
 import { lockRootDir } from './workspacePaths';
 import { shortOid } from './contentIdentity';
 import {
@@ -33,8 +28,6 @@ import {
   ensureRemoteWorkspaceDirectory,
   runRemoteCommandWithPmHooks,
 } from './runWithPackageManagerPlugins';
-import type { ResolvedGitRef } from './gitPin';
-import type { ConfirmFn } from '../plugins/types';
 import type { PrepareResult } from '../syncProject';
 
 /** How long a queued return-flow pull waits for another run's pull to finish. */
@@ -168,54 +161,22 @@ export async function runPinned(options: {
   remoteArgv: string[];
   /** The user's commands, for package-manager plugin matching. See runRemoteCommandWithPmHooks. */
   matchArgvs?: string[][];
-  autoYes: boolean;
   pmOverride: string | undefined;
-  confirm: ConfirmFn;
   /** `--return-flow` was passed. Without it a pinned run does not pull artifacts back. */
   returnFlowOptIn: boolean;
-  /** `--ref`: run this git ref's committed content instead of the live working tree. */
-  ref: string | undefined;
   /** Lease taken before anything was synced; this run already owns the workspace. */
   owner: ClaimOwner;
   chrome: (text: string) => void;
 }): Promise<number> {
-  const { prep } = options;
-  // Explicit opt-in, full stop. This used to guess by counting runs in flight, which was racy by its
-  // own admission -- two runs starting together could both conclude they were alone -- and a guess that
-  // is usually right is the worst kind here, because return-flow mirrors with `--delete`.
-  const resolvedOptions = { ...options, returnFlow: options.returnFlowOptIn };
-  if (options.ref === undefined) {
-    return runPinnedFrom(resolvedOptions, undefined, undefined);
-  }
-  const resolved = resolveGitRef(prep.repoRoot, options.ref);
-  return withPinnedWorktree(
-    { repoRoot: prep.repoRoot, resolved },
-    (worktreePath) => runPinnedFrom(resolvedOptions, worktreePath, resolved),
-  );
-}
-
-async function runPinnedFrom(
-  options: {
-    prep: PrepareResult;
-    remoteArgv: string[];
-    autoYes: boolean;
-    pmOverride: string | undefined;
-    confirm: ConfirmFn;
-    matchArgvs?: string[][];
-    returnFlow: boolean;
-    owner: ClaimOwner;
-    chrome: (text: string) => void;
-  },
-  sourceDir: string | undefined,
-  resolvedRef: ResolvedGitRef | undefined,
-): Promise<number> {
   const { prep, chrome } = options;
+  // Return-flow is explicit opt-in, full stop. It used to be guessed by counting runs in flight, which
+  // was racy by its own admission -- two runs starting together could both conclude they were alone --
+  // and a guess that is usually right is the worst kind here, because the pull mirrors with `--delete`.
+  const returnFlow = options.returnFlowOptIn;
 
   const dirReady = await ensureRemoteWorkspaceDirectory(
     prep.config.sshHost,
     prep.config.remoteWorkspacePath,
-    options.autoYes,
-    options.confirm,
   );
   if (dirReady.code !== 0) {
     return dirReady.code;
@@ -224,29 +185,23 @@ async function runPinnedFrom(
   // The lease was taken during workspace selection, before anything was synced, and is released by the
   // caller. By the time we get here the workspace is ours.
   const claimExpr = claimPathExpr(prep.config.remoteWorkspacePath);
-  const sourceLabel =
-    resolvedRef === undefined
-      ? 'working tree'
-      : `${resolvedRef.requested} (${resolvedRef.sha.slice(0, 12)})`;
 
   // Printed unconditionally, not through `chrome`. Callers redirect to a log file, which makes stdout
   // a pipe and silences the decorative output — so anything only shown on a TTY is invisible to exactly
   // the audience that needs it. A session downstream of this had resorted to grepping the `pnpm` banner
   // for the workspace path to satisfy itself a run was its own; this states it outright, for any
-  // command, and pairs it with the content name so the run can be checked against what was intended.
+  // command, so a caller can confirm where a run landed without relying on the command announcing it.
   process.stderr.write(
-    `${dim('[bica]')} workspace ${prep.remoteSyncUrl}  content ${sourceLabel}  run ${options.owner.runId}\n`,
+    `${dim('[bica]')} workspace ${prep.remoteSyncUrl}  run ${options.owner.runId}\n`,
   );
   chrome(
-    `${dim('[bica]')} ${dim(`Pinning ${sourceLabel} to`)} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
+    `${dim('[bica]')} ${dim('Pinning working tree to')} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
   );
   const push = pushPinnedWorkingTree({
     repoRoot: prep.repoRoot,
-    sourceDir,
     remoteSyncUrl: prep.remoteSyncUrl,
     syncIgnorePaths: prep.syncIgnorePaths,
-    returnFlowPaths: options.returnFlow ? prep.returnFlowPaths : [],
-    knownTreeOid: resolvedRef?.treeOid,
+    returnFlowPaths: returnFlow ? prep.returnFlowPaths : [],
   });
   if (!push.ok) {
     if (push.torn === true) {
@@ -255,8 +210,7 @@ async function runPinnedFrom(
           `${shortOid(push.treeOidBefore ?? '?')} → ${shortOid(push.treeOidAfter ?? '?')}. ` +
           'Refusing to run, because what landed on the remote is a mix of both and a result from it ' +
           'would look exactly like a real verification.\n' +
-          'Let local git settle and re-run, or pin to a commit with `--ref <branch>`, which reads the ' +
-          'content out of the object database and ignores the working tree entirely.\n',
+          'Let local git settle -- finish the checkout or rebase -- and run it again.\n',
       );
     }
     return 1;
@@ -284,17 +238,9 @@ async function runPinnedFrom(
   if (resolveBicaPluginConfig(prep.repoRoot).syncGit) {
     chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     pushGitToRemote(prep);
-    if (resolvedRef !== undefined) {
-      // The pushed .git carries the *local* checkout's HEAD; repoint it at what this pinned runs.
-      setRemoteHeadForPin({
-        sshHost: prep.config.sshHost,
-        remoteWorkspacePath: prep.config.remoteWorkspacePath,
-        resolved: resolvedRef,
-      });
-    }
   }
 
-  if (options.returnFlow && prep.returnFlowPaths.length > 0) {
+  if (returnFlow && prep.returnFlowPaths.length > 0) {
     chrome(
       `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
     );
@@ -305,9 +251,7 @@ async function runPinnedFrom(
     prep,
     remoteArgv: options.remoteArgv,
     matchArgvs: options.matchArgvs,
-    autoYes: options.autoYes,
     pmOverride: options.pmOverride,
-    confirm: options.confirm,
     assertRunId: runId,
     claimPathExpr: claimExpr,
   });
@@ -341,7 +285,7 @@ async function runPinnedFrom(
     );
   }
 
-  if (options.returnFlow && prep.returnFlowPaths.length > 0) {
+  if (returnFlow && prep.returnFlowPaths.length > 0) {
     // Serialised: concurrent pulls with `--delete` into one tree would fight over the same files.
     const rfLock = await acquireLockWithWait(returnFlowLockPath(prep.repoRoot), {
       timeoutMs: RETURN_FLOW_LOCK_TIMEOUT_MS,

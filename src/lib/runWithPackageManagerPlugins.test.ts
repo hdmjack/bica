@@ -81,18 +81,14 @@ describe('runRemoteCommandWithPmHooks', () => {
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const prep = makePrep(repoRoot);
-      const confirm = vi.fn().mockResolvedValue(true);
 
       const code = await runRemoteCommandWithPmHooks({
         prep,
         remoteArgv: ['pnpm', 'test'],
-        autoYes: true,
         pmOverride: undefined,
-        confirm,
       });
 
       expect(code).toBe(0);
-      expect(confirm).not.toHaveBeenCalled();
       expect(runRemote).toHaveBeenCalledTimes(2);
       expect(runRemote.mock.calls[0]?.[2]).toBe(
         pnpmPackageManagerPlugin.remoteInstallCommand,
@@ -125,17 +121,13 @@ describe('runRemoteCommandWithPmHooks', () => {
       );
 
       const prep = makePrep(repoRoot);
-      const confirm = vi.fn();
 
       await runRemoteCommandWithPmHooks({
         prep,
         remoteArgv: ['pnpm', 'test'],
-        autoYes: false,
         pmOverride: undefined,
-        confirm,
       });
 
-      expect(confirm).not.toHaveBeenCalled();
       expect(runRemote).toHaveBeenCalledTimes(2);
       expect(runRemote.mock.calls[0]?.[2]).toBe(
         pnpmPackageManagerPlugin.remoteInstallCommand,
@@ -157,9 +149,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       const code = await runRemoteCommandWithPmHooks({
         prep,
         remoteArgv: ['pnpm', 'test'],
-        autoYes: true,
         pmOverride: undefined,
-        confirm: vi.fn(),
       });
 
       expect(code).toBe(0);
@@ -179,9 +169,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       const code = await runRemoteCommandWithPmHooks({
         prep,
         remoteArgv: ['pnpm', 'install'],
-        autoYes: true,
         pmOverride: undefined,
-        confirm: vi.fn(),
       });
 
       expect(code).toBe(0);
@@ -210,9 +198,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       const code = await runRemoteCommandWithPmHooks({
         prep,
         remoteArgv: ['pnpm', 'test'],
-        autoYes: true,
         pmOverride: undefined,
-        confirm: vi.fn(),
       });
 
       expect(code).toBe(0);
@@ -220,35 +206,6 @@ describe('runRemoteCommandWithPmHooks', () => {
       expect(runRemote.mock.calls[0]?.[2]).toBe(
         pnpmPackageManagerPlugin.remoteInstallCommand,
       );
-    } finally {
-      fs.rmSync(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('prompts to create remote workspace when the directory is missing', async () => {
-    const repoRoot = makeTempRepo();
-    try {
-      writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
-      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot),
-        pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!,
-      );
-
-      dirExists.mockReturnValue(false);
-      const confirm = vi.fn().mockResolvedValue(true);
-
-      const code = await runRemoteCommandWithPmHooks({
-        prep: makePrep(repoRoot),
-        remoteArgv: ['pnpm', 'test'],
-        autoYes: false,
-        pmOverride: undefined,
-        confirm,
-      });
-
-      expect(code).toBe(0);
-      expect(confirm).toHaveBeenCalled();
-      expect(String(confirm.mock.calls[0]?.[0])).toContain('mkdir -p');
-      expect(mkdirRemote).toHaveBeenCalledWith('test-host', '/remote/repo');
-      expect(runRemote).toHaveBeenCalled();
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -263,42 +220,15 @@ describe('runRemoteCommandWithPmHooks', () => {
       );
 
       dirExists.mockReturnValue(false);
-      const confirm = vi.fn();
 
       const code = await runRemoteCommandWithPmHooks({
         prep: makePrep(repoRoot),
         remoteArgv: ['pnpm', 'test'],
-        autoYes: true,
         pmOverride: undefined,
-        confirm,
       });
 
       expect(code).toBe(0);
-      expect(confirm).not.toHaveBeenCalled();
       expect(mkdirRemote).toHaveBeenCalledWith('test-host', '/remote/repo');
-    } finally {
-      fs.rmSync(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it('aborts when the remote workspace is missing and mkdir is declined', async () => {
-    const repoRoot = makeTempRepo();
-    try {
-      writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
-      dirExists.mockReturnValue(false);
-      const confirm = vi.fn().mockResolvedValue(false);
-
-      const code = await runRemoteCommandWithPmHooks({
-        prep: makePrep(repoRoot),
-        remoteArgv: ['pnpm', 'test'],
-        autoYes: false,
-        pmOverride: undefined,
-        confirm,
-      });
-
-      expect(code).toBe(1);
-      expect(mkdirRemote).not.toHaveBeenCalled();
-      expect(runRemote).not.toHaveBeenCalled();
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -309,17 +239,13 @@ describe('runRemoteCommandWithPmHooks', () => {
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const prep = makePrep(repoRoot);
-      const confirm = vi.fn();
 
       await runRemoteCommandWithPmHooks({
         prep,
         remoteArgv: ['pnpm', 'test'],
-        autoYes: false,
         pmOverride: undefined,
-        confirm,
       });
 
-      expect(confirm).not.toHaveBeenCalled();
       expect(runRemote).toHaveBeenCalledTimes(2);
       expect(runRemote.mock.calls[0]?.[2]).toBe(
         pnpmPackageManagerPlugin.remoteInstallCommand,
@@ -345,9 +271,7 @@ describe('runRemoteCommandWithPmHooks', () => {
         ['pnpm', 'lint'],
         ['pnpm', 'test'],
       ],
-      autoYes: true,
       pmOverride: undefined,
-      confirm: async () => true,
     });
     expect(code).toBe(0);
     expect(runRemote.mock.calls[0]?.[2]).toBe(
@@ -369,9 +293,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       prep: makePrep(repoRoot),
       remoteArgv: ['sh', '-c', 'wrapped'],
       matchArgvs: [['pnpm', 'lint']],
-      autoYes: true,
       pmOverride: undefined,
-      confirm: async () => true,
     });
     // Fingerprint already current, so the only remote call is the command itself.
     expect(runRemote.mock.calls).toHaveLength(1);

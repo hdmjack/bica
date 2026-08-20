@@ -11,8 +11,6 @@ export interface ParsedGlobals {
   pm: string | undefined;
   /** `--return-flow`: pull remote artifacts back for a pinned run. */
   returnFlow: boolean;
-  /** `--ref <rev>`: run a commit's content instead of the live working tree. */
-  ref: string | undefined;
   rest: string[];
 }
 
@@ -32,7 +30,6 @@ export function parseArgs(argv: string[]): ParsedGlobals {
   let autoYes = false;
   let pm: string | undefined;
   let returnFlow = false;
-  let ref: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--yes' || a === '-y') {
@@ -42,12 +39,9 @@ export function parseArgs(argv: string[]): ParsedGlobals {
     } else if (a === '--pm') {
       pm = requireValue(argv, i, '--pm', 'a package-manager plugin id (e.g. pnpm)');
       i += 1;
-    } else if (a === '--ref') {
-      ref = requireValue(argv, i, '--ref', 'a git ref (branch, tag or commit)');
-      i += 1;
     } else {
       rest.push(a);
     }
   }
-  return { autoYes, pm, returnFlow, ref, rest };
+  return { autoYes, pm, returnFlow, rest };
 }

@@ -104,14 +104,9 @@ Running several commands at once
   faster than a workspace each, uses a third of the disk, and builds dist once instead of three
   identical times.
 
-  --ref <rev>                 Run a branch/tag/commit's *committed* content instead of the working
-                              tree, via a throwaway git worktree. No checkout happens, so local git
-                              can be on any branch, or mid-rebase, while it runs. This is how you
-                              verify a branch without disturbing what you are working on.
-                              Uncommitted work is not included.
-  --return-flow               Pull remote artifacts back for a pinned run (--ref, or several
-                              commands). Off by default there because the pull mirrors with --delete
-                              and describes exactly one content state.
+  --return-flow               Pull remote artifacts back after a multi-command run. Off by default
+                              there because the pull mirrors with --delete and describes exactly one
+                              content state.
 
   The remote workspace is leased for the duration of a run, so a second run — including one from a
   sibling clone that resolves to the same remote path — refuses rather than syncing over the first.
@@ -134,8 +129,8 @@ File sync
                               (terminates any existing session for this repo *and this remote
                               workspace* before starting, and tears it down on exit). 'start' is
                               for users who want a long-lived session — but it will be killed at
-                              the next 'bica run'. Pinned runs (--ref, or several commands) use no
-                              session at all, so they never disturb one.
+                              the next 'bica run'. A multi-command run uses no session at all, so it
+                              never disturbs one.
 
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
@@ -162,7 +157,6 @@ Config precedence (no merging)
 Environment
   BICA_SSH_HOST                  SSH target (optional: .bica/local.yml, ~/.ssh/config, or prompt)
   BICA_REMOTE_PATH               Remote workspace path (default ~/code/<repo folder name>)
-  BICA_ASSUME_YES                1/0 = auto-confirm run prompts (overrides run.assumeYes)
   BICA_LOGIN_SHELL               Remote shell for non-interactive commands (default zsh)
   BICA_LOGIN_FLAGS               Flags for that shell (default -lc for zsh)
   BICA_DEBUG                     Set to 1 to print the remote script on stderr before ssh (env-dump hint: always on TTY; with debug, also when stderr is not a TTY)
@@ -171,25 +165,23 @@ Environment
                                  (configure patterns via top-level returnFlow: in bica.yml)
 
 Globals (parsed from the full argv; not forwarded to the remote — put before "run" for clarity)
-  -y, --yes              Non-interactive: auto-confirm starting file sync when no session exists yet
-                         (or set run.assumeYes / BICA_ASSUME_YES)
+  -y, --yes              Auto-confirm prompts in 'bica start'. 'bica run' never prompts.
   --pm <id>              Disambiguate package-manager hooks when several could match argv[0]
-  --ref <rev>            Run a commit's content rather than the working tree
   --return-flow          Pull remote artifacts back for a pinned run
 
 Examples
   bica init
   bica prepare
-  bica --yes run pnpm validate
+  bica run pnpm validate
   bica credentials sync
   bica credentials sync npmrc
   bica plugins list
 
   # Three checks at once, one workspace, one copy of the files
-  bica --yes run pnpm lint -- pnpm typecheck -- pnpm test:run
+  bica run pnpm lint -- pnpm typecheck -- pnpm test:run
 
-  # Verify a branch without checking it out
-  bica --yes run --ref feat/my-branch pnpm validate
+  # One command
+  bica run pnpm test:run
 `);
 }
 
@@ -372,14 +364,13 @@ async function cmdSsh(): Promise<void> {
 
 async function runWithLiveSession(options: {
   prep: PrepareResult;
-  autoYes: boolean;
   pm: string | undefined;
   tail: string[];
   matchArgvs?: string[][];
   captured: boolean;
   chrome: (text: string) => void;
 }): Promise<number> {
-  const { prep, autoYes, pm, tail, captured, chrome } = options;
+  const { prep, pm, tail, captured, chrome } = options;
   const { repoRoot, projectFilePath, sessionName, remoteSyncUrl } = prep;
 
   // Ephemeral session: terminate anything bound to this repo *and this remote workspace* (any name),
@@ -465,9 +456,7 @@ async function runWithLiveSession(options: {
       prep,
       remoteArgv: tail,
       matchArgvs: options.matchArgvs,
-      autoYes,
       pmOverride: pm,
-      confirm,
     });
     // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
     // failed tests still produce snapshot diffs the user needs locally.
@@ -515,12 +504,13 @@ export function splitOnDoubleDash(tail: string[]): string[][] {
   for (const cmd of commands) {
     if (cmd[0].startsWith('-')) {
       throw new Error(
-        `"${cmd[0]}" cannot start a command: after \`--\`, bica expects another program to run.\n` +
-          'If you meant to pass flags to the previous command, drop the `--` — everything after `run` ' +
-          'is already argv on the remote:\n' +
+        `"${cmd[0]}" cannot start a command — bica expects a program to run.\n` +
+          'If it is meant as a flag for the previous command, drop the `--` before it; everything ' +
+          'after `run` already reaches the remote as argv:\n' +
           '  bica run pnpm test --coverage\n' +
-          'Use `--` only to separate whole commands that should run concurrently:\n' +
-          '  bica run pnpm lint -- pnpm typecheck',
+          '`--` separates whole commands that should run at the same time:\n' +
+          '  bica run pnpm lint -- pnpm typecheck\n' +
+          'If it is meant as a bica option, it is not one; see `bica help`.',
       );
     }
   }
@@ -528,10 +518,8 @@ export function splitOnDoubleDash(tail: string[]): string[][] {
 }
 
 async function cmdRun(options: {
-  autoYes: boolean;
   pm: string | undefined;
   returnFlow: boolean;
-  ref: string | undefined;
   /** Several commands to run concurrently in one workspace, or one command. */
   commands: string[][];
 }): Promise<void> {
@@ -542,13 +530,10 @@ async function cmdRun(options: {
 
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
-  const config = resolveBicaPluginConfig(repoRoot);
-  const autoYes = options.autoYes || config.runAssumeYes;
-
   const baseRemote = loadRemoteEnvConfig(repoRoot);
+  // Several commands pin the content: they run for minutes and must all see the same tree, which a
+  // live session -- designed to keep pushing later edits -- cannot promise.
   const parallel = options.commands.length > 1;
-  // A ref run cannot use the live session, which exists to follow the checkout; it pins instead.
-  const pinned = options.ref !== undefined || parallel;
 
   let acquired;
   try {
@@ -584,16 +569,13 @@ async function cmdRun(options: {
   const prep = prepareSyncProjectFile({ verbose: false });
   let code: number;
   try {
-    if (pinned) {
+    if (parallel) {
       code = await runPinned({
         prep,
         remoteArgv,
         matchArgvs: options.commands,
-        autoYes,
         pmOverride: pm,
-        confirm,
         returnFlowOptIn: options.returnFlow,
-        ref: options.ref,
         owner,
         chrome,
       });
@@ -601,7 +583,6 @@ async function cmdRun(options: {
       assertMutagenInstalled();
       code = await runWithLiveSession({
         prep,
-        autoYes,
         pm,
         tail: remoteArgv,
         matchArgvs: options.commands,
@@ -684,10 +665,8 @@ async function main(): Promise<void> {
         break;
       case 'run':
         await cmdRun({
-          autoYes,
           pm,
           returnFlow: globals.returnFlow,
-          ref: globals.ref,
           commands: splitOnDoubleDash(tail),
         });
         break;

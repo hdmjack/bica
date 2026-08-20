@@ -14,7 +14,6 @@ import {
   runRemoteCommand,
 } from './runRemote';
 import type {
-  ConfirmFn,
   PackageManagerPlugin,
   PackageManagerStateContext,
 } from '../plugins/types';
@@ -106,27 +105,25 @@ export interface RemoteWorkspaceReadiness {
   created: boolean;
 }
 
+/**
+ * Make sure the remote workspace directory exists, creating it if not.
+ *
+ * This used to ask first, which is why `--yes` was mandatory boilerplate on every invocation: the
+ * prompt fires once per workspace, and an unattended run that meets it simply hangs. The thing it
+ * guarded is `mkdir -p` on a path the user configured themselves in `.bica/local.yml`, so the worst
+ * case it prevented was a typo creating one empty directory -- visible immediately, since the run then
+ * installs from scratch, and removable with one command. Not worth a prompt on every new workspace.
+ */
 export async function ensureRemoteWorkspaceDirectory(
   sshHost: string,
   remoteWorkspacePath: string,
-  autoYes: boolean,
-  confirmFn: ConfirmFn,
 ): Promise<RemoteWorkspaceReadiness> {
   if (remoteWorkspaceDirExists(sshHost, remoteWorkspacePath)) {
     return { code: 0, created: false };
   }
-  const create =
-    autoYes ||
-    (await confirmFn(
-      `Remote workspace does not exist on the SSH host yet:\n${remoteWorkspacePath}\n\nCreate it there with mkdir -p?`,
-      true,
-    ));
-  if (!create) {
-    process.stderr.write(
-      '[bica] Remote workspace path is missing; create it manually or update BICA_REMOTE_PATH / .bica/local.yml.\n',
-    );
-    return { code: 1, created: false };
-  }
+  process.stderr.write(
+    `[bica] Creating remote workspace ${remoteWorkspacePath}\n`,
+  );
   const mkdirCode = remoteMkdirWorkspace(sshHost, remoteWorkspacePath);
   if (mkdirCode !== 0) {
     process.stderr.write(
@@ -153,23 +150,19 @@ export async function runRemoteCommandWithPmHooks(options: {
    * all. Defaults to `[remoteArgv]`, which is the single-command case.
    */
   matchArgvs?: string[][];
-  autoYes: boolean;
   pmOverride: string | undefined;
-  confirm: ConfirmFn;
   /** Run id of the lease this run holds; the remote confirms it still holds it after the command. */
   assertRunId?: string;
   /** Shell expression for that lease's file on the remote. */
   claimPathExpr?: string;
 }): Promise<number> {
-  const { prep, remoteArgv, autoYes, pmOverride, confirm: confirmFn } = options;
+  const { prep, remoteArgv, pmOverride } = options;
   const { repoRoot, config } = prep;
   const stateCtx = packageManagerStateContext(repoRoot);
 
   const dirReady = await ensureRemoteWorkspaceDirectory(
     config.sshHost,
     config.remoteWorkspacePath,
-    autoYes,
-    confirmFn,
   );
   if (dirReady.code !== 0) {
     return dirReady.code;
