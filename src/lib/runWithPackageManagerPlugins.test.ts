@@ -4,7 +4,6 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { pnpmPackageManagerPlugin } from '../plugins/pnpmPackageManagerPlugin';
-import { defaultLaneIdentity } from './lanes';
 import {
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
@@ -41,7 +40,7 @@ function stateCtx(repoRoot: string): PackageManagerStateContext {
   return {
     repoRoot,
     stateDir: path.join(repoRoot, '.bica'),
-    isDefaultLane: true,
+    isDefaultWorkspace: true,
   };
 }
 
@@ -50,7 +49,6 @@ function makePrep(repoRoot: string): PrepareResult {
     repoRoot,
     projectFilePath: path.join(repoRoot, '.bica', 'project.yml'),
     sessionName: 'test-session',
-    lane: defaultLaneIdentity(repoRoot),
     remoteSyncUrl: 'test-host:/remote/repo',
     returnFlowPaths: [],
     syncIgnorePaths: [],

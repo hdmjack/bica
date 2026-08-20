@@ -51,17 +51,9 @@ const NODE_BICA_YML = `sync:
 # git:
 #   sync: true
 
-# parallel.lanes: how many reusable remote workspaces \`bica run --lane auto\` may pick from, for
-# running several verifications at once from this one checkout. Lanes are reused, so each keeps its
-# own installed node_modules — warm them up front with \`bica lanes prepare\`.
-# parallel:
-#   lanes: 4
-
-# run: defaults for \`bica run\`, so the everyday invocation needs no flags. lane: auto gives every
-# run its own remote workspace (so several can run at once); assumeYes auto-confirms the prompts a
-# run legitimately needs — it never authorises \`bica lanes clean\`, which always wants an explicit -y.
+# run: defaults for \`bica run\`. assumeYes auto-confirms the prompts a run legitimately needs,
+# such as creating the remote workspace directory the first time.
 # run:
-#   lane: auto
 #   assumeYes: true
 
 bica:
@@ -86,17 +78,9 @@ returnFlow:
     - "target/debug/${binName}"
     - "target/debug/*.dylib"
 
-# parallel.lanes: how many reusable remote workspaces \`bica run --lane auto\` may pick from, for
-# running several verifications at once from this one checkout. Lanes are reused, so each keeps its
-# own installed node_modules — warm them up front with \`bica lanes prepare\`.
-# parallel:
-#   lanes: 4
-
-# run: defaults for \`bica run\`, so the everyday invocation needs no flags. lane: auto gives every
-# run its own remote workspace (so several can run at once); assumeYes auto-confirms the prompts a
-# run legitimately needs — it never authorises \`bica lanes clean\`, which always wants an explicit -y.
+# run: defaults for \`bica run\`. assumeYes auto-confirms the prompts a run legitimately needs,
+# such as creating the remote workspace directory the first time.
 # run:
-#   lane: auto
 #   assumeYes: true
 
 bica:

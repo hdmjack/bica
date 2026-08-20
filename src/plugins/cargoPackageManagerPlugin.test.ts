@@ -12,7 +12,7 @@ function stateCtx(repoRoot: string): PackageManagerStateContext {
   return {
     repoRoot,
     stateDir: path.join(repoRoot, '.bica'),
-    isDefaultLane: true,
+    isDefaultWorkspace: true,
   };
 }
 

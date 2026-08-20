@@ -9,14 +9,10 @@ import * as path from 'node:path';
  * because the content is already in the file, there is never an instant where a lock is visible
  * without its holder recorded. Nothing here depends on elapsed time.
  *
- * Two things need locking once runs can overlap:
- *
- * - **A lane.** Two runs on one lane would sync different working trees into the same remote
- *   directory and each would see the other's files. Holding the lane's lock for the whole run turns
- *   that silent corruption into an upfront error naming the process that holds it.
- * - **The local repo, briefly.** Return-flow rsyncs remote files into the local tree with
- *   `--delete`; two of those at once in the same tree fight. The pull takes the repo lock so the
- *   pulls queue instead.
+ * These cover the *local* coordination points only — the return-flow pull and pinned-worktree
+ * creation, whose contended resources really are local to this checkout. The remote workspace is
+ * guarded by a lease that lives on the remote (see `remoteClaim.ts`), because a lock here could not
+ * see a run launched from a sibling clone resolving to the same remote path.
  *
  * A holder that died without releasing leaves its file behind. Acquisition decides what to do with
  * such a file *structurally* rather than by age: a parseable pid is authoritative and only liveness
@@ -75,9 +71,9 @@ export function readLockHolder(filePath: string): LockHolder | null {
  * counts as alive.
  *
  * Pid reuse is the one thing this cannot rule out: a lock left by a dead process whose pid has since
- * been recycled reads as alive. That errs in the safe direction — the lane is treated as taken rather
- * than handed to a second run — and `--lane auto` simply moves to the next lane. `bica lanes list`
- * names the holder so a wedged lane can be cleared deliberately.
+ * been recycled reads as alive. That errs in the safe direction — the resource is treated as taken
+ * rather than handed to a second run — and the caller is told who holds it, so a wedged one can be
+ * cleared deliberately.
  */
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -100,8 +96,8 @@ let stagingCounter = 0;
  * The obvious implementation — `open(…, 'wx')` then write the pid — is wrong, and wrong in a way that
  * defeats the whole lock. Between the create and the write, the file exists but is *empty*; a second
  * process arriving in that window reads no pid, concludes the lock is abandoned, deletes it and takes
- * it. Both then believe they hold the same lane. Simultaneous starts land in that window nearly every
- * time, so this failed reproducibly rather than rarely.
+ * it. Both then believe they hold it. Simultaneous starts land in that window nearly every time, so
+ * this failed reproducibly rather than rarely.
  *
  * Writing the content to a staging file first and then `link()`ing it into place closes the window:
  * `link` fails with EEXIST if the target exists, so the claim is still exclusive, but the file is
@@ -144,7 +140,7 @@ function writeLockFileExclusive(filePath: string): boolean {
  *   A reads the file, sees a dead pid
  *   B reclaims it and links its own live lock
  *   A removes the file — now B's live lock is gone — and links its own
- *   A and B both believe they hold the lane
+ *   A and B both believe they hold the lock
  *
  * The `expectedIno` guard closes almost all of that: A only removes the file if it is still the inode
  * A inspected, and B's lock is a different inode. POSIX has no compare-and-delete, so a window remains
@@ -195,8 +191,8 @@ function releaseIfOurs(filePath: string): void {
 
 /**
  * Take `filePath` if it is free, or if the recorded holder is no longer running. Returns null when
- * a live process holds it — callers decide whether that is an error (explicit lane) or a signal to
- * try the next candidate (`--lane auto`).
+ * a live process holds it — callers decide whether that is an error (explicit workspace) or a signal to
+ * try again later.
  */
 export function tryAcquireLock(filePath: string): HeldLock | null {
   // Bounded so a pathological churn of reclaim-and-reacquire cannot spin forever. Each iteration
@@ -226,7 +222,7 @@ export function tryAcquireLock(filePath: string): HeldLock | null {
     // Unparseable. bica publishes a lock complete — content and all — in a single atomic `link`, so
     // there is no instant at which one of ours is visible without its pid. Unparseable therefore means
     // this file is not one of our locks: debris from a process killed mid-write by an older build, or
-    // something another tool left here. Neither is a claim on the lane, and no amount of waiting will
+    // something another tool left here. Neither is a claim on the workspace, and no amount of waiting will
     // turn it into one, so reclaim it now rather than guessing at an age that makes it safe.
     reclaimLockFile(filePath, ino);
   }

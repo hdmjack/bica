@@ -10,7 +10,7 @@ import type {
 
 const LOCKFILE = 'pnpm-lock.yaml';
 
-/** Relative to the lane's state dir, so `.bica/hashes/…` for the default run. */
+/** Relative to the workspace's state dir, so `.bica/hashes/…` for the default run. */
 const PNPM_INSTALL_HASH_RELATIVE = path.join('hashes', 'pnpm-install');
 
 /** Legacy single hash file from pre–Phase B (migrate read-only). */
@@ -97,9 +97,9 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
     } catch {
       // fall through to legacy path
     }
-    // The legacy file predates lanes and describes the base workspace only. Reading it for a lane
-    // would claim a never-installed lane is up to date.
-    if (!ctx.isDefaultLane) {
+    // The legacy file predates workspaces and describes the base workspace only. Reading it for a workspace
+    // would claim a never-installed workspace is up to date.
+    if (!ctx.isDefaultWorkspace) {
       return null;
     }
     try {

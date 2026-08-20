@@ -414,10 +414,10 @@ export function remoteMkdirWorkspace(
 }
 
 /**
- * `rm -rf` a lane workspace on the SSH host, passed as argv so no shell ever sees the path.
+ * `rm -rf` a workspace workspace on the SSH host, passed as argv so no shell ever sees the path.
  *
  * Recursive remote deletion is the one genuinely destructive thing bica does, so the path is checked
- * twice: the caller must prove it derived from the configured base path plus a `-lane-<id>` suffix
+ * twice: the caller must prove it derived from the configured base path plus a `-workspace-<id>` suffix
  * (see `isLaneRemotePath`), and this function refuses anything that does not resolve to an absolute
  * path of at least two segments — never `/`, never a bare `$HOME`, never the base workspace.
  */
@@ -443,10 +443,10 @@ export function remoteRemoveLaneDirectory(
       reason: `refusing to remove ${clean}: too close to the filesystem root`,
     };
   }
-  if (!/-lane-[a-z0-9-]+$/.test(clean)) {
+  if (!/-workspace-[a-z0-9-]+$/.test(clean)) {
     return {
       ok: false,
-      reason: `refusing to remove ${clean}: not a lane workspace path`,
+      reason: `refusing to remove ${clean}: not a workspace workspace path`,
     };
   }
   for (const rm of ['/bin/rm', '/usr/bin/rm']) {
@@ -504,14 +504,14 @@ export function remoteReadRecordedExit(
 /**
  * Mark a freshly created remote workspace as trusted by mise, if mise is installed there.
  *
- * A lane is a new directory, so a repo carrying `mise.toml` gets `Config files in … are not trusted`
+ * A fresh workspace is a new directory, so a repo carrying `mise.toml` gets `Config files in … are not trusted`
  * the first time anything runs there. Today mise merely warns and the command still resolves tooling
  * from elsewhere — but that is the failure mode to head off, not tolerate: if `mise.toml` pins the
- * toolchain, an untrusted lane silently runs a *different* node or pnpm than the branch asks for, and
+ * toolchain, an untrusted workspace silently runs a *different* node or pnpm than the branch asks for, and
  * a verification that used the wrong toolchain looks exactly like one that used the right one.
  *
  * Best-effort and silent: no mise, no `mise.toml`, or a non-zero exit all leave the run unaffected.
- * Called only when the workspace was just created, so warm lanes pay nothing.
+ * Called only when the workspace was just created, so warm workspaces pay nothing.
  */
 export function buildMiseTrustScript(remoteWorkspacePath: string): string {
   const dir = remotePathExprForCd(remoteWorkspacePath);

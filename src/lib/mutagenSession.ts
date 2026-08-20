@@ -241,7 +241,7 @@ export function findConflictingSessions(options: {
  * Sessions the ephemeral-session mode (`bica run`) must clear before starting a fresh one: alpha is
  * exactly `repoRoot`, so any name and any ignore config counts.
  *
- * `remoteSyncUrl` narrows that to sessions pointed at *this run's* remote workspace. Concurrent lane
+ * `remoteSyncUrl` narrows that to sessions pointed at *this run's* remote workspace. Concurrent workspace
  * runs share the alpha but each owns a different remote path, so matching on alpha alone would have
  * every `bica run` terminate its siblings' sessions — the original hard blocker on running two at
  * once. Omitting the argument keeps the old repo-wide sweep for callers that want it.
