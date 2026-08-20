@@ -117,7 +117,8 @@ Running several commands at once
   sibling clone that resolves to the same remote path — refuses rather than syncing over the first.
 
   Exit codes worth knowing, since none of them are verdicts on your code:
-    98  refused to start; the workspace is in use. Nothing ran. Wait, or use another checkout.
+    98  refused to start; the workspace is in use. Nothing ran. Wait, or use a checkout with a
+        different remotePath — another clone pointing at the same one is exactly what is refused.
     97  ran, but the workspace was taken part-way through, so the result was discarded. Re-run.
     96  the remote workspace could not be entered.
 
@@ -133,6 +134,8 @@ File sync
                               (terminates any existing session for this repo *and this remote
                               workspace* before starting, and tears it down on exit). 'start' is
                               for users who want a long-lived session — but it will be killed at
+                              the next 'bica run'. Pinned runs (--ref, or several commands) use no
+                              session at all, so they never disturb one.
 
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
@@ -163,7 +166,6 @@ Environment
   BICA_LOGIN_SHELL               Remote shell for non-interactive commands (default zsh)
   BICA_LOGIN_FLAGS               Flags for that shell (default -lc for zsh)
   BICA_DEBUG                     Set to 1 to print the remote script on stderr before ssh (env-dump hint: always on TTY; with debug, also when stderr is not a TTY)
-  BICA_SYNC_FLUSH                Set to 1 to run mutagen sync flush before bica run (slower; reduces remote lag vs local)
   BICA_RETURN_FLOW               Set to 0 to disable the post-\`bica run\` rsync that pulls test
                                  snapshots and other whitelisted files back from remote→local
                                  (configure patterns via top-level returnFlow: in bica.yml)
@@ -373,6 +375,7 @@ async function runWithLiveSession(options: {
   autoYes: boolean;
   pm: string | undefined;
   tail: string[];
+  matchArgvs?: string[][];
   captured: boolean;
   chrome: (text: string) => void;
 }): Promise<number> {
@@ -461,6 +464,7 @@ async function runWithLiveSession(options: {
     code = await runRemoteCommandWithPmHooks({
       prep,
       remoteArgv: tail,
+      matchArgvs: options.matchArgvs,
       autoYes,
       pmOverride: pm,
       confirm,
@@ -501,7 +505,26 @@ export function splitOnDoubleDash(tail: string[]): string[][] {
       out[out.length - 1].push(t);
     }
   }
-  return out.filter((c) => c.length > 0);
+  const commands = out.filter((c) => c.length > 0);
+
+  // `bica run pnpm test -- --coverage` is the conventional "pass the rest through to the tool" form,
+  // and here it means something else entirely: two commands, the second being `--coverage`, which the
+  // remote shell reports as `command not found` with exit 127. Refuse it rather than let a habit
+  // produce a confusing failure, and say what to do instead — which is simply to drop the `--`, since
+  // every token after `run` already reaches the remote as argv.
+  for (const cmd of commands) {
+    if (cmd[0].startsWith('-')) {
+      throw new Error(
+        `"${cmd[0]}" cannot start a command: after \`--\`, bica expects another program to run.\n` +
+          'If you meant to pass flags to the previous command, drop the `--` — everything after `run` ' +
+          'is already argv on the remote:\n' +
+          '  bica run pnpm test --coverage\n' +
+          'Use `--` only to separate whole commands that should run concurrently:\n' +
+          '  bica run pnpm lint -- pnpm typecheck',
+      );
+    }
+  }
+  return commands;
 }
 
 async function cmdRun(options: {
@@ -565,6 +588,7 @@ async function cmdRun(options: {
       code = await runPinned({
         prep,
         remoteArgv,
+        matchArgvs: options.commands,
         autoYes,
         pmOverride: pm,
         confirm,
@@ -580,6 +604,7 @@ async function cmdRun(options: {
         autoYes,
         pm,
         tail: remoteArgv,
+        matchArgvs: options.commands,
         captured,
         chrome,
       });
@@ -687,4 +712,7 @@ async function main(): Promise<void> {
   }
 }
 
-void main();
+// Guarded so the module can be imported for testing; the bin entry runs this file directly.
+if (process.argv[1] !== undefined && process.argv[1].endsWith('cli.ts')) {
+  void main();
+}

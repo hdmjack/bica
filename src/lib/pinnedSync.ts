@@ -88,8 +88,6 @@ function ensureTrailingSlash(p: string): string {
 
 export interface PinnedPushResult {
   ok: boolean;
-  /** rsync exit code, when rsync ran. */
-  exitCode?: number;
   /** Set when the content changed mid-transfer, so what landed is not what was named. */
   torn?: boolean;
   /** Content name observed before the transfer, when git could supply one. */
@@ -162,21 +160,20 @@ export function pushPinnedWorkingTree(options: {
     process.stderr.write(
       `${warn('[bica]')} ${dim(`pinned sync rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
     );
-    return { ok: false, exitCode: code, treeOidBefore: before ?? undefined, deleted: [] };
+    return { ok: false, treeOidBefore: before ?? undefined, deleted: [] };
   }
 
   // An immutable source needs no re-check, and a checkout git cannot describe gets no content name —
   // in neither case is there a comparison to fail.
   const deleted = parseDeletedPaths(result.stdout ?? '');
   if (options.knownTreeOid !== undefined || !isLiveTree || before === null) {
-    return { ok: true, exitCode: 0, treeOidBefore: before ?? undefined, deleted };
+    return { ok: true, treeOidBefore: before ?? undefined, deleted };
   }
 
   const after = workingTreeOid(options.repoRoot);
   if (after === null || before === after) {
     return {
       ok: true,
-      exitCode: 0,
       treeOidBefore: before,
       treeOidAfter: after ?? undefined,
       deleted,
@@ -185,7 +182,6 @@ export function pushPinnedWorkingTree(options: {
   return {
     ok: false,
     torn: true,
-    exitCode: 0,
     treeOidBefore: before,
     treeOidAfter: after,
     deleted,

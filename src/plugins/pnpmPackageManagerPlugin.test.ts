@@ -16,11 +16,10 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function ctx(isDefault = true): PackageManagerStateContext {
+function ctx(): PackageManagerStateContext {
   return {
     repoRoot: dir,
     stateDir: path.join(dir, '.bica'),
-    isDefaultWorkspace: isDefault,
   };
 }
 

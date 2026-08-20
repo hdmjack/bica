@@ -4,7 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { treeOidForCommittish } from './contentIdentity';
-import { acquireLockWithWait, isProcessAlive } from './fileLock';
+import {
+  acquireLockWithWait,
+  describeLockHolder,
+  isProcessAlive,
+} from './fileLock';
 import { lockRootDir } from './workspacePaths';
 import {
   sanitizeRemotePosixAbsolutePath,
@@ -159,7 +163,8 @@ export async function withPinnedWorktree<T>(
   });
   if (lock === null) {
     throw new Error(
-      'Timed out waiting to create a pinned worktree (another run held the git lock for over 60s).',
+      'Timed out waiting to create a pinned worktree: the git lock was held for over 60s by ' +
+        `${describeLockHolder(gitLockPath(repoRoot))}.`,
     );
   }
   try {

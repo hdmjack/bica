@@ -83,7 +83,6 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
   } {
     return evaluatePnpmDiscovery(ctx);
   },
-  installHashStateRelativePath: PNPM_INSTALL_HASH_RELATIVE,
   readLocalFingerprint(repoRoot: string): string | null {
     return digestFile(repoRoot, LOCKFILE);
   },
@@ -96,11 +95,6 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
       }
     } catch {
       // fall through to legacy path
-    }
-    // The legacy file predates workspaces and describes the base workspace only. Reading it for a workspace
-    // would claim a never-installed workspace is up to date.
-    if (!ctx.isDefaultWorkspace) {
-      return null;
     }
     try {
       const legacyPath = path.join(ctx.repoRoot, LEGACY_REMOTE_INSTALL_HASH);
