@@ -115,6 +115,13 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, `${digest}\n`, 'utf8');
   },
+  clearStoredHash(ctx: PackageManagerStateContext): void {
+    try {
+      fs.rmSync(path.join(ctx.stateDir, PNPM_INSTALL_HASH_RELATIVE), { force: true });
+    } catch {
+      // Nothing recorded, or unreadable. Either way the next run installs, which is the safe default.
+    }
+  },
   isInstallArgv(remoteArgv: string[]): boolean {
     if (remoteArgv[0] !== 'pnpm') {
       return false;

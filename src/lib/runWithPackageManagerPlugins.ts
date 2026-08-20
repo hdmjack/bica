@@ -171,6 +171,17 @@ export async function runRemoteCommandWithPmHooks(options: {
   const active = resolveActivePackageManagerPlugins(repoRoot, resolved);
   const matched = matchingPackageManagerPlugins(active, remoteArgv, pmOverride);
 
+  // A workspace we just created has no node_modules, whatever the local fingerprint claims. The
+  // fingerprint records what a *remote* workspace has installed but lives locally, so anything that
+  // removes the remote directory -- `bica lanes clean`, a manual rm, a wiped host -- leaves it
+  // asserting an install that no longer exists. The next run would then skip the install and execute
+  // against an empty workspace. Clearing it on creation keeps the claim tied to something real.
+  if (dirReady.created) {
+    for (const plugin of active) {
+      plugin.clearStoredHash(stateCtx);
+    }
+  }
+
   if (matched.length > 1) {
     process.stderr.write(
       `[bica] Multiple package manager plugins match; use --pm <id>. Using "${matched[0].id}".\n`,

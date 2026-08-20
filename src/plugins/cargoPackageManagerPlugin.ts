@@ -79,6 +79,13 @@ export const cargoPackageManagerPlugin: PackageManagerPlugin = {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, `${digest}\n`, 'utf8');
   },
+  clearStoredHash(ctx: PackageManagerStateContext): void {
+    try {
+      fs.rmSync(path.join(ctx.stateDir, CARGO_FETCH_HASH_RELATIVE), { force: true });
+    } catch {
+      // Nothing recorded, or unreadable. Either way the next run installs, which is the safe default.
+    }
+  },
   isInstallArgv(remoteArgv: string[]): boolean {
     if (remoteArgv[0] !== 'cargo') {
       return false;
