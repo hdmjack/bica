@@ -40,7 +40,6 @@ function stateCtx(repoRoot: string): PackageManagerStateContext {
   return {
     repoRoot,
     stateDir: path.join(repoRoot, '.bica'),
-    isDefaultWorkspace: true,
   };
 }
 
@@ -331,5 +330,50 @@ describe('runRemoteCommandWithPmHooks', () => {
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  it('runs the install preflight for a multi-command run, matching the user commands', async () => {
+    // A multi-command run executes `sh -c <wrapper>`, and plugins match on argv[0]. Matching the
+    // wrapper matches nothing, so the preflight silently did not run and a fresh workspace executed
+    // against no node_modules. Matching is done against the user's commands instead.
+    const repoRoot = makeTempRepo();
+    writePnpmWorkspace(repoRoot, 'lockfileVersion: 9\n');
+    const code = await runRemoteCommandWithPmHooks({
+      prep: makePrep(repoRoot),
+      remoteArgv: ['sh', '-c', 'pnpm lint & pnpm test & wait'],
+      matchArgvs: [
+        ['pnpm', 'lint'],
+        ['pnpm', 'test'],
+      ],
+      autoYes: true,
+      pmOverride: undefined,
+      confirm: async () => true,
+    });
+    expect(code).toBe(0);
+    expect(runRemote.mock.calls[0]?.[2]).toBe(
+      pnpmPackageManagerPlugin.remoteInstallCommand,
+    );
+    expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(
+      pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot),
+    );
+  });
+
+  it('does not treat a wrapped run as an install just because a command mentions one', async () => {
+    const repoRoot = makeTempRepo();
+    writePnpmWorkspace(repoRoot, 'lockfileVersion: 9\n');
+    pnpmPackageManagerPlugin.writeStoredHash(
+      stateCtx(repoRoot),
+      pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!,
+    );
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(repoRoot),
+      remoteArgv: ['sh', '-c', 'wrapped'],
+      matchArgvs: [['pnpm', 'lint']],
+      autoYes: true,
+      pmOverride: undefined,
+      confirm: async () => true,
+    });
+    // Fingerprint already current, so the only remote call is the command itself.
+    expect(runRemote.mock.calls).toHaveLength(1);
   });
 });

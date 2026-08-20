@@ -3,7 +3,11 @@ import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { dim, syncRemoteTarget, warn } from '../terminalStyle';
-import { acquireLockWithWait, isProcessAlive } from './fileLock';
+import {
+  acquireLockWithWait,
+  describeLockHolder,
+  isProcessAlive,
+} from './fileLock';
 import {
   resolveGitRef,
   setRemoteHeadForPin,
@@ -162,10 +166,12 @@ function warnAboutDeletedGeneratedFiles(
 export async function runPinned(options: {
   prep: PrepareResult;
   remoteArgv: string[];
+  /** The user's commands, for package-manager plugin matching. See runRemoteCommandWithPmHooks. */
+  matchArgvs?: string[][];
   autoYes: boolean;
   pmOverride: string | undefined;
   confirm: ConfirmFn;
-  /** `--return-flow` was passed. Absent, the decision follows whether this run is alone. */
+  /** `--return-flow` was passed. Without it a pinned run does not pull artifacts back. */
   returnFlowOptIn: boolean;
   /** `--ref`: run this git ref's committed content instead of the live working tree. */
   ref: string | undefined;
@@ -195,6 +201,7 @@ async function runPinnedFrom(
     autoYes: boolean;
     pmOverride: string | undefined;
     confirm: ConfirmFn;
+    matchArgvs?: string[][];
     returnFlow: boolean;
     owner: ClaimOwner;
     chrome: (text: string) => void;
@@ -297,6 +304,7 @@ async function runPinnedFrom(
   const code = await runRemoteCommandWithPmHooks({
     prep,
     remoteArgv: options.remoteArgv,
+    matchArgvs: options.matchArgvs,
     autoYes: options.autoYes,
     pmOverride: options.pmOverride,
     confirm: options.confirm,
@@ -306,7 +314,7 @@ async function runPinnedFrom(
 
   // 255 is ambiguous: ssh uses it for its own transport failures, and a command may legitimately exit
   // 255. The recorded exit code settles which it was, as a fact rather than a guess.
-  if (code === 255 && runId !== undefined) {
+  if (code === 255) {
     const recorded = remoteReadRecordedExit(prep.config.sshHost, claimExpr, runId);
     if (recorded.mine && recorded.exitCode === 255) {
       process.stderr.write(
@@ -340,7 +348,7 @@ async function runPinnedFrom(
     });
     if (rfLock === null) {
       process.stderr.write(
-        `${warn('[bica]')} ${dim('Timed out waiting for another workspace to finish its return-flow pull; skipping this one.')}\n`,
+        `${warn('[bica]')} ${dim(`Timed out waiting for ${describeLockHolder(returnFlowLockPath(prep.repoRoot))} to finish its return-flow pull; skipping this one.`)}\n`,
       );
     } else {
       try {

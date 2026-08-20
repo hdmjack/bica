@@ -1,7 +1,6 @@
 import * as os from 'node:os';
 
 import {
-  remotePathExprForCd,
   runRemoteScriptOverStdin,
   shellSingleQuoteRemotePathForSh,
 } from './runRemote';
@@ -211,4 +210,4 @@ export function describeClaim(result: ClaimResult): string {
   return `run ${runId} from ${host} (pid ${String(pid)})`;
 }
 
-export { REMOTE_CLAIM_DIR, claimPathExpr, remotePathExprForCd };
+export { claimPathExpr };

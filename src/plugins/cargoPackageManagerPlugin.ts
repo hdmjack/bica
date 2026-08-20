@@ -61,7 +61,6 @@ export const cargoPackageManagerPlugin: PackageManagerPlugin = {
   } {
     return evaluateCargoDiscovery(ctx);
   },
-  installHashStateRelativePath: CARGO_FETCH_HASH_RELATIVE,
   readLocalFingerprint(repoRoot: string): string | null {
     return digestFile(repoRoot, LOCKFILE);
   },

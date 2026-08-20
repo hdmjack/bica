@@ -17,17 +17,14 @@ export interface CredentialsSyncContext {
 /**
  * Where a package-manager plugin records what the *remote* workspace has installed.
  *
- * Each workspace is a separate remote workspace with its own `node_modules`, so the fingerprint has to be
- * per-workspace: a single shared file would let workspace 2 conclude its dependencies are current because
- * workspace 1 installed. `stateDir` is `<repo>/.bica` for the default run and `<repo>/.bica/workspaces/<id>`
- * for a workspace, which keeps the default workspace's file exactly where earlier versions wrote it.
+ * The record lives locally but describes remote state, so it is cleared whenever the remote workspace
+ * is recreated — otherwise it would assert an install that no longer exists and the next run would
+ * skip installing into an empty directory.
  */
 export interface PackageManagerStateContext {
   repoRoot: string;
-  /** Absolute directory holding this workspace's bica state. */
+  /** Absolute directory holding bica's local state for this checkout. */
   stateDir: string;
-  /** Gates the fallback to the pre-`.bica` fingerprint location. */
-  isDefaultWorkspace: boolean;
 }
 
 /**
@@ -44,8 +41,6 @@ export interface PackageManagerPlugin {
     applicable: boolean;
     summary: string;
   };
-  /** Relative path under {@link PackageManagerStateContext.stateDir} for the fingerprint file. */
-  readonly installHashStateRelativePath: string;
   /** Local lockfile / inputs digest, or null if nothing to compare. Lane-independent. */
   readLocalFingerprint(repoRoot: string): string | null;
   readStoredHash(ctx: PackageManagerStateContext): string | null;

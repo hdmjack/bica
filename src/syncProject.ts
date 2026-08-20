@@ -13,9 +13,6 @@ export const BICA_SPEC_FILE = 'bica.yml';
 /** Legacy filename; still read if bica.yml is absent. */
 export const BICA_WORKSPACE_SPEC_FILE = 'bica-workspace.yml';
 
-/** @deprecated Use BICA_SPEC_FILE */
-export const SYNC_SPEC_FILE = BICA_SPEC_FILE;
-
 export const MUTAGEN_PROJECT_RELATIVE = path.join('.bica', 'project.yml');
 
 /**
@@ -272,17 +269,6 @@ function applyReturnFlowToSession(
     ...session,
     ignore: { paths: merged },
   };
-}
-
-export function isSyncSpec(value: unknown): value is SyncSpecYaml {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const sync = (value as { sync?: unknown }).sync;
-  if (typeof sync !== 'object' || sync === null) {
-    return false;
-  }
-  return Object.keys(sync).length > 0;
 }
 
 export function getPrimarySessionName(
