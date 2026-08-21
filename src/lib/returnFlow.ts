@@ -7,8 +7,15 @@ import type { PrepareResult } from '../syncProject';
 /**
  * Trees return-flow must never walk, on top of whatever the user ignores. `.git` is mirrored
  * separately by {@link pushGitToRemote} and must not be reached through a `*.log`-style pattern.
+ *
+ * `.bica` is local-only state — the same reason the pinned push refuses to send it. Return-flow was
+ * pulling *into* it, which a dry run caught deleting `.bica/locks/` because the remote has no such
+ * directory. The locks self-heal (acquisition mkdirs recursively), so this was not losing anything;
+ * what it was doing is letting a post-run pull with `--delete` reach the directory another run may be
+ * taking a lock in at that moment. Nothing in the lock design accounts for a third party removing the
+ * directory mid-acquire, and it should not have to.
  */
-const ALWAYS_EXCLUDED_PATHS: readonly string[] = ['.git'];
+const ALWAYS_EXCLUDED_PATHS: readonly string[] = ['.git', '.bica'];
 
 /**
  * Turn the session's `sync.ignore.paths` into the set of paths return-flow excludes.

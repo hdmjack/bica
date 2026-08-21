@@ -53,18 +53,23 @@ describe('buildReturnFlowRsyncArgs', () => {
 
 describe('buildReturnFlowExcludes', () => {
   it('always excludes .git, which is mirrored separately', () => {
-    expect(buildReturnFlowExcludes([])).toEqual(['.git']);
+    expect(buildReturnFlowExcludes([])).toContain('.git');
+  });
+
+  it('always excludes .bica, so a pull cannot reach the lock directory', () => {
+    expect(buildReturnFlowExcludes([])).toContain('.bica');
   });
 
   it('excludes the trees each side owns independently', () => {
     expect(
       buildReturnFlowExcludes(['node_modules', 'dist', '.playwright-mcp']),
-    ).toEqual(['.git', 'node_modules', 'dist', '.playwright-mcp']);
+    ).toEqual(['.git', '.bica', 'node_modules', 'dist', '.playwright-mcp']);
   });
 
   it('does not repeat .git when the config also ignores it', () => {
     expect(buildReturnFlowExcludes(['.git', 'node_modules'])).toEqual([
       '.git',
+      '.bica',
       'node_modules',
     ]);
   });
@@ -72,7 +77,7 @@ describe('buildReturnFlowExcludes', () => {
   it('drops blanks and Mutagen negations, which say nothing about return-flow ownership', () => {
     expect(
       buildReturnFlowExcludes(['  node_modules  ', '', '!dist/keep']),
-    ).toEqual(['.git', 'node_modules']);
+    ).toEqual(['.git', '.bica', 'node_modules']);
   });
 });
 
