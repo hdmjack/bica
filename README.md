@@ -233,6 +233,138 @@ file:
 | `BICA_PACKAGE_MANAGER_PLUGINS` | Comma-separated ids |
 | `BICA_CREDENTIALS_PLUGINS` | Comma-separated ids |
 
+## Research notes
+
+Findings from running bica against a real monorepo (~11k tracked files, 2.4GB working
+tree, eight checkouts sharing one Mac mini). Recorded because most of them cost hours to
+find and none are guessable from the code. Numbers are from a single machine pair on
+2026-08-21; treat ratios as durable and absolute figures as indicative.
+
+### The remote host indexes everything you rsync to it
+
+**The single largest effect measured, and it is not in bica at all.** macOS Spotlight
+indexes files as they land, so every `bica run` feeds an indexer that never catches up.
+On a mini used for nothing but bica:
+
+| | |
+|---|---|
+| load average, nobody working | **35** |
+| concurrent `mdworker` processes | 16 |
+| `node` / `pnpm` / `eslint` processes at that moment | **0** |
+| `mds_stores` uptime, still not finished | 27 days |
+
+`pnpm typecheck`, three alternating pairs, before and after `sudo mdutil -a -i off`:
+
+| | remote | local (M1 Pro) |
+|---|---|---|
+| Spotlight **on** | 78.5s | 53.9s |
+| Spotlight **off** | **18.0 – 18.6s** | 78.3 – 239.1s |
+
+The remote goes from 1.5× *slower* to 4–5× *faster*, and its variance collapses — remote
+stayed within 0.6s across runs while the laptop swung by 160s under sustained load. **Turn
+indexing off on any host you sync to.** `mdutil` operates on volumes, not directories, so
+`mdutil -i off ~/code` fails with "invalid operation"; use `sudo mdutil -a -i off` plus
+`sudo mdutil -a -X` to drop the existing index.
+
+The corollary matters as much: **any measurement taken on a host with a background
+indexer is void.** Several conclusions in this file were wrong the first time for exactly
+that reason.
+
+### File sync destroys mtime-keyed caches
+
+`rsync` rewrites mtimes. Any cache keyed on mtime is therefore invalidated by the sync
+itself, even when the content is byte-identical. ESLint's default `--cache-strategy
+metadata` does exactly this; `--cache-strategy content` hashes contents and is immune.
+
+Measured on one package, back to back with no sync in between: **13s cold, 1s warm.** With
+bica pushing a stale local cache over the remote's warm one every run, the remote never got
+past cold. Two independent fixes were needed — excluding the cache from the sync (so the
+remote keeps its own), and content hashing (so the sync does not invalidate it).
+
+Generalises to anything that fingerprints by stat: build caches, test caches, incremental
+compilers. If a tool has a content-hash mode, a synced workspace is where you want it.
+
+### Tree size is a bad predictor of sync cost
+
+Excluding ~2GB of generated and vendored trees cut the push scope hard:
+
+| | files scanned | bytes in scope |
+|---|---|---|
+| before | 76,790 | 2,100 MB |
+| after | 14,367 | 125 MB |
+
+Wall-clock saving in steady state: **0.83s** (6.45s → 5.62s, mean of four alternating
+pairs). rsync only transfers what changed, and stat-ing 62,000 unchanged files is cheap.
+The exclusions are still worth having — first push to a fresh workspace, disk on the
+remote, and above all *less for the indexer to chew on* — but not for the reason that
+looks obvious.
+
+### One workspace beats one workspace per command
+
+Running three commands as background processes in a single remote workspace, against one
+copy of the files, measured **32s versus 43s** for a workspace each — plus a third of the
+disk and one `dist` build instead of three identical ones. Commands that only read the
+same files do not need separate copies of them. This is why bica has no lanes.
+
+Concurrency is bounded by the remote's CPU, not by bica: **1.33× on a quiet host, 0.94× on
+a busy one.** Fan out when commands are long; for short ones the transfer dominates.
+
+### Wrapping commands in `sh -c` defeats three mechanisms at once
+
+`bica run sh -c 'pnpm lint; pnpm typecheck'` looks equivalent to the `--` form. It is not:
+
+1. **Serial**, not concurrent.
+2. **No install preflight.** Package-manager plugins match on each command's `argv[0]`.
+   With `sh` there, nothing matches, so the remote `node_modules` is never checked and a
+   stale workspace fails with a confusing missing-module error instead of installing.
+3. **`PIPESTATUS` does not survive it**, so the usual way to keep a filtered command's exit
+   code reports the filter's status instead — observed reporting a failing test run as
+   exit 0.
+
+The `--` form gives each command its own heading and a `[bica] exit codes:` summary line
+derived from the same statuses the run exits on. Read that line; do not grep output.
+
+### `--delete` with an include-directories rule is noisy but not dangerous
+
+Return-flow needs `--filter=+ */` so rsync can descend looking for whitelist matches. That
+also puts every directory into `--delete` scope, so rsync tries to remove each receiver-side
+directory the sender lacks and fails on any holding protected files: **8,703 "not empty,
+cannot delete" warnings** against **7 actual deletions**. The trailing `--filter=- *` does
+correctly protect every non-matching file, so nothing tracked is at risk — the fault is
+diagnostic noise, not data loss. Verify the claim with `--dry-run -i` and count
+`*deleting` lines rather than reasoning about filter precedence.
+
+### Type-aware linting is fixed cost, and does not parallelise
+
+`typescript-eslint` with `projectService` builds a whole TypeScript program before
+evaluating any rule. On a 4,941-file package:
+
+| files linted | time |
+|---|---|
+| 15 | 23.6s |
+| 175 | 24.3s |
+| 1,485 | 65.4s |
+| 1,485, `--concurrency=auto` | **>10 min (timed out)** |
+| 1,485, warm cache | **4.1s** |
+
+The marginal file is nearly free; cost tracks the *program closure*. So scoping a lint to
+changed files still pays the full floor, and a per-package recursive lint pays that floor
+once per package. **ESLint's `--concurrency` is actively harmful here** — each worker
+builds its own program, multiplying the dominant cost instead of dividing it. A warm cache
+skips program construction entirely, which is why the cache is the whole game.
+
+### Measurement traps hit in the course of the above
+
+- **A tool timeout is not a completion.** `>10 min` above is a kill, not a number.
+- **`du` cannot see APFS block sharing.** Cloned `node_modules` read as 1.9GB per workspace
+  and were ~440MB; measure with `diskutil` container free space instead.
+- **A harness that greps prose couples the test to the wording.** Two live checks silently
+  went inconclusive that way; assert on exit codes.
+- **Guidance loaded into an agent's context does not update when the file does**, and a
+  system-delivered excerpt is worse than a file you read yourself, because it carries
+  authority and leaves no mark saying it aged. When a tool's behaviour is in question, read
+  it from disk.
+
 ## Developing bica itself
 
 - **`pnpm build`** / **`bica build`** — **typecheck only** (`tsc --noEmit`), exits when done.
