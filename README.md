@@ -340,6 +340,15 @@ correctly protect every non-matching file, so nothing tracked is at risk — the
 diagnostic noise, not data loss. Verify the claim with `--dry-run -i` and count
 `*deleting` lines rather than reasoning about filter precedence.
 
+**Two separate things got conflated on the way to this, worth keeping apart.** The warning
+flood above is real, reproducible, and constant. The `rsync exited 20` failures that first
+drew attention to it are *not* the same fault: they were intermittent while the filter set
+was fixed, which a filter bug cannot be. The likelier cause is the indexer above — "not
+empty, cannot delete" on a directory rsync has just emptied is what you see when another
+process is holding files open in it, and the paths named were all directories Spotlight
+would traverse. A constant flood and an intermittent failure sharing a symptom string is
+how one became evidence for the other.
+
 ### Type-aware linting is fixed cost, and does not parallelise
 
 `typescript-eslint` with `projectService` builds a whole TypeScript program before
