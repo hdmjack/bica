@@ -260,6 +260,12 @@ On a mini used for nothing but bica:
 | Spotlight **on** | 78.5s | 53.9s |
 | Spotlight **off** | **18.0 – 18.6s** | 78.3 – 239.1s |
 
+Every figure above is **end-to-end wall clock around the whole `bica run`, rsync
+included**, on a clean tree already in sync. A checkout with more to transfer pays more
+before the command starts — 48s was measured the same evening from a dirtier tree — so
+quote which tree state you measured, or a reader will compare a clean-tree remote figure
+against a local one and over-estimate the win.
+
 The remote goes from 1.5× *slower* to 4–5× *faster*, and its variance collapses — remote
 stayed within 0.6s across runs while the laptop swung by 160s under sustained load. **Turn
 indexing off on any host you sync to.** `mdutil` operates on volumes, not directories, so
