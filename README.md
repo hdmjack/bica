@@ -308,9 +308,20 @@ looks obvious.
 ### One workspace beats one workspace per command
 
 Running three commands as background processes in a single remote workspace, against one
-copy of the files, measured **32s versus 43s** for a workspace each — plus a third of the
-disk and one `dist` build instead of three identical ones. Commands that only read the
-same files do not need separate copies of them. This is why bica has no lanes.
+copy of the files, uses a third of the disk and builds `dist` once instead of three
+identical times. Commands that only read the same files do not need separate copies of
+them. This is why bica has no lanes.
+
+**The timing that originally justified this — 32s against 43s for a workspace each — should
+not be trusted.** It was measured before indexing was disabled, and three workspaces means
+three copies of the tree for the indexer to walk rather than one, so the storm penalised
+the multi-workspace arm specifically rather than both evenly. The conclusion stands on the
+disk and single-`dist` arguments, which are structural and need no measurement; the ratio
+does not. Re-measuring is not straightforward either, since lanes are gone and "a workspace
+each" is no longer something bica can do — the comparison would have to be rebuilt by hand.
+Kept here as a worked example of the trap at the top of this section: a number taken on a
+noisy host is not merely imprecise, it can be biased toward the arm that touches more
+files.
 
 Concurrency is bounded by the remote's CPU, not by bica: **1.33× on a quiet host, 0.94× on
 a busy one.** Fan out when commands are long; for short ones the transfer dominates.
