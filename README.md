@@ -470,6 +470,12 @@ looked", and the two are indistinguishable at the point of reading.** A negative
 less than it appears to, and it is exactly the result nobody investigates, because it looks like the
 good news.
 
+**It was only visible in aggregate.** No single session that hit this had more than two instances,
+and two looks like a local quirk rather than a pattern. It became legible because eight sessions
+reported into one place on one night, and the tally reached seven. Worth knowing when deciding
+whether this class of bug is rare: the evidence for it is distributed by construction, since each
+instance is a different mechanism and only the shape repeats.
+
 The defences that actually worked here, in rough order of value:
 
 - **Mutate the thing the check exists to catch, and watch it fail.** The cleanup test survived
