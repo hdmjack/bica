@@ -278,14 +278,32 @@ that reason.
 
 ### File sync destroys mtime-keyed caches
 
-`rsync` rewrites mtimes. Any cache keyed on mtime is therefore invalidated by the sync
-itself, even when the content is byte-identical. ESLint's default `--cache-strategy
-metadata` does exactly this; `--cache-strategy content` hashes contents and is immune.
+A synced workspace breaks caches in two different ways, and it is worth keeping them apart
+because only one of them actually bit.
 
-Measured on one package, back to back with no sync in between: **13s cold, 1s warm.** With
-bica pushing a stale local cache over the remote's warm one every run, the remote never got
-past cold. Two independent fixes were needed — excluding the cache from the sync (so the
-remote keeps its own), and content hashing (so the sync does not invalidate it).
+**What bit: pushing the cache at all.** bica was syncing the local `.eslintcache` over the
+remote's on every run, and the local copies were months stale, so the remote never got past
+cold. Excluding the cache from the sync — it is per-side state, exactly like `dist` — was the
+whole fix:
+
+| `bica run`, remote | cold | warm |
+|---|---|---|
+| lint one large package | 122.3s | **9.9s** |
+| lint all nine packages | 105.1s | **18.8s** |
+
+Ten minutes to nineteen seconds, on the default cache strategy.
+
+**What did not bite, but could:** `rsync` rewrites mtimes, and ESLint's default
+`--cache-strategy metadata` keys on mtime + size. In practice `rsync -a` restores each file's
+mtime from the sender, so identical content keeps an identical mtime and the cache survives —
+the warm figures above are on the default strategy, across separate runs. The exposure is
+latent rather than active: nothing guarantees mtime fidelity across filesystems or rsync
+implementations, and if it slips the failure is silent and indistinguishable from a cold cache.
+A content-hashing mode removes the dependency.
+
+I originally wrote this up as "rsync destroys mtime-keyed caches, so you need content hashing".
+That was the wrong diagnosis reached from the right observation — the cache was indeed always
+cold, but because it was being overwritten, not because mtimes moved.
 
 Generalises to anything that fingerprints by stat: build caches, test caches, incremental
 compilers. If a tool has a content-hash mode, a synced workspace is where you want it.
