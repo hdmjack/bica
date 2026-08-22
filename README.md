@@ -82,6 +82,34 @@ installed locally and the remote typecheck fails with hundreds of `TS2307 Cannot
 The fix is the same as for `dist`: name the generated output in `sync.ignore.paths` so each side owns
 its own copy.
 
+**That protects copies that already exist. It does not create them.** On a workspace where the output
+is simply absent — a fresh remote directory, or a local `git worktree` that never installed — nothing
+puts it there: the install fingerprint keys on the lockfile, a worktree does not change the lockfile,
+so the install never runs and `postinstall` never runs with it. Declare it instead, and bica does
+both:
+
+```yaml
+generated:
+  paths:
+    - ui/src/icons/essentials/Icon*.tsx
+    - "!ui/src/icons/essentials/IconSpinner*.tsx"   # committed, not generated
+  command: pnpm --filter @float/ui run generate-icons:force
+```
+
+Before each run bica asks the remote whether those paths exist and, if any are missing, runs
+`command` there to produce them. Declaring a path also excludes it from the sync, so you do not
+write it twice.
+
+Three things worth knowing:
+
+- **`command` is not optional in practice.** Falling back to the package manager's install is a
+  guess and usually a wrong one — `pnpm install` skips `postinstall` entirely when the lockfile is
+  already satisfied, so the repair succeeds and generates nothing.
+- **Negations are matched, not merely skipped.** A committed file that also matches the generated
+  pattern would otherwise answer the question on behalf of every file that is genuinely missing.
+- **A probe that cannot run reports nothing missing.** Forcing a repair because a connection blipped
+  would be worse than the failure it prevents.
+
 ```yaml
 sync:
   ignore:
