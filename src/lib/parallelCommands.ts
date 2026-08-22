@@ -82,7 +82,10 @@ export function buildParallelScript(commands: readonly ParallelCommand[]): strin
     throw new Error('buildParallelScript needs at least one command');
   }
   const lines: string[] = [
-    '_bica_dir=$(mktemp -d)',
+    // Named, and explicitly under TMPDIR. Bare `mktemp -d` produces an anonymous `tmp.XXXX` in the
+    // system temp -- and on BSD/macOS it ignores TMPDIR entirely -- so a directory orphaned by a
+    // killed run could not be attributed to bica, or found by a test checking the trap fired.
+    '_bica_dir=$(mktemp -d "${TMPDIR:-/tmp}/bica-run.XXXXXX")',
     // Even on a hard failure the workspace is left as it was found.
     "trap 'rm -rf \"$_bica_dir\"' EXIT",
   ];

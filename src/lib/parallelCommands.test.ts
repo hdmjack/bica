@@ -62,9 +62,22 @@ describe('buildParallelScript, executed', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  function run(argvs: string[][]): { status: number; out: string } {
+  function run(
+    argvs: string[][],
+    opts: { tmpdir?: string } = {},
+  ): { status: number; out: string } {
     const script = buildParallelScript(assignLabels(argvs));
-    const r = spawnSync('sh', ['-c', script], { cwd: dir, encoding: 'utf8' });
+    const r = spawnSync('sh', ['-c', script], {
+      cwd: dir,
+      encoding: 'utf8',
+      // The script templates its log directory under TMPDIR explicitly, so pointing TMPDIR at a
+      // directory we own is what makes the cleanup observable. (Bare `mktemp -d` would not do:
+      // on macOS it ignores TMPDIR and lands in the system temp, where no assertion can find it.)
+      env:
+        opts.tmpdir === undefined
+          ? process.env
+          : { ...process.env, TMPDIR: opts.tmpdir },
+    });
     return { status: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') };
   }
 
@@ -129,6 +142,33 @@ exit 0`,
   it('leaves no log files behind in the workspace', () => {
     run([['echo', 'x']]);
     expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it('removes the log directory it created, not merely keeping it out of the workspace', () => {
+    // The previous version of this only asserted the *workspace* was clean, which it always is:
+    // the logs go to `$(mktemp -d)` under TMPDIR, so the assertion passed whether or not the
+    // cleanup trap existed. Giving mktemp a TMPDIR we own makes the directory findable, so
+    // deleting the trap now fails this test instead of sailing past it.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-parallel-tmp-'));
+    try {
+      run([['echo', 'x'], ['echo', 'y']], { tmpdir: tmp });
+      expect(fs.readdirSync(tmp)).toEqual([]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('removes the log directory even when a command fails', () => {
+    // Cleanup on the failure path is the case that matters -- a wedged run is exactly when
+    // leftovers accumulate, and `trap ... EXIT` is what covers it.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-parallel-tmp-'));
+    try {
+      const { status } = run([['sh', '-c', 'exit 7']], { tmpdir: tmp });
+      expect(status).not.toBe(0);
+      expect(fs.readdirSync(tmp)).toEqual([]);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('passes arguments through without shell interpretation', () => {
