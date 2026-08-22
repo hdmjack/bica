@@ -476,6 +476,11 @@ reported into one place on one night, and the tally reached seven. Worth knowing
 whether this class of bug is rare: the evidence for it is distributed by construction, since each
 instance is a different mechanism and only the shape repeats.
 
+The consequence is a practice rather than an opinion: **report a suspected instance even when it
+looks like a one-off**, because the count that matters is not the one you can see. Without that the
+observation is true and inert — everyone correctly judges their own two instances as noise, and
+nobody ever reaches seven.
+
 The defences that actually worked here, in rough order of value:
 
 - **Mutate the thing the check exists to catch, and watch it fail.** The cleanup test survived
