@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildPinnedPushArgs, parseDeletedPaths } from './pinnedSync';
+import {
+  buildPinnedPushArgs,
+  decideTorn,
+  parseDeletedPaths,
+} from './pinnedSync';
 
 function args(overrides: {
   syncIgnorePaths?: string[];
@@ -118,5 +122,31 @@ describe('parseDeletedPaths', () => {
 
   it('is empty for empty output', () => {
     expect(parseDeletedPaths('')).toEqual([]);
+  });
+});
+
+describe('decideTorn', () => {
+  it('accepts a tree that did not move during the transfer', () => {
+    expect(decideTorn({ before: 'abc123', after: 'abc123' }).torn).toBe(false);
+  });
+
+  it('refuses a tree that moved during the transfer', () => {
+    // The whole point: what landed on the remote is a mixture of two states, and a result derived
+    // from it is indistinguishable from a real verification.
+    expect(decideTorn({ before: 'abc123', after: 'def456' }).torn).toBe(true);
+  });
+
+  it('does not call it torn when git could not name the tree afterwards', () => {
+    // Absence of a second name is absence of evidence. Reporting torn here would accuse the user of
+    // editing mid-run on the strength of git having failed.
+    expect(decideTorn({ before: 'abc123', after: null }).torn).toBe(false);
+  });
+
+  it('does not call it torn when git could not name the tree beforehand', () => {
+    expect(decideTorn({ before: null, after: 'def456' }).torn).toBe(false);
+  });
+
+  it('does not call it torn when git could name neither', () => {
+    expect(decideTorn({ before: null, after: null }).torn).toBe(false);
   });
 });

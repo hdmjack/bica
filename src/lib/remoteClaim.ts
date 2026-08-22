@@ -50,7 +50,7 @@ export function claimFileName(remoteWorkspacePath: string): string {
     .replace(/[^A-Za-z0-9._-]+/g, '_');
 }
 
-function claimPathExpr(remoteWorkspacePath: string): string {
+export function claimPathExpr(remoteWorkspacePath: string): string {
   return `${REMOTE_CLAIM_DIR}/${claimFileName(remoteWorkspacePath)}`;
 }
 
@@ -88,6 +88,46 @@ function runRemoteScript(
 }
 
 /**
+ * The `sh` that takes the lease, as a string, so it can be run directly against a temp directory in
+ * a test instead of only over ssh. The shell is the part that has to be right -- `ln` failing on an
+ * existing target is what makes the claim exclusive -- and it was previously reachable only through
+ * a live remote, which is why it went untested.
+ *
+ * `dir` is a parameter for the same reason: a test points it at `$TMPDIR`, production passes
+ * `~/.bica/claims`.
+ *
+ * The temp name uses `$$`, which is unique per *process* and not per subshell — two `( ... ) &`
+ * subshells of one shell share it and will delete each other's temp file. That is safe here because
+ * every acquire is its own ssh session and so its own shell, but it does mean this script must not be
+ * batched twice into a single remote invocation.
+ */
+export function buildClaimAcquireScript(
+  claimExpr: string,
+  ownerLine: string,
+  dir: string,
+): string {
+  const payload = shellSingleQuoteRemotePathForSh(ownerLine);
+  return (
+    `mkdir -p ${dir} 2>/dev/null || exit 1\n` +
+    `_t=${claimExpr}.tmp.$$\n` +
+    `printf '%s' ${payload} > "$_t" || exit 1\n` +
+    `if ln "$_t" ${claimExpr} 2>/dev/null; then rm -f "$_t"; echo OK; else rm -f "$_t"; printf 'HELD '; cat ${claimExpr} 2>/dev/null; echo; fi\n`
+  );
+}
+
+/**
+ * The `sh` that drops the lease, matching on the run id field only. See {@link removeClaimOwnedBy}
+ * for why a whole-line comparison was wrong.
+ */
+export function buildClaimReleaseScript(
+  claimExpr: string,
+  runId: string,
+): string {
+  const q = shellSingleQuoteRemotePathForSh(runId);
+  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr}\nexit 0\n`;
+}
+
+/**
  * Take the lease, or report who holds it.
  *
  * Published with `ln` from a fully-written temp file rather than a `set -C` redirect. The redirect
@@ -100,13 +140,11 @@ export function remoteAcquireClaim(
   remoteWorkspacePath: string,
   owner: ClaimOwner,
 ): ClaimResult {
-  const claim = claimPathExpr(remoteWorkspacePath);
-  const payload = shellSingleQuoteRemotePathForSh(formatOwner(owner));
-  const script =
-    `mkdir -p ${REMOTE_CLAIM_DIR} 2>/dev/null || exit 1\n` +
-    `_t=${claim}.tmp.$$\n` +
-    `printf '%s' ${payload} > "$_t" || exit 1\n` +
-    `if ln "$_t" ${claim} 2>/dev/null; then rm -f "$_t"; echo OK; else rm -f "$_t"; printf 'HELD '; cat ${claim} 2>/dev/null; echo; fi\n`;
+  const script = buildClaimAcquireScript(
+    claimPathExpr(remoteWorkspacePath),
+    formatOwner(owner),
+    REMOTE_CLAIM_DIR,
+  );
   const { status, stdout } = runRemoteScript(sshHost, script);
   if (status !== 0) {
     return { ok: false, heldBy: null, raw: `claim probe failed (ssh exit ${String(status)})` };
@@ -131,10 +169,10 @@ function removeClaimOwnedBy(
   remoteWorkspacePath: string,
   runId: string,
 ): void {
-  const claim = claimPathExpr(remoteWorkspacePath);
-  const q = shellSingleQuoteRemotePathForSh(runId);
-  const script =
-    `[ "$(cut -d' ' -f1 ${claim} 2>/dev/null)" = ${q} ] && rm -f ${claim}\nexit 0\n`;
+  const script = buildClaimReleaseScript(
+    claimPathExpr(remoteWorkspacePath),
+    runId,
+  );
   runRemoteScript(sshHost, script);
 }
 
@@ -209,5 +247,3 @@ export function describeClaim(result: ClaimResult): string {
   const { runId, host, pid } = result.heldBy;
   return `run ${runId} from ${host} (pid ${String(pid)})`;
 }
-
-export { claimPathExpr };

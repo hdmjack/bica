@@ -6,8 +6,6 @@ import {
   matchingPackageManagerPlugins,
   resolveActivePackageManagerPlugins,
 } from '../resolveActivePlugins';
-import { acquireLockWithWait } from './fileLock';
-import { lockRootDir } from './workspacePaths';
 import {
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
@@ -49,44 +47,6 @@ function needsInitialRemoteInstall(
   const local = plugin.readLocalFingerprint(ctx.repoRoot);
   const stored = plugin.readStoredHash(ctx);
   return stored === null && local !== null;
-}
-
-/** A cold workspace's install can be slow, and every other workspace waiting on it is doing useful work. */
-const REMOTE_INSTALL_LOCK_TIMEOUT_MS = 30 * 60_000;
-
-/**
- * Serialise remote installs launched from this checkout.
- *
- * Installs from one checkout can overlap when a run is retried while another is still installing, and
- * they share one content-addressed store on the host.
- *
- * Known limit, stated plainly: this lock is local, so it cannot see an install launched from a sibling
- * clone with a different `remotePath` — which is the remaining real contention on that shared store.
- * pnpm's own store locking is what actually protects it; this only keeps one checkout tidy. The
- * remote workspace itself is guarded properly, by a lease that lives on the remote.
- *
- * On timeout the install proceeds anyway: refusing to run after half an hour of waiting would be
- * worse than a slow install.
- */
-async function withRemoteInstallLock(
-  repoRoot: string,
-  install: () => number,
-): Promise<number> {
-  const lock = await acquireLockWithWait(
-    path.join(lockRootDir(repoRoot), '_remote-install.lock'),
-    { timeoutMs: REMOTE_INSTALL_LOCK_TIMEOUT_MS, pollMs: 1_000 },
-  );
-  if (lock === null) {
-    process.stderr.write(
-      '[bica] Still waiting on another run\'s remote install after 30m; installing anyway.\n',
-    );
-    return install();
-  }
-  try {
-    return install();
-  } finally {
-    lock.release();
-  }
 }
 
 /** Registry-auth hint only makes sense for package managers that authenticate to a registry. */
@@ -207,14 +167,19 @@ export async function runRemoteCommandWithPmHooks(options: {
         ? `[bica] No remote install recorded yet (${plugin.id}); running ${plugin.remoteInstallCommand}.`
         : `[bica] Lockfile changed since last remote install (${plugin.id}); reinstalling.`;
       process.stderr.write(`${reason}\n`);
-      const installCode = await withRemoteInstallLock(repoRoot, () =>
-        runRemoteCommand(
-          config.sshHost,
-          config.remoteWorkspacePath,
-          plugin.remoteInstallCommand,
-          repoRoot,
-          { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
-        ),
+      // No local lock around this. The remote workspace is leased for the whole run -- taken in
+      // `cmdRun` before anything syncs, released in its `finally` -- so a second run against this
+      // workspace exits 98 without reaching an install, and a run against a *different* workspace was
+      // never something a lock keyed on this checkout could see anyway. The lock that used to be here
+      // could therefore only ever wait on something that cannot happen, at the cost of a 30-minute
+      // stall if its file were ever left behind. Contention on the shared pnpm store between
+      // different workspaces is pnpm's own store locking to handle, not bica's.
+      const installCode = runRemoteCommand(
+        config.sshHost,
+        config.remoteWorkspacePath,
+        plugin.remoteInstallCommand,
+        repoRoot,
+        { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
       );
       if (installCode !== 0) {
         maybeWriteCredentialsHint(plugin);

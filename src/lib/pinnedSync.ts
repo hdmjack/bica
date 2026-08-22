@@ -111,6 +111,30 @@ export function parseDeletedPaths(rsyncStdout: string): string[] {
 }
 
 /**
+ * Decide whether a completed transfer describes one content state or two.
+ *
+ * Split out from {@link pushPinnedWorkingTree} because it is the part that can be wrong in a way
+ * nobody notices: a torn result looks exactly like a real verification, so the branch that catches
+ * it is the branch least likely to be exercised by hand. Shelling out to rsync and git to reach it
+ * is why it had no test.
+ *
+ * `before`/`after` are content names either side of the transfer; `null` means git could not supply
+ * one, which is not the same as "unchanged" and must not be reported as verified-torn either way.
+ */
+export function decideTorn(options: {
+  before: string | null;
+  after: string | null;
+}): { torn: boolean } {
+  const { before, after } = options;
+  // No name on one side is an absence of evidence. Refusing the run here would fail every checkout
+  // git cannot describe; claiming torn would be an accusation we cannot support. Proceed unflagged.
+  if (before === null || after === null) {
+    return { torn: false };
+  }
+  return { torn: before !== after };
+}
+
+/**
  * Push the pinned content to the remote workspace, and confirm that what landed is what was
  * named.
  *
@@ -171,7 +195,7 @@ export function pushPinnedWorkingTree(options: {
   }
 
   const after = workingTreeOid(options.repoRoot);
-  if (after === null || before === after) {
+  if (!decideTorn({ before, after }).torn) {
     return {
       ok: true,
       treeOidBefore: before,
@@ -183,7 +207,7 @@ export function pushPinnedWorkingTree(options: {
     ok: false,
     torn: true,
     treeOidBefore: before,
-    treeOidAfter: after,
+    treeOidAfter: after ?? undefined,
     deleted,
   };
 }
