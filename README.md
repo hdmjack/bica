@@ -324,9 +324,16 @@ does not consult `.gitignore`. From a worktree they never existed, so a remote t
 workspace is cold or the lockfile drifted. In a worktree the lockfile is unchanged, so nothing
 triggers and postinstall never runs.
 
-Run `pnpm install` once in the worktree, or use a normal checkout. The failure mode is worth
-knowing because it is maximally convincing: the errors are real, name real modules, and follow the
-branch nowhere.
+Run `pnpm install` once in the worktree, or use a normal checkout.
+
+This surfaces as more than one symptom, which is why it took two people to pin down: the same root
+also produced runs from a worktree that died with **no command output at all**, filed separately as
+"bica cannot run from a worktree". Whoever hit one had no way to connect it to the other.
+
+The diagnostic tell that generalises: **re-run against the base branch's content in the same tree.**
+If the errors survive reverting your own work, they are about the environment, not the change. And
+prefer `rsync -an -i --ignore-times` when testing whether a filter excludes something — a plain dry
+run reporting zero changes cannot tell "excluded" from "in scope and already current".
 
 ### Tree size is a bad predictor of sync cost
 
