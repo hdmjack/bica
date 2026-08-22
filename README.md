@@ -308,6 +308,26 @@ cold, but because it was being overwritten, not because mtimes moved.
 Generalises to anything that fingerprints by stat: build caches, test caches, incremental
 compilers. If a tool has a content-hash mode, a synced workspace is where you want it.
 
+### A git worktree is not a self-sufficient tree, and bica syncs that faithfully
+
+A `git worktree` contains only *tracked* files. Anything generated and gitignored — and there is
+usually more of it than you think — is simply absent, and the pinned push copies that absence to
+the remote exactly as it copies everything else.
+
+Measured on one package of a real monorepo: `ui/src/icons/essentials` holds **178 tracked files
+and 362 on disk**. The ~184 difference is generated at postinstall and ignored by a local
+`.gitignore` (`Icon*.tsx`). From a normal checkout they are on disk, so rsync sends them — rsync
+does not consult `.gitignore`. From a worktree they never existed, so a remote typecheck reports
+**375 `TS2307`s naming modules that really are missing**, on any branch, including the base.
+
+**The install preflight does not cover this.** It fingerprints the lockfile and installs when the
+workspace is cold or the lockfile drifted. In a worktree the lockfile is unchanged, so nothing
+triggers and postinstall never runs.
+
+Run `pnpm install` once in the worktree, or use a normal checkout. The failure mode is worth
+knowing because it is maximally convincing: the errors are real, name real modules, and follow the
+branch nowhere.
+
 ### Tree size is a bad predictor of sync cost
 
 Excluding ~2GB of generated and vendored trees cut the push scope hard:
