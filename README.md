@@ -452,6 +452,36 @@ once per package. **ESLint's `--concurrency` is actively harmful here** — each
 builds its own program, multiplying the dominant cost instead of dividing it. A warm cache
 skips program construction entirely, which is why the cache is the whole game.
 
+### A check must distinguish "nothing to do" from "could not run"
+
+The single most repeated failure across this work, in five different mechanisms, was a check that
+reported success while doing nothing. Each was believed at the time.
+
+| what happened | what it printed | what it meant |
+|---|---|---|
+| Probe aborted under `zsh` on an unmatched glob | nothing missing | could not run |
+| Icon generator hashed inputs only, outputs deleted | `Icons up to date, skipping generation.` | outputs absent |
+| Cleanup test asserted the wrong directory | pass | trap never exercised |
+| `rsync --dry-run` on a tree already in sync | 0 changes | not proof of exclusion |
+| Committed file matched the generated pattern | declaration satisfied | 346 files still missing |
+
+They share a shape: **an empty result is ambiguous between "the condition is met" and "I never
+looked", and the two are indistinguishable at the point of reading.** A negative result licenses far
+less than it appears to, and it is exactly the result nobody investigates, because it looks like the
+good news.
+
+The defences that actually worked here, in rough order of value:
+
+- **Mutate the thing the check exists to catch, and watch it fail.** The cleanup test survived
+  deleting the trap twice — once in its original form, once in my replacement. Nothing else would
+  have revealed either.
+- **Run it where it will run.** The probe passed under `/bin/sh` throughout and failed under the
+  `zsh` the remote actually uses. A test on the wrong shell is a test of the wrong program.
+- **Force the work rather than accepting a fast pass.** `rsync -an -i --ignore-times` lists what a
+  plain dry run omits, because "already current" and "excluded" print identically.
+- **Check the positive case too.** Every one of these was caught by asking "would this have said
+  anything different if the answer were the other way?"
+
 ### Measurement traps hit in the course of the above
 
 - **A tool timeout is not a completion.** `>10 min` above is a kill, not a number.
