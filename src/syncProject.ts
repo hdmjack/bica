@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import { isPlainObject } from 'es-toolkit';
 import YAML from 'yaml';
 
+import { validateGeneratedPath } from './lib/generatedPaths';
+
 import { readLocalBicaSettings } from './localBicaSettings';
 import type { LocalBicaSettings } from './localBicaSettings';
 
@@ -34,6 +36,7 @@ export interface SyncSpecYaml {
   };
   /** Return-flow patterns: files that should rsync remote→local after `bica run`. */
   returnFlow?: { paths: string[] };
+  generated?: { paths: string[]; command?: string };
   /**
    * The user's configured `sync.ignore.paths`, *before* the return-flow patterns are merged in.
    * These name trees each side owns independently (node_modules, dist, …); return-flow must not
@@ -178,6 +181,7 @@ export function normalizeToSyncSpecYaml(
   const allValuesArePlainObjects = keys.every((k) => isPlainObject(syncObj[k]));
 
   const returnFlow = parseReturnFlow(doc.returnFlow, sourceLabel);
+  const generated = parseGenerated(doc.generated, sourceLabel);
 
   if (!looksLikeFlatSync && allValuesArePlainObjects) {
     if (keys.length !== 1) {
@@ -189,10 +193,16 @@ export function normalizeToSyncSpecYaml(
     const session = syncObj[sessionName] as WorkspaceSyncSession;
     return {
       sync: {
-        [sessionName]: applyReturnFlowToSession(session, returnFlow.paths),
+        [sessionName]: applyReturnFlowToSession(session, [
+          ...returnFlow.paths,
+          ...generated.paths,
+        ]),
       },
       returnFlow,
-      syncIgnorePaths: [...(session.ignore?.paths ?? [])],
+      generated,
+      syncIgnorePaths: [
+        ...new Set([...(session.ignore?.paths ?? []), ...generated.paths]),
+      ],
     };
   }
 
@@ -219,11 +229,12 @@ export function normalizeToSyncSpecYaml(
           mode,
           ...(ignore !== undefined ? { ignore } : {}),
         },
-        returnFlow.paths,
+        [...returnFlow.paths, ...generated.paths],
       ),
     },
     returnFlow,
-    syncIgnorePaths: [...(ignore?.paths ?? [])],
+    generated,
+    syncIgnorePaths: [...new Set([...(ignore?.paths ?? []), ...generated.paths])],
   };
 }
 
@@ -250,6 +261,55 @@ function parseReturnFlow(
   }
   const paths = pathsUnknown.filter((x): x is string => typeof x === 'string');
   return { paths };
+}
+
+/**
+ * Parse `generated:` from bica.yml root — paths the remote produces and must have before a command
+ * runs. Absent means the feature is off, which is the default: bica cannot guess what a repo
+ * generates, and probing for nothing would cost a round trip for no benefit.
+ *
+ * Declaring a path here also adds it to the sync's ignore list, the same way return-flow paths are
+ * merged. That is not a convenience — it is required for the feature to work at all. Without it the
+ * mirror deletes the output as fast as the repair command produces it, because the files exist
+ * remotely and not locally, which is the whole predicate `--delete` acts on. Verified the hard way:
+ * the repair ran, generated 346 files, and the live session removed every one before the command
+ * saw them.
+ */
+function parseGenerated(
+  raw: unknown,
+  sourceLabel: string,
+): { paths: string[]; command?: string } {
+  if (raw === undefined) {
+    return { paths: [] };
+  }
+  if (!isPlainObject(raw)) {
+    throw new Error(`${sourceLabel}: generated: must be an object.`);
+  }
+  const commandUnknown = (raw as { command?: unknown }).command;
+  if (commandUnknown !== undefined && typeof commandUnknown !== 'string') {
+    throw new Error(`${sourceLabel}: generated.command must be a string.`);
+  }
+  const command =
+    typeof commandUnknown === 'string' && commandUnknown.trim() !== ''
+      ? commandUnknown.trim()
+      : undefined;
+  const pathsUnknown = (raw as { paths?: unknown }).paths;
+  if (pathsUnknown === undefined) {
+    return { paths: [], ...(command !== undefined ? { command } : {}) };
+  }
+  if (!Array.isArray(pathsUnknown)) {
+    throw new Error(`${sourceLabel}: generated.paths must be a list of strings.`);
+  }
+  const paths: string[] = [];
+  for (const item of pathsUnknown) {
+    if (typeof item !== 'string') {
+      throw new Error(`${sourceLabel}: generated.paths must contain only strings.`);
+    }
+    // Validate at parse time so a bad entry is a config error naming the file, not a confusing
+    // failure deep in a run.
+    paths.push(validateGeneratedPath(item));
+  }
+  return { paths, ...(command !== undefined ? { command } : {}) };
 }
 
 /**
@@ -351,6 +411,10 @@ export interface PrepareResult {
   remoteSyncUrl: string;
   /** Glob patterns to rsync remote→local after `bica run`. Empty list = disabled. */
   returnFlowPaths: string[];
+  /** Paths the remote must have before the command runs; see generatedPaths.ts. */
+  generatedPaths: string[];
+  /** Command that regenerates them, run on the remote when any is missing. */
+  generatedCommand: string | undefined;
   /**
    * `sync.ignore.paths` as configured by the user (return-flow patterns not merged in). Trees each
    * side owns on its own — return-flow excludes them so it never mirrors artifacts across them.
@@ -423,6 +487,8 @@ export function prepareSyncProjectFile(options: {
     sessionName,
     remoteSyncUrl,
     returnFlowPaths: doc.returnFlow?.paths ?? [],
+    generatedPaths: doc.generated?.paths ?? [],
+    generatedCommand: doc.generated?.command,
     syncIgnorePaths: doc.syncIgnorePaths,
     config,
   };

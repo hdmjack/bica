@@ -456,6 +456,8 @@ async function runWithLiveSession(options: {
       prep,
       remoteArgv: tail,
       matchArgvs: options.matchArgvs,
+      generatedPaths: options.prep.generatedPaths,
+      generatedCommand: options.prep.generatedCommand,
       pmOverride: pm,
     });
     // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —

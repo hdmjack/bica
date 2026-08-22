@@ -50,6 +50,8 @@ function makePrep(repoRoot: string): PrepareResult {
     sessionName: 'test-session',
     remoteSyncUrl: 'test-host:/remote/repo',
     returnFlowPaths: [],
+    generatedPaths: [],
+    generatedCommand: undefined,
     syncIgnorePaths: [],
     config: {
       sshHost: 'test-host',

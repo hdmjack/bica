@@ -2,6 +2,7 @@ import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
+import { remoteMissingGeneratedPaths } from './generatedPaths';
 import {
   matchingPackageManagerPlugins,
   resolveActivePackageManagerPlugins,
@@ -110,6 +111,10 @@ export async function runRemoteCommandWithPmHooks(options: {
    * all. Defaults to `[remoteArgv]`, which is the single-command case.
    */
   matchArgvs?: string[][];
+  /** Paths the remote must have before the command runs. See `generatedPaths.ts`. */
+  generatedPaths?: string[];
+  /** Command that regenerates them. Falls back to the package manager's install when unset. */
+  generatedCommand?: string;
   pmOverride: string | undefined;
   /** Run id of the lease this run holds; the remote confirms it still holds it after the command. */
   assertRunId?: string;
@@ -161,11 +166,34 @@ export async function runRemoteCommandWithPmHooks(options: {
     const initial = !isInstall && needsInitialRemoteInstall(plugin, stateCtx);
     const lockfileDrift =
       !isInstall && isFingerprintOutOfSync(plugin, stateCtx);
+    // Ask whether the output is actually there, rather than inferring it from the lockfile. A
+    // `git worktree` has every gitignored generated file missing and an unchanged lockfile, so the
+    // fingerprint says "installed" while the workspace cannot compile. Only probed when the repo
+    // declares something, so this costs one round trip for repos that opt in and nothing otherwise.
+    const missingGenerated =
+      isInstall || initial || lockfileDrift
+        ? []
+        : remoteMissingGeneratedPaths(
+            config.sshHost,
+            config.remoteWorkspacePath,
+            options.generatedPaths ?? [],
+          );
 
-    if (initial || lockfileDrift) {
+    if (initial || lockfileDrift || missingGenerated.length > 0) {
+      // A missing-output repair runs the repo's own command when it declares one. Falling back to
+      // the install is a guess and usually a wrong one: `pnpm install` skips `postinstall` entirely
+      // when the lockfile is already satisfied, so the install fires, reports success, and
+      // regenerates nothing -- which is exactly what happened the first time this was tried.
+      const repairCommand =
+        !initial && !lockfileDrift && options.generatedCommand !== undefined
+          ? options.generatedCommand
+          : plugin.remoteInstallCommand;
       const reason = initial
         ? `[bica] No remote install recorded yet (${plugin.id}); running ${plugin.remoteInstallCommand}.`
-        : `[bica] Lockfile changed since last remote install (${plugin.id}); reinstalling.`;
+        : lockfileDrift
+          ? `[bica] Lockfile changed since last remote install (${plugin.id}); reinstalling.`
+          : `[bica] Generated output missing on the remote (${missingGenerated.join(', ')}); ` +
+            `running ${repairCommand} to produce it.`;
       process.stderr.write(`${reason}\n`);
       // No local lock around this. The remote workspace is leased for the whole run -- taken in
       // `cmdRun` before anything syncs, released in its `finally` -- so a second run against this
@@ -177,7 +205,7 @@ export async function runRemoteCommandWithPmHooks(options: {
       const installCode = runRemoteCommand(
         config.sshHost,
         config.remoteWorkspacePath,
-        plugin.remoteInstallCommand,
+        repairCommand,
         repoRoot,
         { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
       );
