@@ -251,6 +251,8 @@ export async function runPinned(options: {
     prep,
     remoteArgv: options.remoteArgv,
     matchArgvs: options.matchArgvs,
+    generatedPaths: prep.generatedPaths,
+    generatedCommand: prep.generatedCommand,
     pmOverride: options.pmOverride,
     assertRunId: runId,
     claimPathExpr: claimExpr,
