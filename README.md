@@ -224,7 +224,16 @@ over the first — including a run launched from a sibling clone that resolves t
 which is the case a lock inside one checkout could never see.
 
 A lease whose owner is gone is broken automatically, so a killed run costs the next one a round-trip
-rather than the workspace.
+rather than the workspace. "Gone" means both halves of the run: the local client *and* the remote
+shell executing the command, whose pid the run script publishes into the claim. They have different
+lifetimes — the remote one follows the ssh connection — and testing only the client is how a lease
+gets broken over a run that is still executing. See
+[The lease's liveness oracle was the wrong process](#the-leases-liveness-oracle-was-the-wrong-process).
+
+**`pkill` cannot stop a run.** The process tree is `zsh` → `bica.cjs` → `tsx cli.ts` → `node` → `ssh`,
+and a pattern matching `bica.cjs run` or `cli.ts run` leaves the `ssh` — and so the remote command —
+running. Kill the remote end first; the exit-98 message prints the exact command when the holder is a
+run from your own machine.
 
 ### Exit codes
 
@@ -232,7 +241,7 @@ None of these are verdicts on your code:
 
 | code | meaning |
 | --- | --- |
-| **98** | refused to start; the workspace is in use. Nothing ran. Wait, or use another checkout. |
+| **98** | refused to start; the workspace is in use. Nothing ran. Wait, use another checkout, or end the named run. |
 | **97** | ran, but the workspace was taken part-way through, so the result was discarded. Re-run. |
 | **96** | the remote workspace could not be entered. |
 
@@ -492,6 +501,49 @@ The defences that actually worked here, in rough order of value:
   plain dry run omits, because "already current" and "excluded" print identically.
 - **Check the positive case too.** Every one of these was caught by asking "would this have said
   anything different if the answer were the other way?"
+
+### The lease's liveness oracle was the wrong process
+
+The lease decides whether a claim is stale by asking whether its owner still exists. For a long time
+the owner it asked about was the **client** pid — but the process that reads and writes the remote
+workspace is the **remote** shell, whose lifetime follows the ssh connection rather than the client's.
+Those two can diverge, and while they are diverged a second run judges the claim stale, breaks it, and
+rsyncs into a workspace where the first run's command is still executing. That is the precise
+collision the lease was built to prevent.
+
+Reaching the diverged state takes nothing exotic: any interruption that takes the client without
+taking the ssh, which includes every obvious `pkill` pattern. Reproduced by starting a long run,
+killing only the node client, and watching a second `bica run` acquire the workspace and exit **0**
+while the first command's remote pids were still alive on both sides of it.
+
+The fix records the remote shell's pid into the claim (`rpid=N`) as its first act, and consults it
+when the client looks dead. The order matters for cost as much as for correctness: the local answer
+is free, so the ssh probe only happens for a claim that would otherwise have been broken. Cross-host
+claims are still never judged — refusing costs a re-run, guessing costs a wrong answer.
+
+**The probe asks about the process group, not the pid.** The first version asked `kill -0 <shell>`,
+and killing that shell left its `sleep` running in the workspace — the same wrong-subject mistake one
+level down, and it would have reported the workspace free with a process still sitting in it. sshd
+gives the command its own session, so the shell leads the group and every descendant joins it; one
+`ps -A -o pgid=` question covers the whole job. For the same reason the kill the exit-98 message
+offers is `kill -TERM -<pgid>`, signalling the group.
+
+Two things generalise from it:
+
+- **A liveness check is only as good as its choice of subject.** The client pid answered "is the
+  local process alive" perfectly. The question the lease needed answered was "is anything still
+  touching this directory", and nothing in the code marked the substitution — the pid field was
+  documented as "the liveness oracle" without saying an oracle for *what*.
+- **Probe a remote process with a pattern that cannot match the probe itself.** `pgrep -f "_bica_dir"`
+  matches the shell running it, so it reports the same count whether or not a run is live; the tell is
+  a constant number of matches whose pids change every invocation. Use the bracket trick
+  (`pgrep -f "[M]anagePeople"`). An earlier pass of this investigation drew the opposite conclusion
+  from exactly that. This is [the empty-result trap](#a-check-must-distinguish-nothing-to-do-from-could-not-run)
+  in its positive form: a result that looks like evidence and is an artifact of the measurement.
+
+The single-command path had also never been given the lease at all — it passed no run id to the
+remote script, so it had neither the pid publication nor the end-of-run "did someone take this
+workspace" check that the multi-command path has had all along. It is the common path.
 
 ### Measurement traps hit in the course of the above
 
