@@ -33,8 +33,19 @@ export interface ClaimOwner {
   runId: string;
   /** Host of the machine running bica, so a claim can be attributed across machines. */
   host: string;
-  /** bica's local pid, the liveness oracle when the claim belongs to this machine. */
+  /** bica's local pid. Necessary for liveness but not sufficient — see {@link claimIsStale}. */
   pid: number;
+  /**
+   * Pid of the remote shell executing the command, published by the run script once it starts.
+   *
+   * Absent until then, and absent for a run that never reached the remote. Present means something is
+   * or was executing *in* the workspace, which is the thing the lease actually protects.
+   *
+   * Doubles as a process *group* id: sshd starts the command in its own session, so the shell leads
+   * the group and everything it spawns joins it. That is what makes it answerable — see
+   * {@link remoteRunIsAlive}.
+   */
+  remotePid?: number;
 }
 
 export type ClaimResult =
@@ -70,13 +81,29 @@ export function formatOwner(owner: ClaimOwner): string {
   return `${owner.runId} ${owner.host} ${String(owner.pid)}`;
 }
 
+/**
+ * Parse a claim line: `runId host clientPid [rpid=N] [exitCode]`.
+ *
+ * The remote pid is a *tagged* field rather than a fourth positional one because the claim already
+ * grows a positional field — the exit code the run script appends when it finishes. Two optional
+ * positionals cannot be told apart, and reading an exit code of `0` as a pid would be actively
+ * harmful: `kill -0 0` succeeds, so a finished run's claim would read as live and wedge the workspace
+ * forever. The tag also means a claim written by an older bica parses correctly rather than
+ * accidentally.
+ */
 export function parseOwner(raw: string): ClaimOwner | null {
-  const [runId, host, pid] = raw.trim().split(/\s+/);
+  const fields = raw.trim().split(/\s+/);
+  const [runId, host, pid] = fields;
   const parsed = Number(pid);
   if (runId === undefined || host === undefined || !Number.isInteger(parsed)) {
     return null;
   }
-  return { runId, host, pid: parsed };
+  const remote = fields.slice(3).find((f) => /^rpid=\d+$/.test(f));
+  const owner: ClaimOwner = { runId, host, pid: parsed };
+  if (remote !== undefined) {
+    owner.remotePid = Number(remote.slice('rpid='.length));
+  }
+  return owner;
 }
 
 function runRemoteScript(
@@ -200,14 +227,30 @@ export function remoteBreakClaim(
 /**
  * Whether a claim can be taken over, decided structurally rather than by elapsed time.
  *
- * A claim owned by *this* machine is checkable: bica's pid either exists or it does not, the same
- * oracle the local lock uses, with the same accepted pid-reuse caveat (it errs towards refusing).
- * A claim from another machine cannot be interrogated from here, so it is honoured — refusing costs a
- * re-run, and guessing costs a wrong answer.
+ * Two liveness questions, asked in the order that costs least:
+ *
+ * 1. Is the *client* still running? Only answerable for a claim from this machine; a claim from
+ *    another machine cannot be interrogated from here, so it is honoured — refusing costs a re-run,
+ *    and guessing costs a wrong answer.
+ * 2. If the client is gone, is the *remote* still running? This is the question that matters, and for
+ *    a long time it was not asked at all. The client and the remote command have different lifetimes:
+ *    the remote one follows the ssh connection, so any interruption that takes the client without
+ *    taking the ssh — an obvious `pkill` matching `cli.ts run` does exactly this — leaves the command
+ *    executing in the workspace with nothing local to point at. Judging that claim stale from the
+ *    client pid alone breaks the lease and syncs over a live run, which is the precise outcome the
+ *    lease exists to prevent.
+ *
+ * A dead client with no remote pid recorded is stale: the run never got as far as executing, so
+ * nothing is in the workspace to protect. Pid reuse on the remote errs the same way it does locally —
+ * towards refusing — which is the safe direction.
+ *
+ * `isRemoteProcessAlive` is only consulted when the answer would otherwise be "stale", so a contended
+ * workspace whose holder is plainly alive still costs no extra round-trip.
  */
 export function claimIsStale(
   heldBy: ClaimOwner | null,
   isProcessAlive: (pid: number) => boolean,
+  isRemoteProcessAlive: (pid: number) => boolean,
 ): boolean {
   if (heldBy === null) {
     // Unreadable content cannot be one of ours: a claim is published complete, by `ln`.
@@ -216,7 +259,45 @@ export function claimIsStale(
   if (heldBy.host !== os.hostname()) {
     return false;
   }
-  return !isProcessAlive(heldBy.pid);
+  if (isProcessAlive(heldBy.pid)) {
+    return false;
+  }
+  if (heldBy.remotePid === undefined) {
+    return true;
+  }
+  return !isRemoteProcessAlive(heldBy.remotePid);
+}
+
+/**
+ * Whether anything from a remote run is still executing.
+ *
+ * Asks about the process *group*, not the recorded pid. Killing the remote shell does not take its
+ * children with it: a `sleep` started by that shell was observed still running in the workspace after
+ * the shell was gone, so `kill -0 <shell>` would have reported the workspace free while a process was
+ * still sitting in it. sshd gives the command its own session, so the shell leads the group and every
+ * descendant is in it — one question that covers the whole job.
+ *
+ * Answers with a token rather than with ssh's exit status, because the two failures it has to separate
+ * look identical there: a genuinely empty process group, and ssh failing to connect at all. Only an
+ * explicit `DEAD` is read as dead; anything else — a dropped connection, a host that is down,
+ * unparseable output — reports alive, so an unanswerable question refuses to break the lease instead
+ * of breaking it on a transport error.
+ *
+ * Deliberately not `pgrep -g`: a remote without `pgrep` would answer "dead" for every live run, which
+ * is the dangerous direction to fail in. `ps -A -o pgid=` is present wherever ssh is.
+ */
+export function remoteRunIsAlive(sshHost: string, remotePid: number): boolean {
+  if (!Number.isInteger(remotePid) || remotePid <= 0) {
+    return false;
+  }
+  const { status, stdout } = runRemoteScript(
+    sshHost,
+    `if ps -A -o pgid= 2>/dev/null | tr -d ' ' | grep -qx ${String(remotePid)}; then echo BICA_ALIVE; else echo BICA_DEAD; fi\n`,
+  );
+  if (status !== 0) {
+    return true;
+  }
+  return stdout.trim() !== 'BICA_DEAD';
 }
 
 /** The real lease operations against a host, for callers that are not tests. */
@@ -224,8 +305,10 @@ export function sshLeaseOps(sshHost: string): {
   acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
   break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
   release: (remoteWorkspacePath: string, owner: ClaimOwner) => void;
+  remotePidAlive: (pid: number) => boolean;
 } {
   return {
+    remotePidAlive: (pid) => remoteRunIsAlive(sshHost, pid),
     acquire: (p, owner) => remoteAcquireClaim(sshHost, p, owner),
     break: (p, held) => {
       remoteBreakClaim(sshHost, p, held);
@@ -244,6 +327,8 @@ export function describeClaim(result: ClaimResult): string {
   if (result.heldBy === null) {
     return result.raw === '' ? 'an unidentified run' : result.raw;
   }
-  const { runId, host, pid } = result.heldBy;
-  return `run ${runId} from ${host} (pid ${String(pid)})`;
+  const { runId, host, pid, remotePid } = result.heldBy;
+  const remote =
+    remotePid === undefined ? '' : `, remote pid ${String(remotePid)}`;
+  return `run ${runId} from ${host} (pid ${String(pid)}${remote})`;
 }

@@ -8,12 +8,14 @@ import type { ClaimOwner, ClaimResult } from './remoteClaim';
 const WS = '~/code/repo';
 
 /** Stand-in for the remote: which run, if any, currently holds each workspace path. */
-function fakeLease(initial: Record<string, ClaimOwner> = {}): LeaseOps & {
-  held: Record<string, ClaimOwner>;
-} {
+function fakeLease(
+  initial: Record<string, ClaimOwner> = {},
+  remoteAlive: (pid: number) => boolean = () => false,
+): LeaseOps & { held: Record<string, ClaimOwner> } {
   const held: Record<string, ClaimOwner> = { ...initial };
   return {
     held,
+    remotePidAlive: remoteAlive,
     acquire(p, owner): ClaimResult {
       const cur = held[p];
       if (cur !== undefined) {
@@ -80,6 +82,61 @@ describe('acquireWorkspace', () => {
   it('honours a live lease from another machine, which it cannot interrogate', () => {
     const remote: ClaimOwner = { runId: 'far', host: 'other-box', pid: 2147483647 };
     expect(() => acquire(fakeLease({ [WS]: remote }))).toThrow(WorkspaceInUseError);
+  });
+
+  it('honours a lease whose client is dead but whose remote command is still running', () => {
+    // The whole point of recording the remote pid. A `pkill` that matches the client leaves the ssh —
+    // and so the command — alive; without this the workspace gets rsynced out from under it, which is
+    // the exact collision the lease was built to prevent.
+    const orphaned: ClaimOwner = {
+      runId: 'orphaned',
+      host: os.hostname(),
+      pid: 2147483647,
+      remotePid: 4242,
+    };
+    const lease = fakeLease({ [WS]: orphaned }, () => true);
+    expect(() => acquire(lease)).toThrow(WorkspaceInUseError);
+    expect(lease.held[WS]?.runId).toBe('orphaned');
+  });
+
+  it('breaks the lease once the remote command has gone too', () => {
+    const finished: ClaimOwner = {
+      runId: 'finished',
+      host: os.hostname(),
+      pid: 2147483647,
+      remotePid: 4242,
+    };
+    expect(
+      acquire(fakeLease({ [WS]: finished }, () => false)).owner.runId,
+    ).toBe('mine');
+  });
+
+  it('tells the user how to end their own run, remote side first', () => {
+    // Killing the local pid alone leaves the remote command running and the workspace still held —
+    // the trap that produced the diverged state in the first place.
+    const mine: ClaimOwner = {
+      runId: 'stuck',
+      host: os.hostname(),
+      pid: process.pid,
+      remotePid: 4242,
+    };
+    const lease = fakeLease({ [WS]: mine }, () => true);
+    expect(() =>
+      acquireWorkspace({
+        remoteWorkspacePath: WS,
+        runId: 'mine',
+        lease,
+        sshHost: 'mini',
+      }),
+    ).toThrow(/ssh mini kill -TERM -4242 && kill /);
+  });
+
+  it('does not offer a kill for a run on another machine, whose pids mean nothing here', () => {
+    const far: ClaimOwner = { runId: 'far', host: 'other-box', pid: 2147483647 };
+    expect(() => acquire(fakeLease({ [WS]: far }))).toThrow(
+      /Wait for it to finish, or run from a checkout/,
+    );
+    expect(() => acquire(fakeLease({ [WS]: far }))).not.toThrow(/kill/);
   });
 
   it('frees the workspace on release', () => {

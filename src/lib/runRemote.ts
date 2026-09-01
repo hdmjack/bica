@@ -442,10 +442,16 @@ export function remoteReadRecordedExit(
   if (result.status !== 0) {
     return { exitCode: null, mine: false };
   }
+  // Claim layout is `runId host clientPid [rpid=N] [exitCode]`. The exit code is whatever trails the
+  // three mandatory fields and is a bare integer -- reading a fixed index would mistake the remote pid
+  // tag for it, and reading the last field unconditionally would report the client pid as an exit code
+  // for a run that has not finished.
   const fields = result.stdout.trim().split(/\s+/);
-  const parsed = Number(fields[3]);
+  const trailing = fields.slice(3).filter((f) => !/^rpid=\d+$/.test(f));
+  const last = trailing[trailing.length - 1];
+  const parsed = Number(last);
   return {
-    exitCode: fields[3] !== undefined && Number.isInteger(parsed) ? parsed : null,
+    exitCode: last !== undefined && Number.isInteger(parsed) ? parsed : null,
     mine: fields[0] === runId,
   };
 }
@@ -615,6 +621,23 @@ export function buildRemoteRunScript(options: {
   const { runId, claimPathExpr } = options;
   const leased = runId !== undefined && claimPathExpr !== undefined;
   const q = runId === undefined ? '' : shellSingleQuoteRemotePathForSh(runId);
+  // Publish this shell's pid into the claim before the command starts.
+  //
+  // The claim already records the *client's* pid, but the client and this shell have different
+  // lifetimes: this one follows the ssh connection, so it outlives any interruption that takes the
+  // client without taking the ssh. Without the remote pid, the next run judges such a claim stale from
+  // a dead client, breaks the lease, and rsyncs over a command that is still executing right here.
+  //
+  // Guarded on ownership so a run whose lease was already broken appends to nobody else's claim; it
+  // still runs, and the end-of-run check below is what discards its result.
+  const publishPid = !leased
+    ? ''
+    : shBlock(
+        `_bica_pre=$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)`,
+        `if [ "$_bica_pre" = ${q} ]; then`,
+        `  printf ' rpid=%s' "$$" >> ${claimPathExpr} 2>/dev/null || true`,
+        'fi',
+      );
   const verify = !leased
     ? ''
     : shBlock(
@@ -627,6 +650,7 @@ export function buildRemoteRunScript(options: {
       );
   return (
     `${options.preamble}${options.cdExpr} || exit ${String(REMOTE_CD_FAILED_EXIT)}\n` +
+    publishPid +
     `${options.command}\n` +
     shBlock('_bica_ec=$?') +
     verify +

@@ -17,7 +17,8 @@ import {
   runPinned,
   WorkspaceInUseError,
 } from './lib/pinnedRun';
-import { sshLeaseOps } from './lib/remoteClaim';
+import { claimPathExpr, sshLeaseOps } from './lib/remoteClaim';
+import type { ClaimOwner } from './lib/remoteClaim';
 import {
   assignLabels,
   buildParallelScript,
@@ -368,6 +369,14 @@ async function runWithLiveSession(options: {
   tail: string[];
   matchArgvs?: string[][];
   captured: boolean;
+  /**
+   * The lease this run already holds. Passed through to the remote script so it can publish its own
+   * pid into the claim and confirm the lease at the end, exactly as the pinned path does.
+   *
+   * This path went without both for its whole life, which is why the lease's liveness oracle could be
+   * wrong here and nothing noticed: the single-command run is the common one.
+   */
+  owner: ClaimOwner;
   chrome: (text: string) => void;
 }): Promise<number> {
   const { prep, pm, tail, captured, chrome } = options;
@@ -459,6 +468,8 @@ async function runWithLiveSession(options: {
       generatedPaths: options.prep.generatedPaths,
       generatedCommand: options.prep.generatedCommand,
       pmOverride: pm,
+      assertRunId: options.owner.runId,
+      claimPathExpr: claimPathExpr(prep.config.remoteWorkspacePath),
     });
     // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
     // failed tests still produce snapshot diffs the user needs locally.
@@ -543,6 +554,7 @@ async function cmdRun(options: {
       remoteWorkspacePath: baseRemote.remoteWorkspacePath,
       runId: `${String(process.pid)}`,
       lease: sshLeaseOps(baseRemote.sshHost),
+      sshHost: baseRemote.sshHost,
     });
   } catch (e: unknown) {
     // A busy workspace is not a bica failure and not a verdict on the code. Its own exit code lets a
@@ -589,6 +601,7 @@ async function cmdRun(options: {
         tail: remoteArgv,
         matchArgvs: options.commands,
         captured,
+        owner,
         chrome,
       });
     }
