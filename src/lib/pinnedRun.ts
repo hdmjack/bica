@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
@@ -49,6 +50,8 @@ export interface LeaseOps {
   acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
   break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
   release: (remoteWorkspacePath: string, owner: ClaimOwner) => void;
+  /** Whether a pid recorded by the remote run script still exists on the remote host. */
+  remotePidAlive: (pid: number) => boolean;
 }
 
 /**
@@ -80,11 +83,16 @@ export function acquireWorkspace(options: {
   remoteWorkspacePath: string;
   runId: string;
   lease: LeaseOps;
+  /** Named in the refusal message so the holder can be ended without guessing the host. */
+  sshHost?: string;
 }): AcquiredWorkspace {
   const { remoteWorkspacePath, lease } = options;
   const owner = describeSelfAsOwner(options.runId);
   let result = lease.acquire(remoteWorkspacePath, owner);
-  if (!result.ok && claimIsStale(result.heldBy, isProcessAlive)) {
+  if (
+    !result.ok &&
+    claimIsStale(result.heldBy, isProcessAlive, lease.remotePidAlive)
+  ) {
     if (result.heldBy !== null) {
       lease.break(remoteWorkspacePath, result.heldBy);
     }
@@ -94,7 +102,8 @@ export function acquireWorkspace(options: {
     throw new WorkspaceInUseError(
       `This remote workspace is in use by ${describeClaim(result)}.\n` +
         'Syncing into it would overwrite that run\'s files, so neither result would be trustworthy. ' +
-        'Wait for it to finish, or run from a checkout with a different remotePath.',
+        'Wait for it to finish, or run from a checkout with a different remotePath.' +
+        howToEndHolder(result, options.sshHost),
     );
   }
   return {
@@ -103,6 +112,49 @@ export function acquireWorkspace(options: {
       lease.release(remoteWorkspacePath, owner);
     },
   };
+}
+
+/**
+ * The third option the refusal used to leave out: end the run that is holding the workspace.
+ *
+ * Offered only when the holder is this machine's own run, because that is the only case where the
+ * pids named are ones the user can act on. It spells out both because killing the client alone does
+ * not stop anything — the remote command's lifetime follows the ssh, not the client, so a client-only
+ * kill produces exactly the diverged state this lease had to be taught to recognise. The remote pid
+ * goes first: dropping it ends the command, and the client unwinds behind it and releases the lease.
+ *
+ * A detour once spent an afternoon reaching this conclusion from a message that named the pid and
+ * then offered only "wait".
+ */
+function howToEndHolder(result: ClaimResult, sshHost: string | undefined): string {
+  const heldBy = result.ok ? null : result.heldBy;
+  if (heldBy === null || heldBy.host !== os.hostname()) {
+    return '';
+  }
+  // Name only pids that still exist. The diverged case -- dead client, live remote -- is the one most
+  // likely to produce this message, and telling the user to kill a process that is already gone is how
+  // a message loses the reader's trust in the part that is true.
+  const parts: string[] = [];
+  if (heldBy.remotePid !== undefined) {
+    // Negative pid: signal the whole remote process group. Signalling the shell alone leaves its
+    // children running in the workspace, which was observed and is the reason liveness is asked of the
+    // group rather than the pid.
+    parts.push(
+      `${sshHost === undefined ? '' : `ssh ${sshHost} `}kill -TERM -${String(heldBy.remotePid)}`,
+    );
+  }
+  if (isProcessAlive(heldBy.pid)) {
+    parts.push(`kill ${String(heldBy.pid)}`);
+  }
+  if (parts.length === 0) {
+    return '';
+  }
+  return (
+    `\nIt is a run from this machine, so you can also end it: \`${parts.join(' && ')}\`.` +
+    (parts.length > 1
+      ? ' Killing only the local pid leaves the remote command running -- and the workspace still held.'
+      : '')
+  );
 }
 
 /**
