@@ -62,8 +62,77 @@ describe('the lease script, executed', () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('OK');
     // The decisive property: the file is complete the instant it exists. An empty claim is the bug
-    // that let two runs share a workspace.
-    expect(fs.readFileSync(file, 'utf8')).toBe('run-a mac 4242');
+    // that let two runs share a workspace. The start stamp is added by the same `printf`, so it
+    // arrives with the rest rather than being appended after publication.
+    expect(fs.readFileSync(file, 'utf8')).toMatch(/^run-a mac 4242 t=\d+$/);
+  });
+
+  it('stamps the start from the remote clock, and records the command beside it', () => {
+    // Age is reported as the difference of two readings of *this* clock. Stamping locally and
+    // subtracting remotely would fold clock skew between two machines into a number presented as
+    // elapsed time.
+    const { expr, file } = claimIn('~/code/repo');
+    const before = Math.floor(Date.now() / 1000);
+    runScript(
+      buildClaimAcquireScript(
+        expr,
+        formatOwner({ runId: 'run-a', host: 'mac', pid: 4242 }),
+        dir,
+        'pnpm test:run common/src',
+      ),
+    );
+    const stamp = Number(
+      /t=(\d+)/.exec(fs.readFileSync(file, 'utf8'))?.[1] ?? '0',
+    );
+    expect(stamp).toBeGreaterThanOrEqual(before);
+    // The command lives in a sidecar because the claim is one space-delimited line read with `cut`.
+    expect(fs.readFileSync(`${file}.cmd`, 'utf8')).toBe('pnpm test:run common/src');
+  });
+
+  it('reports the holder, its command and the remote clock when refusing', () => {
+    // All three come back in one round-trip: a refusal that has to make a second call to say what it
+    // is waiting on would not bother, which is how "wait for it to finish" stayed open-ended.
+    const { expr } = claimIn('~/code/repo');
+    runScript(
+      buildClaimAcquireScript(
+        expr,
+        formatOwner({ runId: 'run-a', host: 'mac', pid: 1 }),
+        dir,
+        'pnpm lint:fast',
+      ),
+    );
+    const second = runScript(
+      buildClaimAcquireScript(
+        expr,
+        formatOwner({ runId: 'run-b', host: 'mac', pid: 2 }),
+        dir,
+        'pnpm typecheck',
+      ),
+    );
+    expect(second.stdout).toMatch(/HELD run-a mac 1 t=\d+/);
+    expect(second.stdout).toMatch(/NOW \d+/);
+    expect(second.stdout).toContain('CMD pnpm lint:fast');
+  });
+
+  it('does not overwrite the holder\'s command with the refused run\'s', () => {
+    const { expr, file } = claimIn('~/code/repo');
+    runScript(
+      buildClaimAcquireScript(
+        expr,
+        formatOwner({ runId: 'run-a', host: 'mac', pid: 1 }),
+        dir,
+        'pnpm lint:fast',
+      ),
+    );
+    runScript(
+      buildClaimAcquireScript(
+        expr,
+        formatOwner({ runId: 'run-b', host: 'mac', pid: 2 }),
+        dir,
+        'pnpm typecheck',
+      ),
+    );
+    expect(fs.readFileSync(`${file}.cmd`, 'utf8')).toBe('pnpm lint:fast');
   });
 
   it('refuses a claim another run holds, and says who holds it', () => {
@@ -84,7 +153,7 @@ describe('the lease script, executed', () => {
       ),
     );
 
-    expect(second.stdout).toBe('HELD run-a mac 1');
+    expect(second.stdout).toMatch(/^HELD run-a mac 1 t=\d+/);
   });
 
   it('leaves no temp file behind on either path', () => {
@@ -124,7 +193,7 @@ describe('the lease script, executed', () => {
       expect(results.filter((r) => r === 'OK')).toHaveLength(1);
       expect(results.filter((r) => r.startsWith('HELD'))).toHaveLength(7);
       // The survivor's line is one contender's, not a mixture of two.
-      expect(fs.readFileSync(file, 'utf8')).toMatch(/^run-[0-7] mac [1-8]$/);
+      expect(fs.readFileSync(file, 'utf8')).toMatch(/^run-[0-7] mac [1-8] t=\d+$/);
     });
   });
 });
