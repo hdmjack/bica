@@ -118,42 +118,34 @@ export function acquireWorkspace(options: {
  * The third option the refusal used to leave out: end the run that is holding the workspace.
  *
  * Offered only when the holder is this machine's own run, because that is the only case where the
- * pids named are ones the user can act on. It spells out both because killing the client alone does
- * not stop anything — the remote command's lifetime follows the ssh, not the client, so a client-only
- * kill produces exactly the diverged state this lease had to be taught to recognise. The remote pid
- * goes first: dropping it ends the command, and the client unwinds behind it and releases the lease.
+ * user can act on it without going to another terminal.
  *
- * A detour once spent an afternoon reaching this conclusion from a message that named the pid and
- * then offered only "wait".
+ * Names `bica cancel` rather than the `ssh <host> kill -TERM -<pgid>` this used to print. That advice
+ * was correct and nearly unusable: it asks the reader to reason about negative pids and process
+ * groups, and a sandboxed caller -- a CI step, an agent's shell tool -- often cannot run arbitrary ssh
+ * at all. One incident had the remedy printed in front of it, could not execute it, and waited six
+ * minutes instead.
+ *
+ * A live client gets pointed at its own terminal first. Ctrl-C there stops the client and the remote
+ * together, and it is the only route that lets whoever is watching the output decide.
  */
 function howToEndHolder(result: ClaimResult, sshHost: string | undefined): string {
   const heldBy = result.ok ? null : result.heldBy;
   if (heldBy === null || heldBy.host !== os.hostname()) {
     return '';
   }
-  // Name only pids that still exist. The diverged case -- dead client, live remote -- is the one most
-  // likely to produce this message, and telling the user to kill a process that is already gone is how
-  // a message loses the reader's trust in the part that is true.
-  const parts: string[] = [];
-  if (heldBy.remotePid !== undefined) {
-    // Negative pid: signal the whole remote process group. Signalling the shell alone leaves its
-    // children running in the workspace, which was observed and is the reason liveness is asked of the
-    // group rather than the pid.
-    parts.push(
-      `${sshHost === undefined ? '' : `ssh ${sshHost} `}kill -TERM -${String(heldBy.remotePid)}`,
+  if (isProcessAlive(heldBy.pid)) {
+    return (
+      '\nIts client is still running on this machine: interrupt it where it is running (Ctrl-C stops ' +
+      'the client and the remote command together), or `bica cancel --force` from here.'
     );
   }
-  if (isProcessAlive(heldBy.pid)) {
-    parts.push(`kill ${String(heldBy.pid)}`);
-  }
-  if (parts.length === 0) {
-    return '';
-  }
   return (
-    `\nIt is a run from this machine, so you can also end it: \`${parts.join(' && ')}\`.` +
-    (parts.length > 1
-      ? ' Killing only the local pid leaves the remote command running -- and the workspace still held.'
-      : '')
+    "\nIts client is gone, so nothing is reading that run's output any more — `bica cancel` ends the " +
+    'remote command and frees the workspace.' +
+    (sshHost === undefined || heldBy.remotePid === undefined
+      ? ''
+      : ` (Equivalent by hand: \`ssh ${sshHost} kill -TERM -${String(heldBy.remotePid)}\`.)`)
   );
 }
 

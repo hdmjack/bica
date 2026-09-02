@@ -155,6 +155,89 @@ export function buildClaimReleaseScript(
 }
 
 /**
+ * The `sh` that ends a run and drops its lease, in one round-trip.
+ *
+ * One script rather than "kill, then release" as two calls, because the gap between them is a window
+ * where the claim is gone and the remote may still be winding down — which is precisely the state the
+ * lease exists to make impossible. Signalling first and removing the claim afterwards means the
+ * workspace is never advertised as free while anything is still in it.
+ *
+ * The signal goes to the *group* (`kill -TERM -$p`), for the reason {@link remoteRunIsAlive} checks
+ * the group: the recorded pid is the remote shell, and signalling it alone leaves its children running
+ * in the workspace.
+ *
+ * `runId` narrows it to one run when the caller knows which it is tearing down. Passing `null` cancels
+ * whatever holds the claim, which is what `bica cancel` needs when the run it is clearing up belongs
+ * to a client that no longer exists.
+ */
+export function buildClaimCancelScript(
+  claimExpr: string,
+  runId: string | null,
+): string {
+  const guard =
+    runId === null
+      ? ''
+      : `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${shellSingleQuoteRemotePathForSh(runId)} ] || { echo BICA_NOT_MINE; exit 0; }\n`;
+  return (
+    `[ -f ${claimExpr} ] || { echo BICA_NO_CLAIM; exit 0; }\n` +
+    guard +
+    `_p=$(tr ' ' '\\n' < ${claimExpr} 2>/dev/null | grep '^rpid=' | cut -d= -f2)\n` +
+    'if [ -n "$_p" ]; then\n' +
+    '  if kill -TERM -"$_p" 2>/dev/null; then echo BICA_SIGNALLED; else echo BICA_GROUP_GONE; fi\n' +
+    'else\n' +
+    '  echo BICA_NEVER_RAN\n' +
+    'fi\n' +
+    `rm -f ${claimExpr}\n` +
+    'echo BICA_CLEARED\n'
+  );
+}
+
+/** What a cancel actually did, so the caller can say something true rather than "done". */
+export interface CancelOutcome {
+  cleared: boolean;
+  /** The remote process group was still there and has been signalled. */
+  signalled: boolean;
+  /** A claim existed but named a different run; nothing was touched. */
+  notMine: boolean;
+  noClaim: boolean;
+  /** The claim recorded no remote pid: the run was cancelled before its command ever started. */
+  neverRan: boolean;
+}
+
+export function remoteCancelClaim(
+  sshHost: string,
+  remoteWorkspacePath: string,
+  runId: string | null,
+): CancelOutcome {
+  const { stdout } = runRemoteScript(
+    sshHost,
+    buildClaimCancelScript(claimPathExpr(remoteWorkspacePath), runId),
+  );
+  return {
+    cleared: stdout.includes('BICA_CLEARED'),
+    signalled: stdout.includes('BICA_SIGNALLED'),
+    notMine: stdout.includes('BICA_NOT_MINE'),
+    noClaim: stdout.includes('BICA_NO_CLAIM'),
+    neverRan: stdout.includes('BICA_NEVER_RAN'),
+  };
+}
+
+/** Who holds the claim right now, without trying to take it. */
+export function remoteReadClaim(
+  sshHost: string,
+  remoteWorkspacePath: string,
+): ClaimOwner | null {
+  const { status, stdout } = runRemoteScript(
+    sshHost,
+    `cat ${claimPathExpr(remoteWorkspacePath)} 2>/dev/null\n`,
+  );
+  if (status !== 0 || stdout === '') {
+    return null;
+  }
+  return parseOwner(stdout);
+}
+
+/**
  * Take the lease, or report who holds it.
  *
  * Published with `ln` from a fully-written temp file rather than a `set -C` redirect. The redirect

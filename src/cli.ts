@@ -6,18 +6,25 @@
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 import { parseArgs } from './cliArgs';
+import { isProcessAlive } from './lib/fileLock';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import {
   acquireWorkspace,
   runPinned,
   WorkspaceInUseError,
 } from './lib/pinnedRun';
-import { claimPathExpr, sshLeaseOps } from './lib/remoteClaim';
+import {
+  claimPathExpr,
+  remoteCancelClaim,
+  remoteReadClaim,
+  sshLeaseOps,
+} from './lib/remoteClaim';
 import type { ClaimOwner } from './lib/remoteClaim';
 import {
   assignLabels,
@@ -40,7 +47,10 @@ import {
   pushGitToRemote,
   pushReturnFlowToRemote,
 } from './lib/returnFlow';
-import { openRemoteInteractiveSsh } from './lib/runRemote';
+import {
+  openRemoteInteractiveSsh,
+  terminateLiveRemoteCommand,
+} from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
 import { dim, remoteExitStatusLine, syncRemoteTarget, warn } from './terminalStyle';
 import {
@@ -75,6 +85,7 @@ const COMMANDS_NEEDING_BICA_SPEC = new Set([
   'plugins',
   'ssh',
   'run',
+  'cancel',
 ]);
 
 function printHelp(): void {
@@ -88,6 +99,12 @@ Remote execution
                               shell injection). Do not pass local-only options after "run" unless you
                               intend the remote to see them. Example: bica run pnpm test:run
   ssh                         Interactive ssh, cd to BICA_REMOTE_PATH, then a login shell.
+  cancel [--force]            End the run holding this workspace and drop its lease. For the case a
+                              run's client was killed (a CI step or an agent tool hitting its command
+                              timeout) and the remote command carried on: the lease is correctly
+                              honoured, so every later run is refused until the orphan finishes.
+                              Refuses when the holder's client is still alive, or when it belongs to
+                              another machine; --force overrides both.
 
 Running several commands at once
   Separate them with --. They run concurrently in one remote workspace, against one copy of the
@@ -117,6 +134,10 @@ Running several commands at once
         different remotePath — another clone pointing at the same one is exactly what is refused.
     97  ran, but the workspace was taken part-way through, so the result was discarded. Re-run.
     96  the remote workspace could not be entered.
+
+  A run killed by SIGTERM or SIGHUP ends its remote command and releases the workspace on the way
+  out, so a caller's command timeout no longer leaves an orphan. A SIGKILLed client cannot do that —
+  no handler runs — so \`bica cancel\` is the answer for that one.
 
 Workspace
   init                        Interactive setup: create bica.yml + .bica/local.yml (SSH/path).
@@ -363,6 +384,86 @@ async function cmdSsh(): Promise<void> {
   process.exitCode = code;
 }
 
+/**
+ * End the run holding this workspace and drop its lease.
+ *
+ * Exists because the exit-98 refusal used to have no in-CLI answer. It named the holder precisely and
+ * then offered `ssh <host> kill -TERM -<pgid>` -- which asks the reader to reason about process groups,
+ * and which a sandboxed caller frequently cannot run at all, so the only remaining option was to wait
+ * out a suite whose output nobody was reading any more.
+ *
+ * Guarded rather than prompted. A cancel is only ever typed on purpose, but the two cases where it
+ * would destroy work someone is watching -- a live client, and a run from another machine -- are both
+ * knowable from the claim, so they refuse and say what to do instead. `--force` is for when the caller
+ * means it.
+ */
+async function cmdCancel(options: { force: boolean }): Promise<void> {
+  await ensureRemoteSshHostFromEnvOrPrompt();
+  const repoRoot = getRepoRoot();
+  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+
+  const held = remoteReadClaim(sshHost, remoteWorkspacePath);
+  if (held === null) {
+    process.stderr.write(
+      `${dim('[bica]')} ${dim(`No run holds ${sshHost}:${remoteWorkspacePath}; nothing to cancel.`)}\n`,
+    );
+    return;
+  }
+
+  const who = `run ${held.runId} from ${held.host} (pid ${String(held.pid)}${held.remotePid === undefined ? '' : `, remote pid ${String(held.remotePid)}`})`;
+
+  if (held.host !== os.hostname() && !options.force) {
+    process.stderr.write(
+      `${warn('[bica]')} The workspace is held by ${who} — another machine.\n` +
+        'Cancelling would kill a run whose output is going to someone else\'s terminal, and this host\n' +
+        'cannot tell whether it is healthy. Cancel it there, or pass --force if you are certain.\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const clientAlive = held.host === os.hostname() && isProcessAlive(held.pid);
+  if (clientAlive && !options.force) {
+    process.stderr.write(
+      `${warn('[bica]')} ${who} is still running on this machine, and its client is alive.\n` +
+        `Interrupt it where it is running (Ctrl-C stops the client and the remote together), or pass\n` +
+        '--force to end it from here.\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (clientAlive) {
+    // Signal the client and let it unwind itself, rather than reaching past it to the remote. Its
+    // SIGTERM handler ends the remote command, releases the lease, and stops the mutagen session --
+    // three things this command cannot do from outside. Clearing the claim out from under a live
+    // client instead would leave it running a command whose result is discarded at the end-of-run
+    // check: correct, but a slower and more confusing way to arrive here.
+    process.kill(held.pid, 'SIGTERM');
+    process.stderr.write(
+      `${dim('[bica]')} Signalled its client (pid ${String(held.pid)}); it is ending the remote command and releasing the workspace. (${who})\n`,
+    );
+    return;
+  }
+
+  const outcome = remoteCancelClaim(sshHost, remoteWorkspacePath, held.runId);
+  if (outcome.notMine) {
+    // The claim changed under us, which means a run arrived legitimately between the read and the
+    // cancel. Leaving it alone is the whole point of scoping the cancel to a run id.
+    process.stderr.write(
+      `${warn('[bica]')} ${dim('The workspace was claimed by a different run while cancelling; left it alone.')}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const what = outcome.signalled
+    ? 'Signalled the remote process group and cleared the lease.'
+    : outcome.neverRan
+      ? 'That run never reached the remote, so there was nothing to stop; cleared the lease it left behind.'
+      : 'The remote command had already finished; cleared the lease it left behind.';
+  process.stderr.write(`${dim('[bica]')} ${what} (${who})\n`);
+}
+
 async function runWithLiveSession(options: {
   prep: PrepareResult;
   pm: string | undefined;
@@ -569,6 +670,40 @@ async function cmdRun(options: {
   const { owner, release } = acquired;
   process.on('exit', release);
 
+  // A caller with a command timeout — a CI step, an agent's shell tool — kills the client with
+  // SIGTERM part-way through a run. With no handler the client dies at once and the remote command
+  // carries on, holding the lease with nobody reading its output; every later run is then correctly
+  // refused for as long as the orphan takes to finish. One incident spent six minutes that way.
+  //
+  // SIGINT is deliberately not handled here. Ctrl-C goes to the foreground process *group*, which
+  // includes the ssh, so the remote already dies with it — that case was never the broken one, and
+  // the live-session path has its own SIGINT handling to unwind mutagen.
+  let tearingDown = false;
+  const onFatalSignal = (signal: NodeJS.Signals, exitCode: number) => {
+    if (tearingDown) {
+      return;
+    }
+    tearingDown = true;
+    process.stderr.write(
+      `\n${warn('[bica]')} ${signal} received — ending the remote command and releasing the workspace.\n`,
+    );
+    // Remote first: this signals the process group and removes the claim in one round-trip, so the
+    // workspace is never advertised as free while the command is still winding down. Killing the local
+    // ssh afterwards is what stops us waiting on a connection we no longer want.
+    remoteCancelClaim(baseRemote.sshHost, baseRemote.remoteWorkspacePath, owner.runId);
+    terminateLiveRemoteCommand();
+    process.removeListener('exit', release);
+    process.exit(exitCode);
+  };
+  const onSigterm = (): void => {
+    onFatalSignal('SIGTERM', 143);
+  };
+  const onSighup = (): void => {
+    onFatalSignal('SIGHUP', 129);
+  };
+  process.on('SIGTERM', onSigterm);
+  process.on('SIGHUP', onSighup);
+
   const captured = !process.stdout.isTTY;
   const chrome = (text: string): void => {
     if (!captured) {
@@ -608,6 +743,8 @@ async function cmdRun(options: {
   } finally {
     release();
     process.removeListener('exit', release);
+    process.removeListener('SIGTERM', onSigterm);
+    process.removeListener('SIGHUP', onSighup);
   }
 
   process.stderr.write(`${remoteExitStatusLine(code)}\n`);
@@ -678,6 +815,15 @@ async function main(): Promise<void> {
       case 'ssh':
         await cmdSsh();
         break;
+      case 'cancel': {
+        const force = tail.includes('--force');
+        const unknown = tail.filter((t) => t !== '--force');
+        if (unknown.length > 0) {
+          die('usage: bica cancel [--force]');
+        }
+        await cmdCancel({ force });
+        break;
+      }
       case 'run':
         await cmdRun({
           pm,
