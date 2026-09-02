@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   buildClaimAcquireScript,
+  buildClaimCancelScript,
   buildClaimReleaseScript,
   claimPathExpr,
   formatOwner,
@@ -178,6 +179,110 @@ describe('the release script, executed', () => {
     runScript(buildClaimReleaseScript(expr, 'run-a'));
 
     expect(fs.readFileSync(file, 'utf8')).toBe('run-abc mac 9');
+  });
+});
+
+describe('the cancel script, executed', () => {
+  /**
+   * Starts a real process in its own process group and returns its pid, which is what a run records
+   * as `rpid`. `detached` is what makes it a group leader — the same shape sshd gives a remote
+   * command, and the reason a negative pid reaches the whole job.
+   */
+  function groupLeader(): { pid: number; alive: () => boolean } {
+    const child = spawn('sh', ['-c', 'sleep 30'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    const pid = child.pid ?? -1;
+    return {
+      pid,
+      alive: () => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    };
+  }
+
+  async function settle(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  it('kills the whole remote process group, not just the recorded pid', async () => {
+    // The claim records the remote *shell*, and signalling only that leaves its children running in
+    // the workspace — observed with a `sleep` that outlived its shell. `kill -TERM -<pgid>` is what
+    // actually ends the job.
+    const leader = groupLeader();
+    const { expr, file } = claimIn('~/code/repo');
+    fs.writeFileSync(file, `r1 ${os.hostname()} 4242 rpid=${String(leader.pid)}`, 'utf8');
+
+    const r = runScript(buildClaimCancelScript(expr, 'r1'));
+    expect(r.stdout).toContain('BICA_SIGNALLED');
+    expect(r.stdout).toContain('BICA_CLEARED');
+
+    await settle();
+    expect(leader.alive()).toBe(false);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('leaves a claim belonging to another run completely alone', async () => {
+    // Scoping to the run id is what stops a cancel racing a run that arrived legitimately in between.
+    const leader = groupLeader();
+    const { expr, file } = claimIn('~/code/repo');
+    const contents = `someone-else ${os.hostname()} 4242 rpid=${String(leader.pid)}`;
+    fs.writeFileSync(file, contents, 'utf8');
+
+    const r = runScript(buildClaimCancelScript(expr, 'r1'));
+    expect(r.stdout).toContain('BICA_NOT_MINE');
+    expect(fs.readFileSync(file, 'utf8')).toBe(contents);
+
+    await settle();
+    expect(leader.alive()).toBe(true);
+    process.kill(-leader.pid, 'SIGKILL');
+  });
+
+  it('cancels whatever holds the claim when no run id is given', async () => {
+    const leader = groupLeader();
+    const { expr, file } = claimIn('~/code/repo');
+    fs.writeFileSync(file, `orphan ${os.hostname()} 4242 rpid=${String(leader.pid)}`, 'utf8');
+
+    expect(runScript(buildClaimCancelScript(expr, null)).stdout).toContain('BICA_SIGNALLED');
+    await settle();
+    expect(leader.alive()).toBe(false);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('clears a claim from a run that never reached the remote', () => {
+    // No `rpid` means the client died between taking the lease and the command starting. There is
+    // nothing to signal, and the claim still has to go — otherwise cancel cannot unwedge it.
+    const { expr, file } = claimIn('~/code/repo');
+    fs.writeFileSync(file, `r1 ${os.hostname()} 4242`, 'utf8');
+
+    const r = runScript(buildClaimCancelScript(expr, 'r1'));
+    expect(r.stdout).toContain('BICA_NEVER_RAN');
+    expect(r.stdout).toContain('BICA_CLEARED');
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('says so rather than failing when there is nothing to cancel', () => {
+    const { expr } = claimIn('~/code/repo');
+    const r = runScript(buildClaimCancelScript(expr, 'r1'));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('BICA_NO_CLAIM');
+  });
+
+  it('reports a group that has already gone, without inventing a signal', () => {
+    // A finished run leaves its `rpid` in the claim. Saying "signalled" there would be a lie, and the
+    // caller uses the difference to describe what it did.
+    const { expr, file } = claimIn('~/code/repo');
+    fs.writeFileSync(file, `r1 ${os.hostname()} 4242 rpid=2147483646 0`, 'utf8');
+    const r = runScript(buildClaimCancelScript(expr, 'r1'));
+    expect(r.stdout).toContain('BICA_GROUP_GONE');
+    expect(r.stdout).toContain('BICA_CLEARED');
   });
 });
 

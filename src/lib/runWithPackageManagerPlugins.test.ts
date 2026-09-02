@@ -14,7 +14,7 @@ import type { PackageManagerStateContext } from '../plugins/types';
 import type { PrepareResult } from '../syncProject';
 
 vi.mock('./runRemote', () => ({
-  runRemoteCommand: vi.fn(() => 0),
+  runRemoteCommand: vi.fn(() => Promise.resolve(0)),
   remoteWorkspaceDirExists: vi.fn(() => true),
   remoteMkdirWorkspace: vi.fn(() => 0),
 }));
@@ -67,7 +67,7 @@ describe('runRemoteCommandWithPmHooks', () => {
 
   beforeEach(() => {
     runRemote.mockReset();
-    runRemote.mockReturnValue(0);
+    runRemote.mockResolvedValue(0);
     dirExists.mockReset();
     dirExists.mockReturnValue(true);
     mkdirRemote.mockReset();

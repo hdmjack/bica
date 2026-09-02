@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import * as path from 'node:path';
 import chalk from 'chalk';
 
@@ -664,7 +665,36 @@ export function buildRemoteRunScript(options: {
  * Defaults to `zsh -lc` so macOS picks up ~/.zprofile / ~/.zshrc (pnpm, nvm, Homebrew, etc.).
  * Non-macOS remotes: set BICA_LOGIN_SHELL=bash (and optionally BICA_LOGIN_FLAGS=-lc).
  */
-export function runRemoteCommand(
+/**
+ * The ssh carrying the run, while one is in flight.
+ *
+ * Kept so a signal handler can reach it. Nothing else may touch it: a second concurrent run in one
+ * process does not exist -- the workspace lease makes sure of that -- so a single slot is honest about
+ * what can be true at once.
+ */
+let liveRemote: ChildProcess | null = null;
+
+/**
+ * Drop the ssh carrying the run, which takes the remote command with it.
+ *
+ * Killing the local ssh closes the connection, sshd hangs up the session, and the remote process group
+ * gets `SIGHUP`. That chain was verified: it is the one teardown that reliably reaches the remote,
+ * which is also why an orphaned ssh is so damaging -- the remote has no other way to learn its caller
+ * is gone.
+ *
+ * Returns whether there was anything to kill, so a caller can tell "torn down" from "already over".
+ */
+export function terminateLiveRemoteCommand(
+  signal: NodeJS.Signals = 'SIGTERM',
+): boolean {
+  if (liveRemote === null || liveRemote.exitCode !== null) {
+    return false;
+  }
+  liveRemote.kill(signal);
+  return true;
+}
+
+export async function runRemoteCommand(
   sshHost: string,
   remoteWorkspacePath: string,
   command: string,
@@ -675,7 +705,7 @@ export function runRemoteCommand(
     /** Shell expression for that lease's file. */
     claimPathExpr?: string;
   },
-): number {
+): Promise<number> {
   const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
 
   const toolingPreamble = remoteLoginPreambleForRun(repoRoot);
@@ -722,11 +752,25 @@ export function runRemoteCommand(
   }
   writeRemoteEnvHintToStderr();
 
-  const result = spawnSync('ssh', sshArgs, {
-    stdio: 'inherit',
-    shell: false,
-  });
-  return result.status ?? 1;
+  // Deliberately async, where this was `spawnSync` for most of its life. `spawnSync` pins the event
+  // loop for the entire run, so a `SIGTERM` handler registered by the CLI could not run until the
+  // remote command had already finished -- the signal would appear to do nothing, then be honoured
+  // minutes late. Handling a caller's timeout at all requires the loop to stay free. `stdio: 'inherit'`
+  // keeps the output path identical to before: the child writes to bica's own descriptors.
+  const child = spawn('ssh', sshArgs, { stdio: 'inherit', shell: false });
+  liveRemote = child;
+  try {
+    return await new Promise<number>((resolve) => {
+      // `error` fires instead of `close` when ssh could not be spawned at all; 1 matches what
+      // `spawnSync` returned for that case.
+      child.on('error', () => resolve(1));
+      child.on('close', (code) => {
+        resolve(code ?? 1);
+      });
+    });
+  } finally {
+    liveRemote = null;
+  }
 }
 
 /**

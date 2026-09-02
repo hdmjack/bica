@@ -230,10 +230,18 @@ lifetimes — the remote one follows the ssh connection — and testing only the
 gets broken over a run that is still executing. See
 [The lease's liveness oracle was the wrong process](#the-leases-liveness-oracle-was-the-wrong-process).
 
+**A run killed by `SIGTERM` or `SIGHUP` tears itself down** — it ends the remote command and releases
+the workspace on the way out — so a caller with a command timeout (a CI step, an agent's shell tool)
+no longer leaves an orphan holding the lease. `SIGKILL` cannot do that, because no handler runs.
+
+**`bica cancel`** ends the run holding this workspace and drops its lease, for that case. It refuses
+when the holder's client is still alive, or when the run belongs to another machine; `--force`
+overrides both. Forcing a live local run signals its *client* and lets it unwind itself, rather than
+clearing the claim out from under it.
+
 **`pkill` cannot stop a run.** The process tree is `zsh` → `bica.cjs` → `tsx cli.ts` → `node` → `ssh`,
 and a pattern matching `bica.cjs run` or `cli.ts run` leaves the `ssh` — and so the remote command —
-running. Kill the remote end first; the exit-98 message prints the exact command when the holder is a
-run from your own machine.
+running. `bica cancel` or a plain `SIGTERM` to the client is the way; a pattern-matched kill is not.
 
 ### Exit codes
 
@@ -241,7 +249,7 @@ None of these are verdicts on your code:
 
 | code | meaning |
 | --- | --- |
-| **98** | refused to start; the workspace is in use. Nothing ran. Wait, use another checkout, or end the named run. |
+| **98** | refused to start; the workspace is in use. Nothing ran. Wait, use another checkout, or `bica cancel`. |
 | **97** | ran, but the workspace was taken part-way through, so the result was discarded. Re-run. |
 | **96** | the remote workspace could not be entered. |
 
@@ -544,6 +552,31 @@ Two things generalise from it:
 The single-command path had also never been given the lease at all — it passed no run id to the
 remote script, so it had neither the pid publication nor the end-of-run "did someone take this
 workspace" check that the multi-command path has had all along. It is the common path.
+
+### Correct refusals still need an exit
+
+The liveness fix above made the lease honour an orphaned run instead of trampling it. That is right,
+and it converted a silent corruption into a visible block — but for a while it was a block with no
+exit. An incident a day later: an agent's shell tool killed a `bica run` at its two-minute timeout,
+the remote suite carried on for six more minutes, and every run in between was refused. The refusal
+named both pids and offered `ssh <host> kill -TERM -<pgid>`, which the sandboxed caller could not
+execute. It waited.
+
+Two things were wrong, and only one of them was the missing command:
+
+- **The remedy a message offers has to be runnable by whoever reads it.** A negative pid asks the
+  reader to know about process groups, and `ssh` is frequently not available to an automated caller.
+  `bica cancel` is now the offer; the raw form stays as a parenthetical.
+- **A signal handler cannot run behind `spawnSync`.** The obvious fix — handle `SIGTERM`, tear down,
+  exit — was unimplementable as written, because the run was a blocking `spawnSync` that pins the
+  event loop for its whole duration. A handler registered against it would not fire until the remote
+  command had already finished, so the caller's timeout would appear to do nothing and then be
+  honoured minutes late. That is worse than the instant death it replaced, and it would have tested
+  green in any test that did not actually signal a live run. The ssh child had to become async first.
+
+The teardown reaches the remote by killing the local `ssh`: the connection drops, sshd hangs up the
+session, and the remote process group gets `SIGHUP`. That chain is the reason an orphaned `ssh` is so
+damaging in the first place — it is the only way the remote ever learns its caller is gone.
 
 ### Measurement traps hit in the course of the above
 

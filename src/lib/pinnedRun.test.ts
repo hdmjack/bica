@@ -111,32 +111,52 @@ describe('acquireWorkspace', () => {
     ).toBe('mine');
   });
 
-  it('tells the user how to end their own run, remote side first', () => {
-    // Killing the local pid alone leaves the remote command running and the workspace still held —
-    // the trap that produced the diverged state in the first place.
-    const mine: ClaimOwner = {
-      runId: 'stuck',
-      host: os.hostname(),
-      pid: process.pid,
-      remotePid: 4242,
-    };
-    const lease = fakeLease({ [WS]: mine }, () => true);
-    expect(() =>
+  const refusalFor = (held: ClaimOwner): string => {
+    const lease = fakeLease({ [WS]: held }, () => true);
+    try {
       acquireWorkspace({
         remoteWorkspacePath: WS,
         runId: 'mine',
         lease,
         sshHost: 'mini',
-      }),
-    ).toThrow(/ssh mini kill -TERM -4242 && kill /);
+      });
+    } catch (e) {
+      return (e as Error).message;
+    }
+    return '';
+  };
+
+  it('points an orphaned lease at `bica cancel`, not at a raw ssh kill', () => {
+    // The message used to print `ssh <host> kill -TERM -<pgid>` and nothing else. It is correct and
+    // nearly unusable: negative pids, and a sandboxed caller often cannot run ssh at all.
+    const orphan: ClaimOwner = {
+      runId: 'stuck',
+      host: os.hostname(),
+      pid: 2147483647,
+      remotePid: 4242,
+    };
+    const msg = refusalFor(orphan);
+    expect(msg).toMatch(/`bica cancel`/);
+    // The by-hand form stays, as a parenthetical, for someone who wants to see what it does.
+    expect(msg).toContain('ssh mini kill -TERM -4242');
   });
 
-  it('does not offer a kill for a run on another machine, whose pids mean nothing here', () => {
+  it('sends a live holder back to its own terminal before offering --force', () => {
+    // Ctrl-C there stops both halves, and it is the only route that lets whoever is watching the
+    // output decide. Cancelling someone's live run from another shell should take more intent.
+    const msg = refusalFor(liveRun('watched'));
+    expect(msg).toMatch(/Ctrl-C/);
+    expect(msg).toMatch(/bica cancel --force/);
+    expect(msg).not.toMatch(/`bica cancel`/);
+  });
+
+  it('offers nothing to act on for a run on another machine', () => {
+    // Its pids mean nothing here, and this host cannot tell whether it is healthy.
     const far: ClaimOwner = { runId: 'far', host: 'other-box', pid: 2147483647 };
     expect(() => acquire(fakeLease({ [WS]: far }))).toThrow(
       /Wait for it to finish, or run from a checkout/,
     );
-    expect(() => acquire(fakeLease({ [WS]: far }))).not.toThrow(/kill/);
+    expect(() => acquire(fakeLease({ [WS]: far }))).not.toThrow(/cancel|kill/);
   });
 
   it('frees the workspace on release', () => {

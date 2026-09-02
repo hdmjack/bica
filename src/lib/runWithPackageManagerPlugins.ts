@@ -202,7 +202,7 @@ export async function runRemoteCommandWithPmHooks(options: {
       // could therefore only ever wait on something that cannot happen, at the cost of a 30-minute
       // stall if its file were ever left behind. Contention on the shared pnpm store between
       // different workspaces is pnpm's own store locking to handle, not bica's.
-      const installCode = runRemoteCommand(
+      const installCode = await runRemoteCommand(
         config.sshHost,
         config.remoteWorkspacePath,
         repairCommand,
@@ -220,7 +220,7 @@ export async function runRemoteCommandWithPmHooks(options: {
     }
   }
 
-  const code = runRemoteCommand(
+  const code = await runRemoteCommand(
     config.sshHost,
     config.remoteWorkspacePath,
     cmdStr,
