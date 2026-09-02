@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest';
 import {
   claimFileName,
   claimIsStale,
+  describeAge,
   describeClaim,
+  parseHeldReport,
   describeSelfAsOwner,
   formatOwner,
   parseOwner,
@@ -154,7 +156,75 @@ describe('claimIsStale', () => {
   });
 });
 
+describe('describeAge', () => {
+  it('reads as a duration at every scale a run reaches', () => {
+    expect(describeAge(0)).toBe('0s');
+    expect(describeAge(45)).toBe('45s');
+    expect(describeAge(60)).toBe('1m');
+    expect(describeAge(6 * 60 + 30)).toBe('6m');
+    expect(describeAge(3600)).toBe('1h0m');
+    expect(describeAge(3600 + 25 * 60)).toBe('1h25m');
+  });
+
+  it('does not invent a duration from a negative difference', () => {
+    // Both readings come from the remote clock, so this should not happen — but a claim written by an
+    // older bica, or one whose stamp was recorded some other way, must not produce "-3s".
+    expect(describeAge(-3)).toBe('an unknown time');
+  });
+});
+
 describe('describeClaim', () => {
+  it('says how long the holder has been running, and what', () => {
+    // "Wait for it to finish" is open-ended without these. One incident waited six minutes on a run
+    // it could not see.
+    const msg = describeClaim({
+      ok: false,
+      heldBy: {
+        runId: 'r1',
+        host: 'mac',
+        pid: 42,
+        remotePid: 7788,
+        startedAt: 1000,
+      },
+      raw: '',
+      now: 1270,
+      command: 'pnpm test:run common/src',
+    });
+    expect(msg).toContain('for 4m');
+    expect(msg).toContain('pnpm test:run common/src');
+  });
+
+  it('omits the age rather than guessing when the claim predates the stamp', () => {
+    const msg = describeClaim({
+      ok: false,
+      heldBy: { runId: 'r1', host: 'mac', pid: 42 },
+      raw: '',
+      now: 1270,
+    });
+    expect(msg).not.toContain('for ');
+    expect(msg).toContain('run r1 from mac');
+  });
+});
+
+describe('parseHeldReport', () => {
+  it('reads the owner, command and clock out of one reply', () => {
+    const r = parseHeldReport('HELD r1 mac 42 t=900 rpid=7788\nNOW 1200\nCMD pnpm lint\n');
+    expect(r.heldBy?.startedAt).toBe(900);
+    expect(r.heldBy?.remotePid).toBe(7788);
+    expect(r.now).toBe(1200);
+    expect(r.command).toBe('pnpm lint');
+  });
+
+  it('still yields the owner when the decorative parts are missing', () => {
+    // A claim taken by an older bica has no stamp and no sidecar. Label-matched parsing degrades to
+    // the owner rather than to nothing.
+    const r = parseHeldReport('HELD r1 mac 42\nNOW 1200\nCMD \n');
+    expect(r.heldBy?.runId).toBe('r1');
+    expect(r.command).toBeUndefined();
+  });
+});
+
+describe('describeClaim, identifiers', () => {
   it('names the holder so the refusal is actionable', () => {
     const msg = describeClaim({
       ok: false,

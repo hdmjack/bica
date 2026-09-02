@@ -46,11 +46,21 @@ export interface ClaimOwner {
    * {@link remoteRunIsAlive}.
    */
   remotePid?: number;
+  /** When the claim was taken, on the remote's clock. Only comparable against a remote reading. */
+  startedAt?: number;
 }
 
 export type ClaimResult =
   | { ok: true }
-  | { ok: false; heldBy: ClaimOwner | null; raw: string };
+  | {
+      ok: false;
+      heldBy: ClaimOwner | null;
+      raw: string;
+      /** The command the holder is running, when it recorded one. */
+      command?: string;
+      /** The remote's clock at the moment of refusal, for an age. */
+      now?: number;
+    };
 
 /** Stable filename for a workspace path: one claim per remote directory. */
 export function claimFileName(remoteWorkspacePath: string): string {
@@ -98,10 +108,20 @@ export function parseOwner(raw: string): ClaimOwner | null {
   if (runId === undefined || host === undefined || !Number.isInteger(parsed)) {
     return null;
   }
-  const remote = fields.slice(3).find((f) => /^rpid=\d+$/.test(f));
+  const tagged = (name: string): number | undefined => {
+    const hit = fields
+      .slice(3)
+      .find((f) => new RegExp(`^${name}=\\d+$`).test(f));
+    return hit === undefined ? undefined : Number(hit.slice(name.length + 1));
+  };
   const owner: ClaimOwner = { runId, host, pid: parsed };
-  if (remote !== undefined) {
-    owner.remotePid = Number(remote.slice('rpid='.length));
+  const remotePid = tagged('rpid');
+  if (remotePid !== undefined) {
+    owner.remotePid = remotePid;
+  }
+  const startedAt = tagged('t');
+  if (startedAt !== undefined) {
+    owner.startedAt = startedAt;
   }
   return owner;
 }
@@ -132,13 +152,35 @@ export function buildClaimAcquireScript(
   claimExpr: string,
   ownerLine: string,
   dir: string,
+  command?: string,
 ): string {
   const payload = shellSingleQuoteRemotePathForSh(ownerLine);
+  // The start stamp and the `NOW` reply are both taken from the *remote's* clock, so an age is a
+  // subtraction of two readings of one clock. Stamping locally and comparing against the remote --
+  // or the reverse -- would put clock skew between two machines into a number presented as elapsed
+  // time, and be wrong by exactly as much as the hosts disagree.
+  const stamp = `printf '%s t=%s' ${payload} "$(date +%s)"`;
+  // The command lives in a sidecar because the claim is one space-delimited line read with `cut`, and
+  // a command contains spaces by nature. Decorative, so it is written after the `ln` that publishes
+  // the claim and its absence is never an error.
+  const writeCommand =
+    command === undefined
+      ? ''
+      : `  printf '%s' ${shellSingleQuoteRemotePathForSh(command)} > ${claimExpr}.cmd 2>/dev/null || true\n`;
   return (
     `mkdir -p ${dir} 2>/dev/null || exit 1\n` +
     `_t=${claimExpr}.tmp.$$\n` +
-    `printf '%s' ${payload} > "$_t" || exit 1\n` +
-    `if ln "$_t" ${claimExpr} 2>/dev/null; then rm -f "$_t"; echo OK; else rm -f "$_t"; printf 'HELD '; cat ${claimExpr} 2>/dev/null; echo; fi\n`
+    `${stamp} > "$_t" || exit 1\n` +
+    `if ln "$_t" ${claimExpr} 2>/dev/null; then\n` +
+    `  rm -f "$_t"\n` +
+    writeCommand +
+    '  echo OK\n' +
+    'else\n' +
+    `  rm -f "$_t"\n` +
+    `  printf 'HELD '; cat ${claimExpr} 2>/dev/null; echo\n` +
+    `  printf 'NOW %s\\n' "$(date +%s)"\n` +
+    `  printf 'CMD '; cat ${claimExpr}.cmd 2>/dev/null; echo\n` +
+    'fi\n'
   );
 }
 
@@ -151,7 +193,7 @@ export function buildClaimReleaseScript(
   runId: string,
 ): string {
   const q = shellSingleQuoteRemotePathForSh(runId);
-  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr}\nexit 0\n`;
+  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr} ${claimExpr}.cmd\nexit 0\n`;
 }
 
 /**
@@ -187,7 +229,7 @@ export function buildClaimCancelScript(
     'else\n' +
     '  echo BICA_NEVER_RAN\n' +
     'fi\n' +
-    `rm -f ${claimExpr}\n` +
+    `rm -f ${claimExpr} ${claimExpr}.cmd\n` +
     'echo BICA_CLEARED\n'
   );
 }
@@ -222,19 +264,30 @@ export function remoteCancelClaim(
   };
 }
 
-/** Who holds the claim right now, without trying to take it. */
+/**
+ * Who holds the claim right now, without trying to take it.
+ *
+ * Reports in the same shape a refused acquire does — owner, command, remote clock — so one
+ * {@link describeClaim} renders both, and `bica cancel` cannot drift into describing a holder
+ * differently from the refusal that sent the user to it.
+ */
 export function remoteReadClaim(
   sshHost: string,
   remoteWorkspacePath: string,
-): ClaimOwner | null {
+): { heldBy: ClaimOwner; raw: string; command?: string; now?: number } | null {
+  const claim = claimPathExpr(remoteWorkspacePath);
   const { status, stdout } = runRemoteScript(
     sshHost,
-    `cat ${claimPathExpr(remoteWorkspacePath)} 2>/dev/null\n`,
+    `[ -f ${claim} ] || exit 0\n` +
+      `printf 'HELD '; cat ${claim} 2>/dev/null; echo\n` +
+      `printf 'NOW %s\\n' "$(date +%s)"\n` +
+      `printf 'CMD '; cat ${claim}.cmd 2>/dev/null; echo\n`,
   );
   if (status !== 0 || stdout === '') {
     return null;
   }
-  return parseOwner(stdout);
+  const report = parseHeldReport(stdout);
+  return report.heldBy === null ? null : { ...report, heldBy: report.heldBy };
 }
 
 /**
@@ -249,11 +302,13 @@ export function remoteAcquireClaim(
   sshHost: string,
   remoteWorkspacePath: string,
   owner: ClaimOwner,
+  command?: string,
 ): ClaimResult {
   const script = buildClaimAcquireScript(
     claimPathExpr(remoteWorkspacePath),
     formatOwner(owner),
     REMOTE_CLAIM_DIR,
+    command,
   );
   const { status, stdout } = runRemoteScript(sshHost, script);
   if (status !== 0) {
@@ -262,8 +317,43 @@ export function remoteAcquireClaim(
   if (stdout.startsWith('OK')) {
     return { ok: true };
   }
-  const raw = stdout.replace(/^HELD\s*/, '');
-  return { ok: false, heldBy: parseOwner(raw), raw };
+  return { ok: false, ...parseHeldReport(stdout) };
+}
+
+/**
+ * Pull the owner, the holder's command and the remote clock out of a `HELD` reply.
+ *
+ * Line-oriented and label-matched rather than positional, so a reply missing the decorative parts —
+ * an older bica's claim, or one whose sidecar never got written — still yields the owner. `raw` stays
+ * exactly the claim line, because that is what the "unidentified run" message falls back to printing.
+ */
+export function parseHeldReport(stdout: string): {
+  heldBy: ClaimOwner | null;
+  raw: string;
+  command?: string;
+  now?: number;
+} {
+  const lines = stdout.split('\n');
+  const pick = (label: string): string | undefined => {
+    const hit = lines.find((l) => l.startsWith(`${label} `) || l === label);
+    return hit === undefined ? undefined : hit.slice(label.length).trim();
+  };
+  const raw = pick('HELD') ?? '';
+  const out: {
+    heldBy: ClaimOwner | null;
+    raw: string;
+    command?: string;
+    now?: number;
+  } = { heldBy: parseOwner(raw), raw };
+  const command = pick('CMD');
+  if (command !== undefined && command !== '') {
+    out.command = command;
+  }
+  const now = Number(pick('NOW'));
+  if (Number.isInteger(now) && now > 0) {
+    out.now = now;
+  }
+  return out;
 }
 
 /**
@@ -385,14 +475,18 @@ export function remoteRunIsAlive(sshHost: string, remotePid: number): boolean {
 
 /** The real lease operations against a host, for callers that are not tests. */
 export function sshLeaseOps(sshHost: string): {
-  acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
+  acquire: (
+    remoteWorkspacePath: string,
+    owner: ClaimOwner,
+    command?: string,
+  ) => ClaimResult;
   break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
   release: (remoteWorkspacePath: string, owner: ClaimOwner) => void;
   remotePidAlive: (pid: number) => boolean;
 } {
   return {
     remotePidAlive: (pid) => remoteRunIsAlive(sshHost, pid),
-    acquire: (p, owner) => remoteAcquireClaim(sshHost, p, owner),
+    acquire: (p, owner, command) => remoteAcquireClaim(sshHost, p, owner, command),
     break: (p, held) => {
       remoteBreakClaim(sshHost, p, held);
     },
@@ -402,7 +496,34 @@ export function sshLeaseOps(sshHost: string): {
   };
 }
 
-/** Human-readable, for the refusal message. */
+/**
+ * Round an elapsed second count to something a person reads as a duration.
+ *
+ * Exported for its own test: the whole value of an age is that it makes waiting an informed choice,
+ * and an age that is subtly wrong is worse than none.
+ */
+export function describeAge(seconds: number): string {
+  if (seconds < 0) {
+    return 'an unknown time';
+  }
+  if (seconds < 60) {
+    return `${String(seconds)}s`;
+  }
+  const mins = Math.floor(seconds / 60);
+  if (mins < 60) {
+    return `${String(mins)}m`;
+  }
+  return `${String(Math.floor(mins / 60))}h${String(mins % 60)}m`;
+}
+
+/**
+ * Human-readable, for the refusal message.
+ *
+ * Carries the age and the command as well as the identifiers. "Wait for it to finish" is an
+ * open-ended instruction without them: an incident spent six minutes waiting on a run it could not
+ * see, with no way to judge whether that meant seconds or an afternoon. `in use for 4m by
+ * pnpm test:run common/src` turns the same wait into a decision.
+ */
 export function describeClaim(result: ClaimResult): string {
   if (result.ok) {
     return 'free';
@@ -410,8 +531,14 @@ export function describeClaim(result: ClaimResult): string {
   if (result.heldBy === null) {
     return result.raw === '' ? 'an unidentified run' : result.raw;
   }
-  const { runId, host, pid, remotePid } = result.heldBy;
+  const { runId, host, pid, remotePid, startedAt } = result.heldBy;
   const remote =
     remotePid === undefined ? '' : `, remote pid ${String(remotePid)}`;
-  return `run ${runId} from ${host} (pid ${String(pid)}${remote})`;
+  const age =
+    startedAt === undefined || result.now === undefined
+      ? ''
+      : ` for ${describeAge(result.now - startedAt)}`;
+  const doing =
+    result.command === undefined ? '' : ` running \`${result.command}\``;
+  return `run ${runId} from ${host}${age}${doing} (pid ${String(pid)}${remote})`;
 }

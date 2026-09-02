@@ -443,12 +443,13 @@ export function remoteReadRecordedExit(
   if (result.status !== 0) {
     return { exitCode: null, mine: false };
   }
-  // Claim layout is `runId host clientPid [rpid=N] [exitCode]`. The exit code is whatever trails the
-  // three mandatory fields and is a bare integer -- reading a fixed index would mistake the remote pid
-  // tag for it, and reading the last field unconditionally would report the client pid as an exit code
-  // for a run that has not finished.
+  // Claim layout is `runId host clientPid [tag=value...] [exitCode]`. The exit code is whatever trails
+  // the three mandatory fields and is a bare integer -- reading a fixed index would mistake a tag for
+  // it, and reading the last field unconditionally would report the client pid as an exit code for a
+  // run that has not finished. Every tag is dropped, not just the ones that exist today: the claim has
+  // grown two of them already, and a filter naming them individually is one that silently rots.
   const fields = result.stdout.trim().split(/\s+/);
-  const trailing = fields.slice(3).filter((f) => !/^rpid=\d+$/.test(f));
+  const trailing = fields.slice(3).filter((f) => !/^[a-z]+=/.test(f));
   const last = trailing[trailing.length - 1];
   const parsed = Number(last);
   return {

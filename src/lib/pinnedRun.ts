@@ -47,7 +47,11 @@ export interface AcquiredWorkspace {
 
 /** Injectable so acquisition can be tested without an SSH host. */
 export interface LeaseOps {
-  acquire: (remoteWorkspacePath: string, owner: ClaimOwner) => ClaimResult;
+  acquire: (
+    remoteWorkspacePath: string,
+    owner: ClaimOwner,
+    command?: string,
+  ) => ClaimResult;
   break: (remoteWorkspacePath: string, held: ClaimOwner) => void;
   release: (remoteWorkspacePath: string, owner: ClaimOwner) => void;
   /** Whether a pid recorded by the remote run script still exists on the remote host. */
@@ -85,10 +89,15 @@ export function acquireWorkspace(options: {
   lease: LeaseOps;
   /** Named in the refusal message so the holder can be ended without guessing the host. */
   sshHost?: string;
+  /**
+   * What this run is about to execute, recorded alongside the claim so the *next* run's refusal can
+   * say what it is waiting on rather than only that it is waiting.
+   */
+  command?: string;
 }): AcquiredWorkspace {
   const { remoteWorkspacePath, lease } = options;
   const owner = describeSelfAsOwner(options.runId);
-  let result = lease.acquire(remoteWorkspacePath, owner);
+  let result = lease.acquire(remoteWorkspacePath, owner, options.command);
   if (
     !result.ok &&
     claimIsStale(result.heldBy, isProcessAlive, lease.remotePidAlive)
@@ -96,7 +105,7 @@ export function acquireWorkspace(options: {
     if (result.heldBy !== null) {
       lease.break(remoteWorkspacePath, result.heldBy);
     }
-    result = lease.acquire(remoteWorkspacePath, owner);
+    result = lease.acquire(remoteWorkspacePath, owner, options.command);
   }
   if (!result.ok) {
     throw new WorkspaceInUseError(

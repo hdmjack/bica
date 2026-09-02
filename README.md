@@ -234,6 +234,12 @@ gets broken over a run that is still executing. See
 the workspace on the way out — so a caller with a command timeout (a CI step, an agent's shell tool)
 no longer leaves an orphan holding the lease. `SIGKILL` cannot do that, because no handler runs.
 
+**The refusal says what it is waiting on.** `in use by run 57074 ... for 1m running \`sleep 200\``.
+The age is the difference between two readings of the *remote's* clock — the claim is stamped there
+and the refusal asks for the time in the same round-trip — so it never folds clock skew between two
+machines into a number presented as elapsed time. The command sits in a sidecar next to the claim,
+because the claim itself is one space-delimited line read with `cut` and a command contains spaces.
+
 **`bica cancel`** ends the run holding this workspace and drops its lease, for that case. It refuses
 when the holder's client is still alive, or when the run belongs to another machine; `--force`
 overrides both. Forcing a live local run signals its *client* and lets it unwind itself, rather than

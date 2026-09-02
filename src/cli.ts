@@ -21,6 +21,7 @@ import {
 } from './lib/pinnedRun';
 import {
   claimPathExpr,
+  describeClaim,
   remoteCancelClaim,
   remoteReadClaim,
   sshLeaseOps,
@@ -402,15 +403,18 @@ async function cmdCancel(options: { force: boolean }): Promise<void> {
   const repoRoot = getRepoRoot();
   const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
 
-  const held = remoteReadClaim(sshHost, remoteWorkspacePath);
-  if (held === null) {
+  const report = remoteReadClaim(sshHost, remoteWorkspacePath);
+  if (report === null) {
     process.stderr.write(
       `${dim('[bica]')} ${dim(`No run holds ${sshHost}:${remoteWorkspacePath}; nothing to cancel.`)}\n`,
     );
     return;
   }
 
-  const who = `run ${held.runId} from ${held.host} (pid ${String(held.pid)}${held.remotePid === undefined ? '' : `, remote pid ${String(held.remotePid)}`})`;
+  const held = report.heldBy;
+  // Rendered by the same helper the refusal uses, so the run the user was told to cancel is described
+  // to them the same way twice.
+  const who = describeClaim({ ok: false, ...report });
 
   if (held.host !== os.hostname() && !options.force) {
     process.stderr.write(
@@ -656,6 +660,7 @@ async function cmdRun(options: {
       runId: `${String(process.pid)}`,
       lease: sshLeaseOps(baseRemote.sshHost),
       sshHost: baseRemote.sshHost,
+      command: options.commands.map((c) => c.join(' ')).join(' -- '),
     });
   } catch (e: unknown) {
     // A busy workspace is not a bica failure and not a verdict on the code. Its own exit code lets a
