@@ -49,7 +49,15 @@ import {
   pushReturnFlowToRemote,
 } from './lib/returnFlow';
 import {
+  collectWriteBack,
+  placeWriteBackMarker,
+  reportWriteBack,
+  writeBackDisabled,
+  writeBackMarkerPath,
+} from './lib/writeBack';
+import {
   openRemoteInteractiveSsh,
+  runRemoteScriptOverStdin,
   terminateLiveRemoteCommand,
 } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
@@ -127,6 +135,19 @@ Running several commands at once
                               there because the pull mirrors with --delete and describes exactly one
                               content state.
 
+Commands that write files
+  The remote gets a copy of your tree, so a command that edits files edits the copy. bica names those
+  files after every run, because a formatter that reports success and changes nothing locally is
+  indistinguishable from one that worked:
+
+    [bica] This command wrote 12 files on the remote. They stay there — your local tree is unchanged:
+
+  --write-back                Copy them home as well. Only the files the run actually changed, only
+                              ones git does not ignore, and never one you edited locally while the
+                              run was out — those are named and left alone, so a run you leave going
+                              in the background cannot overwrite what you are typing. Implies a
+                              pinned run: a live session reverts remote-side writes by design.
+
   The remote workspace is leased for the duration of a run, so a second run — including one from a
   sibling clone that resolves to the same remote path — refuses rather than syncing over the first.
 
@@ -186,11 +207,14 @@ Environment
   BICA_RETURN_FLOW               Set to 0 to disable the post-\`bica run\` rsync that pulls test
                                  snapshots and other whitelisted files back from remote→local
                                  (configure patterns via top-level returnFlow: in bica.yml)
+  BICA_WRITE_BACK                Set to 0 to skip noticing which files a run wrote on the remote
+                                 (and, with --write-back, copying them home)
 
 Globals (parsed from the full argv; not forwarded to the remote — put before "run" for clarity)
   -y, --yes              Auto-confirm prompts in 'bica start'. 'bica run' never prompts.
   --pm <id>              Disambiguate package-manager hooks when several could match argv[0]
   --return-flow          Pull remote artifacts back for a pinned run
+  --write-back           Copy home the files the command wrote (implies a pinned run)
 
 Examples
   bica init
@@ -564,6 +588,21 @@ async function runWithLiveSession(options: {
     }
   }
 
+  // Detection only on this path, never a pull. A live session is `one-way-replica`: it exists to make
+  // the remote an exact copy of local, so it reverts remote-side writes as it notices them. That both
+  // rules out copying them home — the content may already be gone — and leaves the report worth
+  // printing, because a reverted write still moves the file's mtime, so the probe still sees that the
+  // command wrote. `--write-back` pins the tree instead, which is the only way to hold those writes
+  // still long enough to bring them back.
+  const markerPath = writeBackMarkerPath(options.owner.runId);
+  const watchingWrites =
+    !writeBackDisabled() &&
+    placeWriteBackMarker(
+      prep.config.sshHost,
+      markerPath,
+      runRemoteScriptOverStdin,
+    );
+
   let code: number;
   try {
     code = await runRemoteCommandWithPmHooks({
@@ -576,6 +615,22 @@ async function runWithLiveSession(options: {
       assertRunId: options.owner.runId,
       claimPathExpr: claimPathExpr(prep.config.remoteWorkspacePath),
     });
+    if (watchingWrites) {
+      reportWriteBack(
+        collectWriteBack({
+          sshHost: prep.config.sshHost,
+          remoteWorkspacePath: prep.config.remoteWorkspacePath,
+          remoteSyncUrl: prep.remoteSyncUrl,
+          repoRoot: prep.repoRoot,
+          markerPath,
+          ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
+          pushedTreeOid: undefined,
+          pull: false,
+          run: runRemoteScriptOverStdin,
+        }),
+        false,
+      );
+    }
     // Pull whitelisted artifacts (test snapshots, etc.) regardless of remote exit code —
     // failed tests still produce snapshot diffs the user needs locally.
     if (prep.returnFlowPaths.length > 0) {
@@ -638,6 +693,8 @@ export function splitOnDoubleDash(tail: string[]): string[][] {
 async function cmdRun(options: {
   pm: string | undefined;
   returnFlow: boolean;
+  /** `--write-back`: copy home what the command wrote. Forces a pinned run; see runPinned. */
+  writeBack: boolean;
   /** Several commands to run concurrently in one workspace, or one command. */
   commands: string[][];
 }): Promise<void> {
@@ -652,6 +709,11 @@ async function cmdRun(options: {
   // Several commands pin the content: they run for minutes and must all see the same tree, which a
   // live session -- designed to keep pushing later edits -- cannot promise.
   const parallel = options.commands.length > 1;
+  // A single command normally uses the live session, but `--write-back` cannot: `one-way-replica`
+  // makes the remote an exact copy of local, so it reverts the remote-side writes that would be
+  // copied home, and the pinned push is also what supplies the content name the local-edit guard
+  // compares against. Pinning is the mechanism, not a preference, so the flag selects it.
+  const pinned = parallel || options.writeBack;
 
   let acquired;
   try {
@@ -723,13 +785,14 @@ async function cmdRun(options: {
   const prep = prepareSyncProjectFile({ verbose: false });
   let code: number;
   try {
-    if (parallel) {
+    if (pinned) {
       code = await runPinned({
         prep,
         remoteArgv,
         matchArgvs: options.commands,
         pmOverride: pm,
         returnFlowOptIn: options.returnFlow,
+        writeBackOptIn: options.writeBack,
         owner,
         chrome,
       });
@@ -833,6 +896,7 @@ async function main(): Promise<void> {
         await cmdRun({
           pm,
           returnFlow: globals.returnFlow,
+          writeBack: globals.writeBack,
           commands: splitOnDoubleDash(tail),
         });
         break;

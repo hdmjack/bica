@@ -26,6 +26,14 @@ import { pushPinnedWorkingTree } from './pinnedSync';
 import { remoteTrustMiseWorkspace } from './runRemote';
 import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
 import {
+  collectWriteBack,
+  placeWriteBackMarker,
+  reportWriteBack,
+  writeBackDisabled,
+  writeBackMarkerPath,
+} from './writeBack';
+import { runRemoteScriptOverStdin } from './runRemote';
+import {
   ensureRemoteWorkspaceDirectory,
   runRemoteCommandWithPmHooks,
 } from './runWithPackageManagerPlugins';
@@ -217,6 +225,13 @@ export async function runPinned(options: {
   pmOverride: string | undefined;
   /** `--return-flow` was passed. Without it a pinned run does not pull artifacts back. */
   returnFlowOptIn: boolean;
+  /**
+   * `--write-back` was passed: copy home the files the command wrote, not just name them.
+   *
+   * Detection happens either way. Naming what a run changed is the part that closes the silence, and
+   * it is the same probe, so it is not something to opt into.
+   */
+  writeBackOptIn?: boolean;
   /** Lease taken before anything was synced; this run already owns the workspace. */
   owner: ClaimOwner;
   chrome: (text: string) => void;
@@ -300,6 +315,18 @@ export async function runPinned(options: {
     pushReturnFlowToRemote(prep);
   }
 
+  // Placed after every pre-run push, so the files those put there are not mistaken for the command's
+  // own writes. A marker that could not be created disables detection for this run rather than
+  // producing a list that means something else.
+  const markerPath = writeBackMarkerPath(runId);
+  const watchingWrites =
+    !writeBackDisabled() &&
+    placeWriteBackMarker(
+      prep.config.sshHost,
+      markerPath,
+      runRemoteScriptOverStdin,
+    );
+
   const code = await runRemoteCommandWithPmHooks({
     prep,
     remoteArgv: options.remoteArgv,
@@ -338,6 +365,25 @@ export async function runPinned(options: {
         'The lease exists to prevent this, so it is worth reporting; the point of the check is that a\n' +
         'lease failure costs you a re-run rather than a wrong answer.\n',
     );
+  }
+
+  // Skipped after a content mismatch on purpose. That workspace was replaced by another run part-way
+  // through, so its files describe a mixture of two trees; copying any of them home would put content
+  // this run never verified into the local checkout, which is worse than the silence being fixed here.
+  if (watchingWrites && code !== REMOTE_CONTENT_MISMATCH_EXIT) {
+    const outcome = collectWriteBack({
+      sshHost: prep.config.sshHost,
+      remoteWorkspacePath: prep.config.remoteWorkspacePath,
+      remoteSyncUrl: prep.remoteSyncUrl,
+      repoRoot: prep.repoRoot,
+      markerPath,
+      // Return-flow paths have their own transport; reporting them here would name the same files twice.
+      ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
+      pushedTreeOid: push.treeOidBefore,
+      pull: options.writeBackOptIn === true,
+      run: runRemoteScriptOverStdin,
+    });
+    reportWriteBack(outcome, options.writeBackOptIn === true);
   }
 
   if (returnFlow && prep.returnFlowPaths.length > 0) {

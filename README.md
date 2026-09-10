@@ -8,7 +8,7 @@ This tree is designed to live in **its own repository**. The copy under `web-app
 
 Remote commands **must** include the `run` subcommand (e.g. **`bica run pnpm test`**). There is no shorthand like `bica pnpm test`.
 
-Only the word `run` is interpreted locally. **Every token after `run` is argv on the remote** (POSIX-quoted, no shell injection). Globals `-y` / `--yes`, `--pm <id>` and `--return-flow` are parsed from the **whole** command line and are not sent to the remote — put them **before** `run` for clarity (e.g. `bica --yes run pnpm validate`).
+Only the word `run` is interpreted locally. **Every token after `run` is argv on the remote** (POSIX-quoted, no shell injection). Globals `-y` / `--yes`, `--pm <id>`, `--return-flow` and `--write-back` are parsed from the **whole** command line and are not sent to the remote — put them **before** `run` for clarity (e.g. `bica --yes run pnpm validate`).
 
 Several commands can run concurrently in one workspace — see [Running several commands at once](#running-several-commands-at-once).
 
@@ -173,6 +173,84 @@ returnFlow:
 ```
 
 Set `paths: []` to disable. Whitelisted patterns are also auto-added to the forward session's `sync.ignore.paths`, so a stale local snapshot will not overwrite the fresh remote one. Disable per-run with `BICA_RETURN_FLOW=0`. Requires `rsync` on PATH; if missing, bica prints a warning and skips the pull.
+
+### Commands that write files (`--write-back`)
+
+The remote gets a *copy* of your tree, so a command that edits files edits the copy. Its output comes
+back; its edits do not. `pnpm format` is the case that bites: it prints every path with a duration,
+exits 0, and leaves your tree exactly as it was — indistinguishable from having worked, until CI's
+lint job fails on Prettier violations in files you believed you had formatted.
+
+**Every run now says what it wrote.** After the command, bica asks the remote which files changed
+since the run started and names them:
+
+```
+[bica] This command wrote 12 files on the remote. They stay there — your local tree is unchanged:
+    apps/web/src/App.tsx
+    apps/web/src/routes/index.tsx
+    …and 10 more
+    Re-run with --write-back to copy them home, or run the command locally.
+```
+
+**`--write-back` copies them home too:**
+
+```bash
+bica run --write-back pnpm format
+```
+
+Only the files the run actually changed are transferred — the list is enumerated, not pattern-matched,
+so nothing can match more than was asked for, and there is no `--delete`.
+
+Three things bound what can land in your tree:
+
+- **Files git ignores are dropped.** `node_modules`, `dist` and the rest are ignored for the repo's own
+  reasons, so the list of things that must never cross the wire is maintained by the repo rather than
+  by bica. Trees in `sync.ignore.paths`, plus `.git` and `.bica`, are pruned before the walk even
+  reaches them.
+- **A file you edited locally while the run was out is never overwritten.** The push names the exact
+  content it shipped (a git tree OID), so bica can tell an untouched file from one you have since
+  typed in. Files that moved are named and left alone:
+
+  ```
+  [bica] Left 1 file(s) alone: you changed them locally while the run was out, so the remote version
+      would overwrite your edits:
+        apps/web/src/App.tsx
+  ```
+
+  This is what makes it safe to leave a run going in the background and keep working. If bica cannot
+  establish a baseline — git could not name the tree — it refuses every file rather than guessing.
+- **A discarded run writes nothing back.** After exit 97 (the workspace was taken part-way through)
+  the remote files describe a mixture of two trees, so none of them are copied home.
+
+`--write-back` implies a pinned run, even for a single command. A live Mutagen session is
+`one-way-replica`: it exists to make the remote an exact copy of local, so it reverts remote-side
+writes as it notices them. Pinning is what holds those writes still long enough to bring them back —
+it is the mechanism, not a preference. (Detection still runs on the live path, because a reverted write
+moves the file's mtime, so bica can still tell you it happened.)
+
+Disable both the detection and the copy with `BICA_WRITE_BACK=0`.
+
+#### Why not simply mirror everything back
+
+Return-flow answers "which paths does the remote own" with a whitelist, and the obvious extension is to
+invert it into a denylist and mirror everything else back. That is the wrong axis, for three reasons
+that are properties of the whitelist rather than of the patterns in it:
+
+- **The whitelist is what makes `--delete` safe.** Return-flow's trailing `- *` protects every
+  non-matching local file from deletion, which is how an obsolete snapshot can be pruned without
+  endangering anything else. A denylist plus `--delete` means "remove any local file the remote does not
+  have" — and the remote deliberately does not have plenty: gitignored files, your `.env`, everything in
+  `sync.ignore.paths`.
+- **They fail in opposite directions.** A missing whitelist entry means a snapshot does not come back,
+  which shows up as a test diff you notice. A missing denylist entry means the remote's `node_modules`,
+  `.next` or `target` crosses the wire into your tree — unbounded, and growing with every ecosystem bica
+  supports.
+- **A whitelisted path is also removed from the forward sync**, which is how "the remote owns this file"
+  is expressed. A denylist names everything, so it cannot make that claim about anything.
+
+Deciding by *what the run changed* is bounded by what actually happened rather than by a pattern
+someone guessed at, and detecting the change is the same work as reporting it — which is why the report
+is on by default and the copy home is opt-in.
 
 ### Git-dependent commands (`--changed`, `--since`)
 

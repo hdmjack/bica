@@ -11,6 +11,13 @@ export interface ParsedGlobals {
   pm: string | undefined;
   /** `--return-flow`: pull remote artifacts back for a pinned run. */
   returnFlow: boolean;
+  /**
+   * `--write-back`: copy home the files the command wrote, rather than only naming them.
+   *
+   * Implies a pinned run. A live session is designed to keep the remote an exact copy of local, so it
+   * reverts the very writes this would be copying back; pinning is what holds them still.
+   */
+  writeBack: boolean;
   rest: string[];
 }
 
@@ -30,12 +37,15 @@ export function parseArgs(argv: string[]): ParsedGlobals {
   let autoYes = false;
   let pm: string | undefined;
   let returnFlow = false;
+  let writeBack = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--yes' || a === '-y') {
       autoYes = true;
     } else if (a === '--return-flow') {
       returnFlow = true;
+    } else if (a === '--write-back') {
+      writeBack = true;
     } else if (a === '--pm') {
       pm = requireValue(argv, i, '--pm', 'a package-manager plugin id (e.g. pnpm)');
       i += 1;
@@ -43,5 +53,5 @@ export function parseArgs(argv: string[]): ParsedGlobals {
       rest.push(a);
     }
   }
-  return { autoYes, pm, returnFlow, rest };
+  return { autoYes, pm, returnFlow, writeBack, rest };
 }
