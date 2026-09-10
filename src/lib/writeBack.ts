@@ -148,14 +148,21 @@ export type RemoteScriptRunner = (
   script: string,
 ) => { status: number; stdout: string; stderr: string };
 
-/** Parse the probe's stdout into workspace-relative paths. */
+/**
+ * Parse the probe's stdout into workspace-relative paths, sorted.
+ *
+ * `find` emits in traversal order, which puts a directory's files next to each other but is otherwise
+ * arbitrary — and the report caps the list, so traversal order decides which paths a reader is shown.
+ * Sorting makes that a stable, guessable set rather than a different ten each run.
+ */
 export function parseChangedPaths(stdout: string): string[] {
   return stdout
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l !== '')
     .map((l) => l.replace(/^\.\//, ''))
-    .filter((l) => l !== '');
+    .filter((l) => l !== '')
+    .sort((a, b) => a.localeCompare(b));
 }
 
 /**

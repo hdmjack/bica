@@ -120,6 +120,14 @@ describe('parseChangedPaths', () => {
       'src/b.ts',
     ]);
   });
+
+  it('sorts, so the capped report shows a stable set rather than traversal order', () => {
+    expect(parseChangedPaths('./src/z.ts\n./src/a.ts\n./pkg/m.ts\n')).toEqual([
+      'pkg/m.ts',
+      'src/a.ts',
+      'src/z.ts',
+    ]);
+  });
 });
 
 describe('dropIgnoredPaths', () => {
