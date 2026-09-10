@@ -22,6 +22,7 @@ import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
 } from './runRemote';
+import { gitDependentHint } from './gitDependentHint';
 import { pushPinnedWorkingTree } from './pinnedSync';
 import { remoteTrustMiseWorkspace } from './runRemote';
 import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
@@ -303,7 +304,8 @@ export async function runPinned(options: {
     }
   }
 
-  if (resolveBicaPluginConfig(prep.repoRoot).syncGit) {
+  const { syncGit } = resolveBicaPluginConfig(prep.repoRoot);
+  if (syncGit) {
     chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     pushGitToRemote(prep);
   }
@@ -337,6 +339,15 @@ export async function runPinned(options: {
     assertRunId: runId,
     claimPathExpr: claimExpr,
   });
+
+  const gitHint = gitDependentHint({
+    argvs: options.matchArgvs ?? [options.remoteArgv],
+    exitCode: code,
+    syncGit,
+  });
+  if (gitHint !== undefined) {
+    process.stderr.write(`${warn('[bica]')} ${gitHint}\n`);
+  }
 
   // 255 is ambiguous: ssh uses it for its own transport failures, and a command may legitimately exit
   // 255. The recorded exit code settles which it was, as a fact rather than a guess.

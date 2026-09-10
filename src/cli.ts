@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 import { parseArgs } from './cliArgs';
 import { isProcessAlive } from './lib/fileLock';
+import { gitDependentHint } from './lib/gitDependentHint';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import {
   acquireWorkspace,
@@ -565,7 +566,8 @@ async function runWithLiveSession(options: {
   // When git.sync is enabled, mirror local .git to the remote so git-dependent commands
   // (e.g. `vitest --changed`, `jest --changed`) resolve the same history/HEAD/refs as local.
   // .git is intentionally Mutagen-ignored; this one-shot rsync avoids continuous index.lock churn.
-  if (resolveBicaPluginConfig(repoRoot).syncGit) {
+  const { syncGit } = resolveBicaPluginConfig(repoRoot);
+  if (syncGit) {
     chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     const gitPush = pushGitToRemote(prep);
     if (gitPush.ran && gitPush.exitCode === 0) {
@@ -615,6 +617,14 @@ async function runWithLiveSession(options: {
       assertRunId: options.owner.runId,
       claimPathExpr: claimPathExpr(prep.config.remoteWorkspacePath),
     });
+    const gitHint = gitDependentHint({
+      argvs: options.matchArgvs ?? [tail],
+      exitCode: code,
+      syncGit,
+    });
+    if (gitHint !== undefined) {
+      process.stderr.write(`${warn('[bica]')} ${gitHint}\n`);
+    }
     if (watchingWrites) {
       reportWriteBack(
         collectWriteBack({

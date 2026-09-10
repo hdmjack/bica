@@ -265,6 +265,14 @@ git:
 
 When enabled, `bica run` does a one-shot `rsync -az --delete` of local `.git` → remote right before the command, mirroring history/HEAD/refs exactly. Keep `.git` in `sync.ignore.paths` (this is a one-shot rsync, not a continuous Mutagen watch — avoids `index.lock` churn). Toggle per-run with `BICA_GIT_SYNC=1`/`0`. Requires `rsync` on PATH; if missing, bica warns and skips.
 
+**When it is off, bica says so at the point it bites.** git's own error is "not a git repository", printed
+by the tool that shelled out to it and usually several lines into that tool's output — which reads as a
+broken checkout rather than a setting nobody turned on. So when a run fails, `git.sync` is off, and the
+command was one that resolves refs (`git …`, `--changed`, `--since`, `--changed-since`, a
+`--filter=...[ref]`, or a script name ending in `:changed`), bica adds a line naming the command and this
+setting. It stays quiet otherwise: a note about repository metadata under every failing test run would
+train you to skip the whole channel.
+
 ## Running several commands at once
 
 Separate commands with `--`. They run concurrently in one remote workspace, against one copy of the
