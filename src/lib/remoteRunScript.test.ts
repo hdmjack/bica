@@ -4,7 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { buildRemoteRunScript, REMOTE_CD_FAILED_EXIT } from './runRemote';
+import {
+  buildRemoteRunScript,
+  REMOTE_CD_FAILED_EXIT,
+  wrapCommandToDieWithConnection,
+} from './runRemote';
 
 // `cdExpr` includes the `cd`, matching what the caller passes.
 const BASE = {
@@ -175,5 +179,25 @@ describe('the end-of-run lease check, executed', () => {
     const nasty = "abc';touch(pwned);echo'";
     expect(run(nasty, `${nasty} thishost 1`, 'true')).toBe(0);
     expect(fs.existsSync(path.join(dir, 'pwned'))).toBe(false);
+  });
+});
+
+describe('wrapCommandToDieWithConnection', () => {
+  it('runs the command in the background with a watchdog on stdin', () => {
+    const script = wrapCommandToDieWithConnection("'pnpm' 'serve'");
+    expect(script).toContain("'pnpm' 'serve' &");
+    expect(script).toContain('cat > /dev/null');
+    expect(script).toContain('kill -TERM "$_bica_cmd"');
+  });
+
+  it("leaves $? as the command's own status for the enclosing script", () => {
+    const script = wrapCommandToDieWithConnection('serve');
+    expect(script.trimEnd().endsWith('(exit "$_bica_ec")')).toBe(true);
+  });
+
+  it('waits on the command, not on the watchdog', () => {
+    const script = wrapCommandToDieWithConnection('serve');
+    expect(script).toContain('wait "$_bica_cmd"');
+    expect(script).not.toContain('wait "$_bica_watch"');
   });
 });

@@ -661,6 +661,36 @@ export function buildRemoteRunScript(options: {
 }
 
 /**
+ * Wrap a command so that losing the ssh connection kills it.
+ *
+ * Without this, a silent long-lived process survives its own tunnel. Dropping the local ssh closes the
+ * connection, but with no PTY in play sshd sends no `SIGHUP` to the remote session: a command normally
+ * learns its caller is gone by writing to a closed descriptor and taking `SIGPIPE`. Test suites print
+ * constantly and so die immediately, which is why `bica run` never needed this. A socket server that
+ * prints one line at startup and then waits has nothing to write, so it is reparented to init and runs
+ * until somebody logs in to kill it -- holding its socket, so the next tunnel binds a second one and
+ * the client talks to whichever it finds.
+ *
+ * `cat` on stdin is the watchdog. The caller holds that pipe open and writes nothing, so the read
+ * blocks for exactly as long as the connection lives and returns the moment it does not.
+ *
+ * The last statement is a subshell `exit` rather than a plain one: it leaves `$?` as the command's own
+ * status for whatever the enclosing script appends, instead of ending the script here.
+ */
+export function wrapCommandToDieWithConnection(command: string): string {
+  return shBlock(
+    `${command} &`,
+    '_bica_cmd=$!',
+    '( cat > /dev/null 2>&1; kill -TERM "$_bica_cmd" 2>/dev/null ) &',
+    '_bica_watch=$!',
+    'wait "$_bica_cmd"',
+    '_bica_ec=$?',
+    'kill "$_bica_watch" 2>/dev/null',
+    '(exit "$_bica_ec")',
+  );
+}
+
+/**
  * Runs a command on the remote via SSH.
  *
  * Defaults to `zsh -lc` so macOS picks up ~/.zprofile / ~/.zshrc (pnpm, nvm, Homebrew, etc.).
@@ -705,6 +735,12 @@ export async function runRemoteCommand(
     assertRunId?: string;
     /** Shell expression for that lease's file. */
     claimPathExpr?: string;
+    /**
+     * Keep a pipe on the command's stdin and have the remote kill it when that pipe closes, so a
+     * process that outlives the connection cannot be left behind. For commands that stay up; a
+     * command that finishes on its own does not need it.
+     */
+    dieWithConnection?: boolean;
   },
 ): Promise<number> {
   const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
@@ -725,10 +761,13 @@ export async function runRemoteCommand(
     'fi',
   );
 
+  const dieWithConnection = options?.dieWithConnection === true;
   const remoteScript = buildRemoteRunScript({
     preamble: `${toolingPreamble}${nonMiseFallbacks}`,
     cdExpr: cd,
-    command,
+    command: dieWithConnection
+      ? wrapCommandToDieWithConnection(command)
+      : command,
     runId: options?.assertRunId,
     claimPathExpr: options?.claimPathExpr,
   });
@@ -738,7 +777,10 @@ export async function runRemoteCommand(
 
   // Only force a PTY for a genuine interactive terminal. When piped/redirected, `-T` keeps
   // remote tool output clean (no ANSI color, no `\r` spinners, line-buffered).
-  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  // Never a PTY when the watchdog is in play: `cat` would read the terminal rather than the pipe, so
+  // the signal it waits for would be a keystroke instead of the connection ending.
+  const interactive =
+    !dieWithConnection && Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const sshArgs = buildRunRemoteSshArgs({
     interactive,
     sshHost,
@@ -758,7 +800,14 @@ export async function runRemoteCommand(
   // remote command had already finished -- the signal would appear to do nothing, then be honoured
   // minutes late. Handling a caller's timeout at all requires the loop to stay free. `stdio: 'inherit'`
   // keeps the output path identical to before: the child writes to bica's own descriptors.
-  const child = spawn('ssh', sshArgs, { stdio: 'inherit', shell: false });
+  const child = spawn('ssh', sshArgs, {
+    // The pipe is the watchdog's lifeline: held open and never written, it closes only when this
+    // process does, which is precisely when the remote command should stop.
+    stdio: dieWithConnection
+      ? ['pipe', 'inherit', 'inherit']
+      : 'inherit',
+    shell: false,
+  });
   liveRemote = child;
   try {
     return await new Promise<number>((resolve) => {

@@ -14,6 +14,7 @@ import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 import { parseArgs } from './cliArgs';
 import { isProcessAlive } from './lib/fileLock';
 import { gitDependentHint } from './lib/gitDependentHint';
+import { parseTunnelArgs, runTunnel } from './lib/tunnel';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import {
   acquireWorkspace,
@@ -95,6 +96,7 @@ const COMMANDS_NEEDING_BICA_SPEC = new Set([
   'plugins',
   'ssh',
   'run',
+  'tunnel',
   'cancel',
 ]);
 
@@ -177,6 +179,18 @@ File sync
                               the next 'bica run'. A multi-command run uses no session at all, so it
                               never disturbs one.
 
+Long-lived remote processes
+  tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>] -- <command> [args...]
+                              Start <command> on the remote (same workspace and login preamble as
+                              'bica run'), wait for it to create <remote path>, then forward that
+                              socket to <local path> over ssh. Local clients connect to a path and
+                              need to know nothing about the remote. Holds no workspace lease, so
+                              'bica run' keeps working while a tunnel is up -- and takes no sync of
+                              its own, so the process reads whatever the last run synced. Ends when
+                              either side does, and unlinks the local socket on the way out so a
+                              client sees "no server" rather than a path that cannot answer.
+                              Needs OpenSSH 6.7+ on both ends (stream-local forwarding).
+
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
                               be active for this workspace). No args = all active.
@@ -230,6 +244,9 @@ Examples
 
   # One command
   bica run pnpm test:run
+
+  # A parser that stays up on the remote, reachable at a local socket path
+  bica tunnel --local=/tmp/parser.sock --remote=/tmp/parser.sock -- ./serve-parser
 `);
 }
 
@@ -408,6 +425,29 @@ async function cmdSsh(): Promise<void> {
   const code = openRemoteInteractiveSsh(sshHost, remoteWorkspacePath);
   // Set exitCode rather than process.exit() so any buffered stdout/stderr flushes before exit.
   process.exitCode = code;
+}
+
+/**
+ * Serve a long-lived remote process over a forwarded Unix socket.
+ *
+ * The client on this side is not told anything: it connects to a path, as it always did, and the work
+ * happens on the remote. That is the whole point of forwarding the socket rather than a port -- no
+ * caller has to learn a host, and a tunnel that is not running simply means the path is absent, which
+ * every such client already handles by starting something locally.
+ */
+async function cmdTunnel(tail: string[]): Promise<void> {
+  const args = parseTunnelArgs(tail);
+  await ensureRemoteSshHostFromEnvOrPrompt();
+  const repoRoot = getRepoRoot();
+  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  // No sync of its own: the tree the remote process reads is whatever the last `bica run` put there,
+  // and syncing here would need the lease this command deliberately does not take.
+  process.exitCode = await runTunnel({
+    repoRoot,
+    sshHost,
+    remoteWorkspacePath,
+    args,
+  });
 }
 
 /**
@@ -892,6 +932,9 @@ async function main(): Promise<void> {
         break;
       case 'ssh':
         await cmdSsh();
+        break;
+      case 'tunnel':
+        await cmdTunnel(tail);
         break;
       case 'cancel': {
         const force = tail.includes('--force');

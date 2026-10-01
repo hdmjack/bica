@@ -354,6 +354,56 @@ file:
 [bica] workspace mini:~/code/repo  run 40812
 ```
 
+## `bica tunnel` — a process that stays, reachable at a local path
+
+`bica run` is for commands that finish. `bica tunnel` is for the ones that stay: it starts a process on
+the remote, waits for the Unix socket that process creates, and forwards that socket to a path on your
+laptop.
+
+```bash
+bica tunnel --local=/tmp/parser.sock --remote=/tmp/parser.sock -- ./serve-parser --socket /tmp/parser.sock
+```
+
+Everything before `--` is bica's; everything after is argv on the remote, run in the workspace under the
+same login preamble `bica run` uses. The `--` is required rather than inferred, because the remote
+command usually has flags of its own.
+
+| Flag | Meaning |
+| --- | --- |
+| `--local=<path>` | Absolute path for the socket on this machine. A stale socket there is replaced; a regular file or directory is refused rather than deleted. |
+| `--remote=<path>` | Where the remote process will create its socket. `~/…` is expanded against the remote's `$HOME`. |
+| `--ready-timeout=<seconds>` | How long to wait for that socket before giving up (default 60). |
+
+**The client is told nothing.** Forwarding the socket rather than a port is what makes this worth
+having: a client connects to a path, exactly as it did when the server was local, and does not need to
+learn a host, a port or a tunnel. The one invariant that matters is that the local socket exists only
+while something can actually answer on it — clients of this shape read "the path is absent" as "start a
+local one", and that fallback is only correct if bica never leaves a socket behind. So the local socket
+is bound only after the remote one exists, and unlinked when either end goes away.
+
+**It holds no workspace lease, and syncs nothing.** A lease held for the hours a tunnel lives would
+block every `bica run` from the same checkout, including the test runs that are the reason for wanting
+the tunnel in the first place. The tunnel therefore reads whatever the last run synced. That is safe for
+the case it was built for because the client names its socket after a digest of the server's own source:
+change the source, and the client asks for a socket the old server is not serving, so a stale server
+stops being found rather than answering out of date.
+
+**Both ends take the other down.** When the remote process exits — a server with an idle timeout will —
+the forward closes and the local socket goes. On `Ctrl+C`, `SIGTERM` or `SIGHUP`, the remote process is
+stopped before bica exits.
+
+That last part needs more than closing the connection. A command normally learns its caller is gone by
+writing to a closed descriptor and taking `SIGPIPE`, which is why `bica run`'s chatty test suites die
+promptly; with no PTY in play, sshd sends no `SIGHUP`. A socket server that prints one line and then
+waits has nothing to write, so it would be reparented to init and keep its socket — and the next tunnel
+would bind a second server beside it. So a tunnel's remote command is wrapped in a watchdog that reads
+from a pipe bica holds open and kills the command when that read returns, which happens exactly when the
+connection ends.
+
+Needs OpenSSH 6.7 or later at both ends (stream-local forwarding). A forward that cannot be established
+fails the whole command rather than connecting without it, since a tunnel that is silently absent looks
+to a client exactly like one that was never started.
+
 ## Environment
 
 | Variable | Purpose |
