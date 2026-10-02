@@ -388,8 +388,22 @@ the case it was built for because the client names its socket after a digest of 
 change the source, and the client asks for a socket the old server is not serving, so a stale server
 stops being found rather than answering out of date.
 
-**Both ends take the other down.** When the remote process exits — a server with an idle timeout will —
-the forward closes and the local socket goes. On `Ctrl+C`, `SIGTERM` or `SIGHUP`, the remote process is
+**Readiness is an answer, not a file.** A socket file at the remote path proves nothing: a server that
+loads a language model takes twenty seconds to bind, and a file left by a previous server that was
+killed sits at the path for the whole of that time. So the wait ends on a real `connect()` succeeding,
+and `--ready-timeout` governs that. Judging by the file instead meant the forward went up early and the
+first request died with `connect failed` — a failure that looks like the tunnel's fault and is not.
+
+**A dropped connection reconnects; it does not end the tunnel.** Resets happen on a busy remote, and a
+tunnel is something you leave running for hours beside work making its own ssh connections. When only
+the forward drops, bica re-establishes it and checks the server is still answering — no restart, so
+nothing reloads. When the server went with it, bica starts it again. Backoff doubles from one second to
+thirty, and ten attempts in a row that never serve a request end the tunnel rather than retrying a
+command that cannot work. Throughout, the local socket is removed whenever nothing is behind it, which
+is what lets a client fall back to a local server instead of failing against a dead path.
+
+**Both ends take the other down.** When the remote process exits of its own accord — a server with an
+idle timeout will — the tunnel closes with it. On `Ctrl+C`, `SIGTERM` or `SIGHUP`, the remote process is
 stopped before bica exits.
 
 That last part needs more than closing the connection. A command normally learns its caller is gone by

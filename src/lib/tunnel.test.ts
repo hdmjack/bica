@@ -112,10 +112,25 @@ describe('buildForwardSshArgs', () => {
 });
 
 describe('buildSocketReadyScript', () => {
-  it('waits for a socket, not merely for something at the path', () => {
+  it('waits for an answer, not merely for a file at the path', () => {
     const script = buildSocketReadyScript('/srv/b.sock', 30);
-    expect(script).toContain("[ ! -S '/srv/b.sock' ]");
-    expect(script).not.toContain('-e ');
+    expect(script).toContain("[ -S '/srv/b.sock' ] || return 1");
+    expect(script).toContain('s.connect(sys.argv[1])');
+    expect(script).toContain("python3 -c '");
+  });
+
+  it('falls back to the file check where no interpreter can connect', () => {
+    expect(buildSocketReadyScript('/srv/b.sock', 30)).toContain(
+      'command -v python3 >/dev/null 2>&1 || return 0',
+    );
+  });
+
+  it('keeps the connect program free of single quotes, which would end its argument', () => {
+    const script = buildSocketReadyScript('/srv/b.sock', 30);
+    const program = script.slice(
+      script.indexOf("python3 -c '") + "python3 -c '".length,
+    );
+    expect(program.slice(0, program.indexOf("'"))).toContain('sys.exit(1)');
   });
 
   it('quotes the path and gives the loop a deadline', () => {

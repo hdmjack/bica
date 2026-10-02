@@ -183,8 +183,11 @@ Long-lived remote processes
   tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>] -- <command> [args...]
                               Start <command> on the remote (same workspace and login preamble as
                               'bica run'), wait for it to create <remote path>, then forward that
-                              socket to <local path> over ssh. Local clients connect to a path and
-                              need to know nothing about the remote. Holds no workspace lease, so
+                              socket to <local path> over ssh. Readiness is a real connect, not the
+                              socket file appearing, so a slow-starting server is waited for rather
+                              than forwarded to early. A dropped connection reconnects with backoff.
+                              Local clients connect to a path and need to know nothing about the
+                              remote. Holds no workspace lease, so
                               'bica run' keeps working while a tunnel is up -- and takes no sync of
                               its own, so the process reads whatever the last run synced. Ends when
                               either side does, and unlinks the local socket on the way out so a
