@@ -418,6 +418,57 @@ Needs OpenSSH 6.7 or later at both ends (stream-local forwarding). A forward tha
 fails the whole command rather than connecting without it, since a tunnel that is silently absent looks
 to a client exactly like one that was never started.
 
+### The socket is bica's, not ssh's
+
+ssh used to bind the path the client knew about, which tied that path's existence to one particular
+remote process. bica now listens there itself and forwards to a private socket underneath. The client
+sees no difference — it connects to a path — but the path can now outlive what is behind it, which is
+what the restart modes need. The extra hop is a local socket pair; against a model that takes tens of
+milliseconds to answer it is not measurable.
+
+### Restarting (`--restart`)
+
+| Mode | When the remote command exits on its own |
+| --- | --- |
+| `never` (default) | The tunnel closes with it. |
+| `on-exit` | It is started again at once, with backoff if it keeps failing. |
+| `on-demand` | The socket stays bound and the command is started again when the next client connects. |
+
+**Readiness costs the server one empty connection.** The probe connects and hangs up without asking
+anything — the same thing the server sees when a client is interrupted — so a server that treats an
+empty request as fatal will be killed by its own readiness check. Servers that read a request and move
+on are unaffected; one that crashes on an empty read needs fixing on its own account, since a client
+can produce that at any time.
+
+**`on-demand` is the mode for a server with an idle timeout.** Such a server exits precisely so its
+memory goes back; restarting it eagerly undoes that, and letting the tunnel close means every later
+client finds nothing. On demand, the first client after an exit waits for a start and the rest are
+collapsed onto that same start — ten clients arriving during a model load produce one server, not ten
+commands racing for the same remote path.
+
+That matters more now that clients report a missing socket rather than quietly doing the work locally:
+an absent path is no longer a silent fallback, it is a skipped check.
+
+### Detaching, listing, stopping
+
+```bash
+bica tunnel --local=/tmp/parser.sock --remote=/tmp/parser.sock \
+  --restart=on-demand --detach -- ./serve-parser
+bica tunnel --list
+bica tunnel --stop /tmp/parser.sock
+```
+
+`--detach` re-executes bica itself in the background with the same arguments minus the flag, so the
+detached tunnel is the same code path and not a second one; its output goes to a log beside its record,
+and the parent waits for the child to record itself before reporting it as up. That matters where a
+shell or an agent harness kills its background jobs on a timer — a tunnel started this way is not one
+of them.
+
+**One tunnel per local socket.** Each records itself under `~/.bica/tunnels`, keyed by a digest of the
+path it serves, and a second start against a live one is refused with that tunnel named rather than
+quietly taking its clients. A record whose process is gone is litter rather than a conflict: it is
+taken over, with a line saying so, because otherwise every hard kill would need a manual rescue.
+
 ## Environment
 
 | Variable | Purpose |

@@ -3,6 +3,8 @@ import type { ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import * as net from 'node:net';
+
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
 import { dim, warn } from '../terminalStyle';
 import {
@@ -11,6 +13,13 @@ import {
   terminateLiveRemoteCommand,
   tryResolveRemoteWorkspaceAbsolutePath,
 } from './runRemote';
+import {
+  describeTunnel,
+  forwardSocketPathFor,
+  removeTunnelRecord,
+  writeTunnelRecord,
+} from './tunnelState';
+import type { RestartMode } from './tunnelState';
 
 /**
  * A long-lived remote process whose Unix socket is forwarded back to a local path.
@@ -33,10 +42,19 @@ export interface TunnelArgs {
   remoteSocket: string;
   readyTimeoutSeconds: number;
   remoteArgv: string[];
+  /** What to do when the remote command exits of its own accord. */
+  restart: RestartMode;
+  /** Run in the background, surviving the shell that started it. */
+  detach: boolean;
 }
 
 export const TUNNEL_USAGE =
-  'usage: bica tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<seconds>] -- <command> [args...]';
+  'usage: bica tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<seconds>]\n' +
+  '                   [--restart=never|on-exit|on-demand] [--detach] -- <command> [args...]\n' +
+  '       bica tunnel --list\n' +
+  '       bica tunnel --stop <local-socket>';
+
+const RESTART_MODES: readonly RestartMode[] = ['never', 'on-exit', 'on-demand'];
 
 function requireValue(flag: string, token: string): string {
   const value = token.slice(flag.length + 1);
@@ -70,6 +88,8 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
   let localSocket: string | undefined;
   let remoteSocket: string | undefined;
   let readyTimeoutSeconds = DEFAULT_READY_TIMEOUT_SECONDS;
+  let restart: RestartMode = 'never';
+  let detach = false;
 
   for (const token of flags) {
     if (token.startsWith('--local=')) {
@@ -85,6 +105,21 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
         );
       }
       readyTimeoutSeconds = parsed;
+    } else if (token.startsWith('--restart=')) {
+      const raw = requireValue('--restart', token);
+      if (!RESTART_MODES.includes(raw as RestartMode)) {
+        throw new Error(
+          `--restart must be one of ${RESTART_MODES.join(', ')} (got ${JSON.stringify(raw)}).`,
+        );
+      }
+      restart = raw as RestartMode;
+    } else if (token === '--restart') {
+      // The bare form is the one people reach for, and silently meaning `never` would be a trap.
+      throw new Error(
+        `--restart needs a value: ${RESTART_MODES.join(', ')}.\n${TUNNEL_USAGE}`,
+      );
+    } else if (token === '--detach') {
+      detach = true;
     } else {
       throw new Error(`Unknown option "${token}".\n${TUNNEL_USAGE}`);
     }
@@ -98,7 +133,14 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
       `--local must be an absolute path (got ${JSON.stringify(localSocket)}).`,
     );
   }
-  return { localSocket, remoteSocket, readyTimeoutSeconds, remoteArgv };
+  return {
+    localSocket,
+    remoteSocket,
+    readyTimeoutSeconds,
+    remoteArgv,
+    restart,
+    detach,
+  };
 }
 
 /**
@@ -224,13 +266,6 @@ function runRemoteScriptAsync(
   return { child, done };
 }
 
-export interface RunTunnelOptions {
-  repoRoot: string;
-  sshHost: string;
-  remoteWorkspacePath: string;
-  args: TunnelArgs;
-}
-
 /** Backoff between reconnection attempts: doubles from the first to the cap. */
 const RECONNECT_FIRST_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
@@ -263,14 +298,41 @@ function delay(ms: number, stop: { promise: Promise<void> }): Promise<void> {
   });
 }
 
+export interface RunTunnelOptions {
+  repoRoot: string;
+  sshHost: string;
+  remoteWorkspacePath: string;
+  args: TunnelArgs;
+}
+
+/** How long to wait for ssh to bind the forward socket once it has been told to. */
+const FORWARD_BIND_TIMEOUT_MS = 10_000;
+
+/** Poll interval while waiting for that socket to appear. */
+const FORWARD_BIND_POLL_MS = 50;
+
+function pathExists(p: string): boolean {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Start the remote process, wait for its socket to answer, forward it, and hold it there.
+ * Run the tunnel until it is stopped, or until there is nothing left to serve.
  *
- * Reconnects rather than exiting when the connection drops. A tunnel is a thing you leave running for
- * hours next to work that makes its own ssh connections, and a reset in the middle of that -- which
- * happens, twice in an hour on a busy remote -- used to take the parser with it and leave the next
- * request to find nothing. The server has to be restarted along with the forward, because the watchdog
- * that stops it from outliving a broken connection has already done its job by then.
+ * **bica owns the local socket, rather than ssh.** It used to be the other way round: ssh bound the
+ * path the client knew about, and so the path existed only while one particular remote process did.
+ * That made the two unseparable -- a server with a ten-minute idle timeout took the client's socket
+ * with it when it exited, and every later request found nothing. Putting a listener of bica's own on
+ * the path and forwarding to a private one underneath lets the socket outlive what is behind it, which
+ * is what `--restart` needs and what clients that now *report* a missing socket rather than quietly
+ * working around it deserve.
+ *
+ * The cost is a hop: a client's bytes cross a local socket pair before reaching ssh. For request/reply
+ * traffic to a model that takes tens of milliseconds to answer, that is not a cost anyone can measure.
  *
  * Deliberately takes no workspace lease. A lease held for the lifetime of a tunnel would block every
  * `bica run` from this checkout for hours, and the audit that wants the tunnel runs tests through
@@ -303,26 +365,22 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     return 1;
   }
 
-  /**
-   * Remove the local socket, whatever state the attempt ended in.
-   *
-   * Called between attempts as well as at the end, and that is the point. While the tunnel is
-   * reconnecting there is nothing behind the path, and a socket file with nothing behind it is worse
-   * for a client than no file at all: it reads as "a server is up", so requests fail there instead of
-   * falling back to a local one. ssh usually unlinks it; usually is not an invariant.
-   */
-  const unlinkLocalSocket = (): void => {
-    try {
-      if (fs.lstatSync(args.localSocket).isSocket()) {
-        fs.unlinkSync(args.localSocket);
-      }
-    } catch {
-      // Already gone, which is the outcome this wanted.
-    }
-  };
+  const forwardPath = forwardSocketPathFor(args.localSocket);
+  fs.mkdirSync(path.dirname(forwardPath), { recursive: true });
 
-  let forward: ChildProcess | null = null;
-  let stoppedBySignal: number | undefined;
+  interface Session {
+    commandDone: Promise<number>;
+    forward: ChildProcess | null;
+    /** False once the remote command has exited; a session is never revived, only replaced. */
+    alive: boolean;
+  }
+
+  let session: Session | null = null;
+  let starting: Promise<boolean> | null = null;
+  let stopping = false;
+  let exitCode = 0;
+  let failures = 0;
+  let announcedLease = false;
   let wakeFromBackoff = (): void => {};
   const stop = {
     promise: new Promise<void>((resolve) => {
@@ -330,34 +388,15 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     }),
   };
 
-  const stopEverything = (): void => {
-    forward?.kill('SIGTERM');
-    terminateLiveRemoteCommand();
-    unlinkLocalSocket();
+  const unlinkIfSocket = (p: string): void => {
+    try {
+      if (fs.lstatSync(p).isSocket()) {
+        fs.unlinkSync(p);
+      }
+    } catch {
+      // Already gone, which is the outcome this wanted.
+    }
   };
-
-  // A stop the user asked for is not a failure, and the 255 that ssh reports when it is killed should
-  // not be dressed up as the remote command's own verdict. Recorded here so the end of the run can
-  // tell the two apart and answer with the conventional code for the signal instead.
-  const onSignal = (signal: NodeJS.Signals, code: number): void => {
-    stoppedBySignal = code;
-    write(`${dim('[bica]')} ${dim(`${signal} — closing the tunnel…`)}\n`);
-    wakeFromBackoff();
-    stopEverything();
-  };
-  const onSigint = (): void => {
-    onSignal('SIGINT', 130);
-  };
-  const onSigterm = (): void => {
-    onSignal('SIGTERM', 143);
-  };
-  const onSighup = (): void => {
-    onSignal('SIGHUP', 129);
-  };
-  process.on('SIGINT', onSigint);
-  process.on('SIGTERM', onSigterm);
-  process.on('SIGHUP', onSighup);
-  process.on('exit', stopEverything);
 
   /** Wait for something to answer on the remote socket, or for the command to give up first. */
   const awaitReady = async (
@@ -384,154 +423,369 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     return outcome.status === 0 ? { kind: 'ready' } : { kind: 'timeout' };
   };
 
-  let announcedLease = false;
-  let failures = 0;
-  let backoffMs = RECONNECT_FIRST_DELAY_MS;
-  let exitCode = 0;
-  let finished = false;
-
-  try {
-    while (stoppedBySignal === undefined && !finished) {
-      write(
-        `${dim('[bica]')} ${dim(`Starting ${args.remoteArgv[0]} on ${sshHost}…`)}\n`,
-      );
-      // No lease, and so no run id or claim: see the note on this function.
-      const commandDone = runRemoteCommand(
+  const spawnForward = (): ChildProcess =>
+    spawn(
+      'ssh',
+      buildForwardSshArgs({
         sshHost,
-        options.remoteWorkspacePath,
-        argvToPosixShCommand(args.remoteArgv),
-        options.repoRoot,
-        { dieWithConnection: true },
-      );
+        localSocket: forwardPath,
+        remoteSocket,
+      }),
+      { stdio: ['ignore', 'inherit', 'inherit'], shell: false },
+    );
 
-      const start = await awaitReady(commandDone, args.readyTimeoutSeconds);
-      let served = false;
-
-      if (start.kind === 'command') {
-        write(
-          `${warn('[bica]')} The remote command exited (${String(start.code)}) before its socket ` +
-            'answered; nothing was forwarded. Its output is above.\n',
-        );
-        exitCode = start.code === 0 ? 1 : start.code;
-        // Exiting 0 without ever serving is a command that had nothing to do, not a broken
-        // connection. Restarting it would just produce the same nothing, more slowly each time.
-        finished = start.code === 0;
-      } else if (start.kind === 'timeout') {
-        write(
-          `${warn('[bica]')} Nothing answered on ${remoteSocket} within ` +
-            `${String(args.readyTimeoutSeconds)}s. Stopping the remote command; raise ` +
-            '--ready-timeout if it is simply slow to start.\n',
-        );
-        exitCode = 1;
-      } else {
-        // The server is up. Everything in this loop is about keeping a forward on top of it: a
-        // forward that drops is a network event, and re-establishing it costs a second, where
-        // restarting the server costs however long its model took to load.
-        while (stoppedBySignal === undefined) {
-          const child = spawn(
-            'ssh',
-            buildForwardSshArgs({
-              sshHost,
-              localSocket: args.localSocket,
-              remoteSocket,
-            }),
-            { stdio: ['ignore', 'inherit', 'inherit'], shell: false },
-          );
-          forward = child;
-          const forwardClosed = new Promise<number>((resolve) => {
-            child.on('error', () => resolve(1));
-            child.on('close', (code) => resolve(code ?? 1));
-          });
-
-          write(
-            `${dim('[bica]')} ${dim(`Tunnel up: ${args.localSocket} → ${sshHost}:${remoteSocket}. Ctrl+C to stop.`)}\n`,
-          );
-          if (!announcedLease) {
-            write(
-              `${dim('[bica]')} ${dim('Holding no workspace lease, so `bica run` still works while this is up.')}\n`,
-            );
-            announcedLease = true;
-          }
-          // Serving counts as a success even if it later breaks: the failure budget exists to stop a
-          // tunnel that can never work, not one that worked for an hour and then lost the network.
-          served = true;
-          failures = 0;
-          backoffMs = RECONNECT_FIRST_DELAY_MS;
-
-          const ended = await Promise.race([
-            commandDone.then((code) => ({ kind: 'command' as const, code })),
-            forwardClosed.then((code) => ({ kind: 'forward' as const, code })),
-          ]);
-          forward = null;
-          unlinkLocalSocket();
-          if (stoppedBySignal !== undefined) {
-            break;
-          }
-          exitCode = ended.code;
-          if (ended.kind === 'command') {
-            write(
-              `${warn('[bica]')} The remote command exited (${String(ended.code)}).\n`,
-            );
-            finished = ended.code === 0;
-            if (finished) {
-              write(
-                `${dim('[bica]')} ${dim('It finished on its own; closing the tunnel.')}\n`,
-              );
-            }
-            break;
-          }
-
-          write(
-            `${warn('[bica]')} The forward closed (${String(ended.code)}); re-establishing it.\n`,
-          );
-          await delay(RECONNECT_FIRST_DELAY_MS, stop);
-          if (stoppedBySignal !== undefined) {
-            break;
-          }
-          const again = await awaitReady(commandDone, RECONNECT_PROBE_SECONDS);
-          if (again.kind !== 'ready') {
-            // The watchdog kills the server when its own connection breaks, so a reset that takes the
-            // forward has usually taken the server too. Say which it was: a restart that silently
-            // reloads a language model looks like a hang to whoever is waiting on a parse.
-            write(
-              `${dim('[bica]')} ${dim('The server is gone as well; starting it again.')}\n`,
-            );
-            break;
-          }
-        }
+  const awaitForwardBound = async (): Promise<boolean> => {
+    const deadline = Date.now() + FORWARD_BIND_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (pathExists(forwardPath)) {
+        return true;
       }
+      await delay(FORWARD_BIND_POLL_MS, stop);
+      if (stopping) {
+        return false;
+      }
+    }
+    return false;
+  };
 
-      // No forward to kill here: whichever path left the loop above already cleared it, and a signal
-      // takes it down through the handler.
+  /**
+   * Keep a forward standing on top of a session, for as long as its command lives.
+   *
+   * A forward that drops is a network event; the server behind it usually survived. Re-establishing
+   * costs a second, where restarting the server costs however long its model took to load -- so this
+   * checks whether the server still answers before concluding the session is over.
+   */
+  const superviseForward = async (own: Session): Promise<void> => {
+    while (!stopping && own.alive) {
+      const child = spawnForward();
+      own.forward = child;
+      const code = await new Promise<number>((resolve) => {
+        child.on('error', () => resolve(1));
+        child.on('close', (c) => resolve(c ?? 1));
+      });
+      own.forward = null;
+      unlinkIfSocket(forwardPath);
+      if (stopping || !own.alive) {
+        return;
+      }
+      write(
+        `${warn('[bica]')} The forward closed (${String(code)}); re-establishing it.\n`,
+      );
+      await delay(RECONNECT_FIRST_DELAY_MS, stop);
+      if (stopping) {
+        return;
+      }
+      const again = await awaitReady(own.commandDone, RECONNECT_PROBE_SECONDS);
+      if (again.kind !== 'ready') {
+        // The watchdog kills the server when its own connection breaks, so a reset that takes the
+        // forward has usually taken the server too. Say which it was: a restart that silently reloads
+        // a language model looks like a hang to whoever is waiting on a parse.
+        write(
+          `${dim('[bica]')} ${dim('The server is gone as well.')}\n`,
+        );
+        terminateLiveRemoteCommand();
+        return;
+      }
+      if (!(await awaitForwardBound())) {
+        return;
+      }
+    }
+  };
+
+  const endSession = (own: Session): void => {
+    own.alive = false;
+    own.forward?.kill('SIGTERM');
+    own.forward = null;
+    if (session === own) {
+      session = null;
+    }
+  };
+
+  /** Start the remote command and get a forward standing on it. Resolves false if that failed. */
+  const startSession = async (): Promise<boolean> => {
+    write(
+      `${dim('[bica]')} ${dim(`Starting ${args.remoteArgv[0]} on ${sshHost}…`)}\n`,
+    );
+    // No lease, and so no run id or claim: see the note on this function.
+    const commandDone = runRemoteCommand(
+      sshHost,
+      options.remoteWorkspacePath,
+      argvToPosixShCommand(args.remoteArgv),
+      options.repoRoot,
+      { dieWithConnection: true },
+    );
+    const ready = await awaitReady(commandDone, args.readyTimeoutSeconds);
+    if (ready.kind === 'command') {
+      write(
+        `${warn('[bica]')} The remote command exited (${String(ready.code)}) before its socket ` +
+          'answered; nothing was forwarded. Its output is above.\n',
+      );
+      exitCode = ready.code === 0 ? 1 : ready.code;
+      return false;
+    }
+    if (ready.kind === 'timeout') {
+      write(
+        `${warn('[bica]')} Nothing answered on ${remoteSocket} within ` +
+          `${String(args.readyTimeoutSeconds)}s. Stopping the remote command; raise ` +
+          '--ready-timeout if it is simply slow to start.\n',
+      );
       terminateLiveRemoteCommand();
       await commandDone;
-      unlinkLocalSocket();
+      exitCode = 1;
+      return false;
+    }
 
-      if (stoppedBySignal !== undefined || finished) {
-        break;
+    const own: Session = { commandDone, forward: spawnForward(), alive: true };
+    session = own;
+    if (!(await awaitForwardBound())) {
+      write(
+        `${warn('[bica]')} ssh did not bind ${forwardPath}. Stream-local forwarding needs ` +
+          'OpenSSH 6.7 or later on both ends.\n',
+      );
+      endSession(own);
+      terminateLiveRemoteCommand();
+      await commandDone;
+      exitCode = 1;
+      return false;
+    }
+
+    void commandDone.then((code) => {
+      if (!own.alive) {
+        return;
       }
-      if (!served) {
-        failures += 1;
-        if (failures >= MAX_CONSECUTIVE_FAILURES) {
-          write(
-            `${warn('[bica]')} Gave up after ${String(failures)} attempts that never served a ` +
-              'request. The errors above are from the last one.\n',
-          );
-          break;
-        }
+      endSession(own);
+      if (stopping) {
+        return;
       }
       write(
-        `${dim('[bica]')} ${dim(`Reconnecting in ${String(Math.round(backoffMs / 1000))}s…`)}\n`,
+        `${dim('[bica]')} ${dim(`The remote command exited (${String(code)}).`)}\n`,
       );
-      await delay(backoffMs, stop);
-      backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_DELAY_MS);
+      if (args.restart === 'never') {
+        shutdown(code);
+        return;
+      }
+      if (args.restart === 'on-exit') {
+        void ensureUp();
+        return;
+      }
+      // on-demand: the socket stays bound with nothing behind it, which is the point. A server with
+      // an idle timeout exits precisely so its memory can go back; starting it again before anyone
+      // asks would undo that, and the next client pays the startup instead of every client paying it
+      // for nothing.
+      write(
+        `${dim('[bica]')} ${dim(`${args.localSocket} stays open; the next client starts it again.`)}\n`,
+      );
+    });
+    void superviseForward(own);
+
+    write(
+      `${dim('[bica]')} ${dim(`Tunnel up: ${args.localSocket} → ${sshHost}:${remoteSocket}. Ctrl+C to stop.`)}\n`,
+    );
+    if (!announcedLease) {
+      write(
+        `${dim('[bica]')} ${dim('Holding no workspace lease, so `bica run` still works while this is up.')}\n`,
+      );
+      announcedLease = true;
     }
-    return stoppedBySignal ?? exitCode;
+    return true;
+  };
+
+  /**
+   * Make sure something is serving, starting it if not.
+   *
+   * Collapsing concurrent callers onto one `starting` promise is what makes on-demand restart safe:
+   * ten clients arriving while the server loads produce one server, and all ten wait for it, rather
+   * than ten commands racing to bind the same remote path.
+   */
+  const ensureUp = async (): Promise<boolean> => {
+    if (stopping) {
+      return false;
+    }
+    if (session !== null && session.alive) {
+      return true;
+    }
+    if (starting === null) {
+      starting = (async () => {
+        const ok = await startSession();
+        if (ok) {
+          failures = 0;
+        } else {
+          failures += 1;
+          if (failures >= MAX_CONSECUTIVE_FAILURES) {
+            write(
+              `${warn('[bica]')} Gave up after ${String(failures)} attempts that never served a ` +
+                'request. The errors above are from the last one.\n',
+            );
+            shutdown(exitCode === 0 ? 1 : exitCode);
+          } else if (args.restart === 'on-exit') {
+            // Eager restart is a loop, so it needs the backoff the on-demand path gets for free from
+            // waiting on a client.
+            const backoff = Math.min(
+              RECONNECT_FIRST_DELAY_MS * 2 ** (failures - 1),
+              RECONNECT_MAX_DELAY_MS,
+            );
+            write(
+              `${dim('[bica]')} ${dim(`Retrying in ${String(Math.round(backoff / 1000))}s…`)}\n`,
+            );
+            await delay(backoff, stop);
+            if (!stopping) {
+              starting = null;
+              void ensureUp();
+            }
+          } else if (args.restart === 'never') {
+            shutdown(exitCode === 0 ? 1 : exitCode);
+          }
+        }
+        return ok;
+      })().finally(() => {
+        starting = null;
+      });
+    }
+    return starting;
+  };
+
+  const listener = net.createServer((client) => {
+    client.on('error', () => {
+      client.destroy();
+    });
+    void (async () => {
+      const up = await ensureUp();
+      if (!up || stopping) {
+        // Refused rather than left hanging. A client that cannot be served should find that out now
+        // and say so, which is exactly what the callers of this socket have been taught to do.
+        client.destroy();
+        return;
+      }
+      const upstream = net.connect(forwardPath);
+      upstream.on('error', () => {
+        client.destroy();
+        upstream.destroy();
+      });
+      upstream.on('connect', () => {
+        client.pipe(upstream);
+        upstream.pipe(client);
+      });
+      client.on('close', () => {
+        upstream.destroy();
+      });
+      upstream.on('close', () => {
+        client.destroy();
+      });
+    })();
+  });
+
+  let resolveFinished: (code: number) => void = () => {};
+  const finished = new Promise<number>((resolve) => {
+    resolveFinished = resolve;
+  });
+
+  function shutdown(code: number): void {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    wakeFromBackoff();
+    listener.close();
+    if (session !== null) {
+      endSession(session);
+    }
+    terminateLiveRemoteCommand();
+    unlinkIfSocket(args.localSocket);
+    unlinkIfSocket(forwardPath);
+    removeTunnelRecord(args.localSocket);
+    resolveFinished(code);
+    // Leave even if something still holds the loop open.
+    //
+    // A tunnel spends its life holding ssh children, their stdin pipes and a listener, and after a
+    // stop any one of them can keep node running with nothing left to do -- which looked, from the
+    // outside, exactly like a tunnel refusing to die, and `--stop` reported it as one. The cleanup
+    // above has already happened by this point, so exiting is not cutting anything short. Unref'd, so
+    // a process that does drain on its own exits normally and this never fires.
+    setTimeout(() => {
+      process.exit(code);
+    }, 1_000).unref();
+  }
+
+  const onSignal = (signal: NodeJS.Signals, code: number): void => {
+    write(`${dim('[bica]')} ${dim(`${signal} — closing the tunnel…`)}\n`);
+    shutdown(code);
+  };
+  const onSigint = (): void => {
+    onSignal('SIGINT', 130);
+  };
+  const onSigterm = (): void => {
+    onSignal('SIGTERM', 143);
+  };
+  const onSighup = (): void => {
+    onSignal('SIGHUP', 129);
+  };
+  const onExit = (): void => {
+    unlinkIfSocket(args.localSocket);
+    unlinkIfSocket(forwardPath);
+    removeTunnelRecord(args.localSocket);
+  };
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
+  process.on('SIGHUP', onSighup);
+  process.on('exit', onExit);
+
+  try {
+    try {
+      unlinkIfSocket(args.localSocket);
+      await new Promise<void>((resolve, reject) => {
+        listener.once('error', reject);
+        listener.listen(args.localSocket, () => {
+          listener.off('error', reject);
+          resolve();
+        });
+      });
+    } catch (e: unknown) {
+      // Scoped to the bind alone. It used to wrap the whole run, so any later failure -- a bug in the
+      // supervisor, a rejected start -- was reported as "could not listen", which is a sentence about
+      // the one thing that had demonstrably worked.
+      write(
+        `${warn('[bica]')} Could not listen on ${args.localSocket}: ${e instanceof Error ? e.message : String(e)}\n`,
+      );
+      shutdown(1);
+      return 1;
+    }
+    writeTunnelRecord({
+      localSocket: args.localSocket,
+      remoteSocket,
+      sshHost,
+      remoteArgv: args.remoteArgv,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      restart: args.restart,
+    });
+    // Started eagerly even in on-demand mode: `--ready-timeout` is a promise that "tunnel up" means
+    // ready, and the first client should not be the one that discovers the command was unrunnable.
+    await ensureUp();
+    return await finished;
+  } catch (e: unknown) {
+    write(
+      `${warn('[bica]')} The tunnel failed: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`,
+    );
+    shutdown(1);
+    return 1;
   } finally {
-    stopEverything();
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);
     process.removeListener('SIGHUP', onSighup);
-    process.removeListener('exit', stopEverything);
+    process.removeListener('exit', onExit);
   }
 }
+
+/** One line per recorded tunnel, for `bica tunnel --list`. */
+export function formatTunnelList(
+  entries: { record: TunnelRecordLike; alive: boolean }[],
+): string {
+  if (entries.length === 0) {
+    return 'No tunnels recorded.';
+  }
+  return entries
+    .map(({ record, alive }) => `  ${describeTunnel(record, alive)}`)
+    .join('\n');
+}
+
+type TunnelRecordLike = Parameters<typeof describeTunnel>[0];

@@ -186,3 +186,46 @@ describe('localSocketObstruction', () => {
     expect(localSocketObstruction(dir)).toMatch(/directory/);
   });
 });
+
+describe('parseTunnelArgs: restart and detach', () => {
+  const base = ['--local=/tmp/a.sock', '--remote=/srv/b.sock', '--', 'serve'];
+
+  it('defaults to not restarting and not detaching', () => {
+    const args = parseTunnelArgs(base);
+    expect(args.restart).toBe('never');
+    expect(args.detach).toBe(false);
+  });
+
+  it('accepts the three restart modes', () => {
+    for (const mode of ['never', 'on-exit', 'on-demand'] as const) {
+      expect(parseTunnelArgs([`--restart=${mode}`, ...base]).restart).toBe(mode);
+    }
+  });
+
+  it('refuses an unknown restart mode, and a bare --restart', () => {
+    expect(() => parseTunnelArgs(['--restart=maybe', ...base])).toThrow(
+      /--restart must be one of/,
+    );
+    expect(() => parseTunnelArgs(['--restart', ...base])).toThrow(
+      /--restart needs a value/,
+    );
+  });
+
+  it('takes --detach as a bare flag', () => {
+    expect(parseTunnelArgs(['--detach', ...base]).detach).toBe(true);
+  });
+
+  it("does not read the remote command's own --restart or --detach", () => {
+    const args = parseTunnelArgs([
+      '--local=/tmp/a.sock',
+      '--remote=/srv/b.sock',
+      '--',
+      'serve',
+      '--restart=on-exit',
+      '--detach',
+    ]);
+    expect(args.restart).toBe('never');
+    expect(args.detach).toBe(false);
+    expect(args.remoteArgv).toEqual(['serve', '--restart=on-exit', '--detach']);
+  });
+});

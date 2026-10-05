@@ -4,7 +4,7 @@
  * Env: BICA_SSH_HOST (or TTY prompt), BICA_REMOTE_PATH (optional), and other BICA_* vars below.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,7 +14,18 @@ import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 import { parseArgs } from './cliArgs';
 import { isProcessAlive } from './lib/fileLock';
 import { gitDependentHint } from './lib/gitDependentHint';
-import { parseTunnelArgs, runTunnel } from './lib/tunnel';
+import { formatTunnelList, parseTunnelArgs, runTunnel, TUNNEL_USAGE } from './lib/tunnel';
+import type { TunnelArgs } from './lib/tunnel';
+import {
+  claimLocalSocket,
+  describeTunnel,
+  listTunnelRecords,
+  readTunnelRecord,
+  removeTunnelRecord,
+  tunnelLogPathFor,
+  writeTunnelRecord,
+} from './lib/tunnelState';
+import type { TunnelRecord } from './lib/tunnelState';
 import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import {
   acquireWorkspace,
@@ -180,7 +191,8 @@ File sync
                               never disturbs one.
 
 Long-lived remote processes
-  tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>] -- <command> [args...]
+  tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>]
+         [--restart=never|on-exit|on-demand] [--detach] -- <command> [args...]
                               Start <command> on the remote (same workspace and login preamble as
                               'bica run'), wait for it to create <remote path>, then forward that
                               socket to <local path> over ssh. Readiness is a real connect, not the
@@ -193,6 +205,16 @@ Long-lived remote processes
                               either side does, and unlinks the local socket on the way out so a
                               client sees "no server" rather than a path that cannot answer.
                               Needs OpenSSH 6.7+ on both ends (stream-local forwarding).
+                              --restart says what to do when the remote command exits by itself:
+                              'never' (default) closes the tunnel with it; 'on-exit' starts it again
+                              at once; 'on-demand' leaves the socket bound and starts it when the
+                              next client connects -- the mode for a server with an idle timeout,
+                              since the socket never disappears and so no client is ever told there
+                              is nothing there.
+                              --detach runs it in the background, surviving this shell, and prints
+                              where its output goes.
+  tunnel --list               Tunnels that have recorded themselves, live ones first.
+  tunnel --stop <local.sock>  Stop the tunnel serving that path and clear its record.
 
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
@@ -250,6 +272,12 @@ Examples
 
   # A parser that stays up on the remote, reachable at a local socket path
   bica tunnel --local=/tmp/parser.sock --remote=/tmp/parser.sock -- ./serve-parser
+
+  # One that survives this shell, and restarts itself when a client needs it
+  bica tunnel --local=/tmp/parser.sock --remote=/tmp/parser.sock \
+    --restart=on-demand --detach -- ./serve-parser
+  bica tunnel --list
+  bica tunnel --stop /tmp/parser.sock
 `);
 }
 
@@ -430,16 +458,168 @@ async function cmdSsh(): Promise<void> {
   process.exitCode = code;
 }
 
+/** Wait for a condition, briefly, without pinning the loop. */
+async function pollFor(
+  check: () => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) {
+      return true;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  return check();
+}
+
+/** `bica tunnel --list`: what is running, and what merely left a record behind. */
+function cmdTunnelList(): void {
+  console.log(formatTunnelList(listTunnelRecords()));
+}
+
+/**
+ * `bica tunnel --stop <local-socket>`: end one tunnel by the path it serves.
+ *
+ * The path is the name because it is the only part a user has in hand -- it is what they typed to
+ * start it and what their client connects to, where the pid is something they would have to go
+ * looking for. That it is also the thing two tunnels can collide over is the same fact from the
+ * other side.
+ */
+async function cmdTunnelStop(localSocket: string): Promise<void> {
+  const target = path.resolve(localSocket);
+  const record = readTunnelRecord(target);
+  if (record === null) {
+    process.stderr.write(
+      `${dim('[bica]')} ${dim(`No tunnel is recorded for ${target}.`)}\n`,
+    );
+    return;
+  }
+  if (!isProcessAlive(record.pid)) {
+    removeTunnelRecord(target);
+    process.stderr.write(
+      `${dim('[bica]')} ${dim(`The tunnel for ${target} (pid ${String(record.pid)}) is already gone; cleared its record.`)}\n`,
+    );
+    return;
+  }
+  process.kill(record.pid, 'SIGTERM');
+  const ended = await pollFor(() => !isProcessAlive(record.pid), 15_000);
+  if (!ended) {
+    process.stderr.write(
+      `${warn('[bica]')} pid ${String(record.pid)} did not stop within 15s. ` +
+        `Send it SIGKILL yourself if it is wedged: kill -9 ${String(record.pid)}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  // The tunnel clears these itself on the way out. Doing it again covers the one case where it
+  // could not -- a SIGKILL, which runs no handler -- and costs nothing when it already did.
+  removeTunnelRecord(target);
+  process.stderr.write(
+    `${dim('[bica]')} ${dim(`Stopped the tunnel for ${target} (pid ${String(record.pid)}).`)}\n`,
+  );
+}
+
+/**
+ * `--detach`: start the same tunnel again as a background process that outlives this shell.
+ *
+ * Re-executing this process rather than forking is what keeps the two paths honest -- the detached
+ * tunnel runs the identical code with the identical arguments, minus the flag that asked for it. The
+ * child writes its own record, so the parent can wait for that record to appear and report a tunnel
+ * that is genuinely up rather than one that was merely spawned.
+ */
+async function detachTunnel(args: TunnelArgs): Promise<void> {
+  const logPath = tunnelLogPathFor(args.localSocket);
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  const log = fs.openSync(logPath, 'a');
+  // `execArgv` first, or the child is a plain node that cannot read the TypeScript it is pointed at:
+  // this process runs under a loader (tsx in development), and re-executing without the flags that
+  // installed it reproduces the arguments but not the runtime.
+  const argv = [
+    ...process.execArgv,
+    ...process.argv.slice(1).filter((a) => a !== '--detach'),
+  ];
+  const child = spawn(process.execPath, argv, {
+    detached: true,
+    stdio: ['ignore', log, log],
+    env: process.env,
+  });
+  child.unref();
+  fs.closeSync(log);
+
+  const started = await pollFor(
+    () => readTunnelRecord(args.localSocket) !== null,
+    Math.min(args.readyTimeoutSeconds * 1000, 30_000),
+  );
+  if (!started) {
+    process.stderr.write(
+      `${warn('[bica]')} The detached tunnel did not record itself. Its output is in ${logPath}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const record = readTunnelRecord(args.localSocket);
+  writeTunnelRecord({
+    ...(record as TunnelRecord),
+    logPath,
+  });
+  process.stderr.write(
+    `${dim('[bica]')} ${dim(`Detached: pid ${String(record?.pid ?? child.pid ?? 0)}, serving ${args.localSocket}.`)}\n` +
+      `${dim('[bica]')} ${dim(`Output: ${logPath} — stop it with \`bica tunnel --stop ${args.localSocket}\`.`)}\n`,
+  );
+}
+
 /**
  * Serve a long-lived remote process over a forwarded Unix socket.
  *
  * The client on this side is not told anything: it connects to a path, as it always did, and the work
  * happens on the remote. That is the whole point of forwarding the socket rather than a port -- no
- * caller has to learn a host, and a tunnel that is not running simply means the path is absent, which
- * every such client already handles by starting something locally.
+ * caller has to learn a host.
  */
 async function cmdTunnel(tail: string[]): Promise<void> {
+  if (tail.length === 1 && tail[0] === '--list') {
+    cmdTunnelList();
+    return;
+  }
+  const stopAt = tail.findIndex(
+    (t) => t === '--stop' || t.startsWith('--stop='),
+  );
+  if (stopAt !== -1) {
+    const inline = tail[stopAt].startsWith('--stop=')
+      ? tail[stopAt].slice('--stop='.length)
+      : tail[stopAt + 1];
+    if (inline === undefined || inline === '') {
+      die(`--stop needs the local socket path of the tunnel to stop.\n${TUNNEL_USAGE}`);
+    }
+    await cmdTunnelStop(inline);
+    return;
+  }
+
   const args = parseTunnelArgs(tail);
+
+  // One tunnel per local socket. Two of them bind the same path in turn, so the second silently
+  // takes the first's clients while the first keeps a remote server alive for nobody -- which is
+  // exactly the state that left two processes to be found with `pkill`.
+  const claim = claimLocalSocket(args.localSocket);
+  if (claim.kind === 'taken') {
+    die(
+      `A tunnel is already serving ${args.localSocket}:\n` +
+        `  ${describeTunnel(claim.by, true)}\n` +
+        `Stop it with \`bica tunnel --stop ${args.localSocket}\`, or pick a different --local path.`,
+    );
+  }
+  if (claim.kind === 'stale') {
+    process.stderr.write(
+      `${dim('[bica]')} ${dim(`Taking over from a tunnel that left a record but no process (pid ${String(claim.previous.pid)}).`)}\n`,
+    );
+    removeTunnelRecord(args.localSocket);
+  }
+
+  if (args.detach) {
+    await detachTunnel(args);
+    return;
+  }
+
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
   const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
