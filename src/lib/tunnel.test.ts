@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildForwardSshArgs,
+  joinSockets,
   buildSocketReadyScript,
   localSocketObstruction,
   parseTunnelArgs,
@@ -227,5 +228,82 @@ describe('parseTunnelArgs: restart and detach', () => {
     expect(args.restart).toBe('never');
     expect(args.detach).toBe(false);
     expect(args.remoteArgv).toEqual(['serve', '--restart=on-exit', '--detach']);
+  });
+});
+
+describe('joinSockets', () => {
+  const made: { close: () => void }[] = [];
+
+  afterEach(() => {
+    for (const m of made.splice(0)) {
+      m.close();
+    }
+  });
+
+  /**
+   * A server that answers with `size` bytes and closes, a proxy in front of it joined the way the
+   * tunnel joins its own sockets, and a client that reads to the end through the proxy.
+   */
+  const replyThroughProxy = async (size: number): Promise<number> => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-join-'));
+    const upstreamPath = path.join(dir, 'upstream.sock');
+    const proxyPath = path.join(dir, 'proxy.sock');
+
+    const origin = net.createServer((conn) => {
+      conn.on('data', () => {
+        conn.end(Buffer.alloc(size, 0x61));
+      });
+    });
+    const proxy = net.createServer((client) => {
+      const upstream = net.connect(upstreamPath);
+      upstream.on('connect', () => {
+        joinSockets(client, upstream);
+      });
+    });
+    made.push(
+      { close: () => origin.close() },
+      { close: () => proxy.close() },
+      { close: () => fs.rmSync(dir, { force: true, recursive: true }) },
+    );
+    await new Promise<void>((r) => origin.listen(upstreamPath, r));
+    await new Promise<void>((r) => proxy.listen(proxyPath, r));
+
+    return await new Promise<number>((resolve, reject) => {
+      const client = net.connect(proxyPath, () => {
+        client.write('ask');
+      });
+      let received = 0;
+      // Deliberately slow to start reading. A client that drains as fast as the proxy writes never
+      // builds the queue that the truncation discarded, which is why the first version of this test
+      // passed against the very bug it was written for.
+      client.pause();
+      setTimeout(() => {
+        client.resume();
+      }, 250);
+      client.on('data', (chunk: Buffer) => {
+        received += chunk.length;
+      });
+      client.on('end', () => {
+        resolve(received);
+      });
+      client.on('close', () => {
+        resolve(received);
+      });
+      client.on('error', reject);
+    });
+  };
+
+  it('delivers a reply that fits in one socket buffer', async () => {
+    expect(await replyThroughProxy(1_024)).toBe(1_024);
+  });
+
+  it('delivers a reply larger than the 16 KiB high-water mark, whole', async () => {
+    // The regression: the queued remainder used to be destroyed with the socket when the upstream
+    // closed, so this arrived as exactly 16384 bytes.
+    expect(await replyThroughProxy(22 * 1024)).toBe(22 * 1024);
+  });
+
+  it('delivers a reply far larger than any single buffer', async () => {
+    expect(await replyThroughProxy(2 * 1024 * 1024)).toBe(2 * 1024 * 1024);
   });
 });

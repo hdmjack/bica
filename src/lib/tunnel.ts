@@ -298,6 +298,39 @@ function delay(ms: number, stop: { promise: Promise<void> }): Promise<void> {
   });
 }
 
+/**
+ * Join a client to its upstream so each side's bytes reach the other, and neither is cut short.
+ *
+ * The hazard here is end-of-stream, and it cost a day of someone's debugging. `pipe` writes what the
+ * destination can take and queues the rest, so a reply larger than a socket's buffer is still in that
+ * queue when the sender closes. Destroying the client on the upstream's `close` therefore threw away
+ * everything past the buffer: a 22 KB reply arrived as exactly 16,384 bytes -- Node's default
+ * high-water mark -- and the client reported it as malformed output from the server, which had in fact
+ * sent all of it. Smaller replies fit in one buffer and so were never truncated, which is what kept
+ * this hidden.
+ *
+ * `pipe` already ends the destination when the source ends, and a socket flushes what it has queued
+ * before closing. So the correct teardown is to leave the end-of-stream path alone and only intervene
+ * on an error.
+ *
+ * The one asymmetry is deliberate. A client that has gone away cannot be flushed to, so its upstream
+ * is destroyed outright rather than left reading a reply nobody will receive; the reverse is the case
+ * this function exists to protect.
+ */
+export function joinSockets(client: net.Socket, upstream: net.Socket): void {
+  const destroyBoth = (): void => {
+    client.destroy();
+    upstream.destroy();
+  };
+  client.on('error', destroyBoth);
+  upstream.on('error', destroyBoth);
+  client.on('close', () => {
+    upstream.destroy();
+  });
+  client.pipe(upstream);
+  upstream.pipe(client);
+}
+
 export interface RunTunnelOptions {
   repoRoot: string;
   sshHost: string;
@@ -657,19 +690,12 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
         return;
       }
       const upstream = net.connect(forwardPath);
+      upstream.on('connect', () => {
+        joinSockets(client, upstream);
+      });
       upstream.on('error', () => {
         client.destroy();
         upstream.destroy();
-      });
-      upstream.on('connect', () => {
-        client.pipe(upstream);
-        upstream.pipe(client);
-      });
-      client.on('close', () => {
-        upstream.destroy();
-      });
-      upstream.on('close', () => {
-        client.destroy();
       });
     })();
   });

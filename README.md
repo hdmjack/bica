@@ -426,6 +426,12 @@ sees no difference — it connects to a path — but the path can now outlive wh
 what the restart modes need. The extra hop is a local socket pair; against a model that takes tens of
 milliseconds to answer it is not measurable.
 
+**A reply is never cut short at a buffer boundary.** The proxy lets each side's end-of-stream close the
+other, rather than destroying a socket when its peer closes: a reply larger than a socket's 16 KiB
+buffer is still queued at that moment, and destroying the socket discarded the remainder. Replies that
+fit in one buffer were unaffected, which is how it stayed hidden until a 22 KB one arrived as exactly
+16,384 bytes and the client reported the server's output as malformed.
+
 ### Restarting (`--restart`)
 
 | Mode | When the remote command exits on its own |
