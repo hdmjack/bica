@@ -24,8 +24,9 @@ copy you edit). It is not a deployment tool.
 
 ## Requirements
 
-**On your machine:** Node 22 or newer, `git`, `ssh`, `rsync`, and [Mutagen](https://mutagen.io)
-(`brew install mutagen-io/mutagen/mutagen`, or the release binaries on Linux).
+**On your machine:** Node 22 or newer, `pnpm`, `git`, `ssh`, `rsync`, and
+[Mutagen](https://mutagen.io) (`brew install mutagen-io/mutagen/mutagen`, or the release binaries on
+Linux).
 
 **On the remote:** an account you can reach with `ssh <host>` without typing a password, the
 toolchain your commands need (Node, pnpm, cargo — whatever you intend to run), and OpenSSH 6.7 or
@@ -39,17 +40,25 @@ behave on native Windows. See [Platform support](#platform-support).
 ## Install
 
 ```bash
-git clone git@github.com:hdmjack/bica.git
-cd bica
-pnpm install
-pnpm link --global
+pnpm add -g git+ssh://git@github.com/hdmjack/bica.git#v0.1.0
 ```
 
-`pnpm link --global` puts `bica` on your PATH; if the shell cannot find it afterwards, add pnpm's
-global bin directory (`pnpm bin -g`) to your PATH. To update later, `git pull` in this directory —
-the command runs from source, so there is nothing to rebuild.
+That is the whole install: it brings its own dependencies and needs no build step. Check it with
+`bica --version`. The ssh form works whether or not the repository is public, as long as you can
+already `git clone` from GitHub over ssh.
 
-Check it: `bica --version`.
+pnpm prints `dependencies have build scripts that were ignored: esbuild` and that is expected —
+esbuild arrives through tsx, ships a prebuilt binary for your platform, and has nothing to build.
+
+**Updating** is the same command with a later tag. `bica --version` tells you what you have, and the
+[CHANGELOG](CHANGELOG.md) says what changed — worth reading before updating, because two entries so
+far change what an *older* bica sees on a shared remote.
+
+**Working on bica itself** wants a clone instead:
+
+```bash
+git clone git@github.com:hdmjack/bica.git && cd bica && pnpm install && pnpm link --global
+```
 
 ## Quick start
 
