@@ -37,6 +37,13 @@ export const DEFAULT_READY_TIMEOUT_SECONDS = 60;
 /** How often the remote readiness loop looks for the socket. */
 const READY_POLL_SECONDS = '0.2';
 
+/** What the forward supervisor reports back the first time it has something to say. */
+type FirstReady =
+  | { kind: 'ready' }
+  | { kind: 'timeout' }
+  | { kind: 'bind-failed' }
+  | { kind: 'command'; code: number };
+
 export interface TunnelArgs {
   localSocket: string;
   remoteSocket: string;
@@ -175,51 +182,19 @@ export function buildForwardSshArgs(opts: {
 }
 
 /**
- * Shell script that returns once something is *listening* on the remote socket, or exits 1 at the
- * deadline.
+ * Shell script that returns once the remote socket exists, or exits 1 at the deadline.
  *
- * The file existing is not the same as a server answering, and the gap between them is exactly where a
- * slow server lives: a parser that loads a language model takes twenty seconds to bind, and a socket
- * file left by a previous server that was killed sits at the path for the whole of that time. Judging
- * readiness by the file meant forwarding to a path nothing was listening on, and the client's first
- * request died with "connect failed" instead of waiting.
- *
- * So the test is a real `connect()`. The file check stays as the cheap first half, because it rejects
- * the common case without paying for an interpreter.
- *
- * A connect is not free of consequence: a server reads it as a client that hung up without asking
- * anything. That is the same thing it sees whenever a client is interrupted, so it is a case any such
- * server already has to survive.
- *
- * Waiting on the remote rather than polling from here is one ssh connection instead of one per poll,
- * and the loop sees the socket the moment it answers rather than up to a poll interval later.
+ * POSIX `test -S` and nothing else, so it runs on any remote without an interpreter. See the note on
+ * `awaitReady` for why the file is sufficient evidence here and what it does not cover.
  */
 export function buildSocketReadyScript(
   remoteSocketAbsolutePath: string,
   timeoutSeconds: number,
 ): string {
   const q = shellSingleQuoteRemotePathForSh(remoteSocketAbsolutePath);
-  // No single quotes inside: the whole program is a single-quoted argument to the remote `sh`.
-  const connectProgram = [
-    'import socket,sys',
-    's=socket.socket(socket.AF_UNIX)',
-    's.settimeout(2)',
-    'try:',
-    '    s.connect(sys.argv[1])',
-    'except OSError:',
-    '    sys.exit(1)',
-    's.close()',
-  ].join('\n');
   return [
     `_bica_deadline=$(( $(date +%s) + ${String(Math.ceil(timeoutSeconds))} ))`,
-    '_bica_answers() {',
-    `  [ -S ${q} ] || return 1`,
-    // Without an interpreter to connect with, the file is the only evidence available. Saying so in
-    // the script keeps the fallback visible rather than making the whole feature depend on python3.
-    '  command -v python3 >/dev/null 2>&1 || return 0',
-    `  python3 -c '${connectProgram}' ${q} 2>/dev/null`,
-    '}',
-    'while ! _bica_answers; do',
+    `while [ ! -S ${q} ]; do`,
     '  if [ "$(date +%s)" -ge "$_bica_deadline" ]; then exit 1; fi',
     `  sleep ${READY_POLL_SECONDS}`,
     'done',
@@ -431,7 +406,21 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     }
   };
 
-  /** Wait for something to answer on the remote socket, or for the command to give up first. */
+  /**
+   * Wait for the remote socket to exist, in POSIX shell, or for the command to give up first.
+   *
+   * No interpreter on the remote: no POSIX utility speaks Unix sockets, so the previous version of
+   * this reached for python3 and silently fell back to this same file check where it was missing --
+   * which is worse than doing the file check openly, because nothing said which one had run.
+   *
+   * The file check is trustworthy here only because of what happens just before it: this session
+   * deletes the remote socket before starting the command that binds it, so the path cannot be a
+   * leftover from a predecessor. What it does not cover is a server that creates its socket and then
+   * takes a long time to accept on it; bind and listen are adjacent in every server this is used
+   * with, and the alternative -- probing from this side through the forward -- was measured to report
+   * ready four seconds before a server that binds late was listening, because ssh reports a failed
+   * channel more slowly than any settle window worth waiting.
+   */
   const awaitReady = async (
     commandDone: Promise<number>,
     timeoutSeconds: number,
@@ -490,21 +479,22 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
    */
   const superviseForward = async (
     own: Session,
-    reportFirstBind: (bound: boolean) => void,
+    reportFirstReady: (result: FirstReady) => void,
   ): Promise<void> => {
     // Every forward this session ever has is spawned here, and nowhere else. Starting one in
     // `startSession` as well left two ssh processes alive per session: the second rebinds the path
     // (`StreamLocalBindUnlink`) and the first goes on running against a socket that is no longer
     // there, so it is never noticed and never cleaned up -- and a client connecting during the
     // handover got an empty reply, because the path it had just reached had been replaced underneath.
-    let announcedFirstBind = false;
-    const firstBind = (bound: boolean): void => {
-      if (!announcedFirstBind) {
-        announcedFirstBind = true;
-        reportFirstBind(bound);
+    let announced = false;
+    const firstReady = (result: FirstReady): void => {
+      if (!announced) {
+        announced = true;
+        reportFirstReady(result);
       }
     };
     try {
+      let first = true;
       while (!stopping && own.alive) {
         const child = spawnForward();
         own.forward = child;
@@ -512,13 +502,34 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
           child.on('error', () => resolve(1));
           child.on('close', (c) => resolve(c ?? 1));
         });
-        const bound = await awaitForwardBound();
-        firstBind(bound);
-        if (!bound) {
+        if (!(await awaitForwardBound())) {
+          firstReady({ kind: 'bind-failed' });
           child.kill('SIGTERM');
           own.forward = null;
           return;
         }
+        // Readiness is checked through the forward, so it can only be checked once the forward
+        // stands. On a re-establish this doubles as the question "did the server survive the drop?".
+        const answers = await awaitReady(
+          own.commandDone,
+          first ? args.readyTimeoutSeconds : RECONNECT_PROBE_SECONDS,
+        );
+        if (answers.kind !== 'ready') {
+          if (first) {
+            firstReady(answers);
+          } else {
+            // The watchdog kills the server when its own connection breaks, so a reset that takes the
+            // forward has usually taken the server too. Say which it was: a restart that silently
+            // reloads a language model looks like a hang to whoever is waiting on a parse.
+            write(`${dim('[bica]')} ${dim('The server is gone as well.')}\n`);
+            terminateLiveRemoteCommand();
+          }
+          child.kill('SIGTERM');
+          own.forward = null;
+          return;
+        }
+        firstReady({ kind: 'ready' });
+        first = false;
         const code = await closed;
         own.forward = null;
         unlinkIfSocket(forwardPath);
@@ -532,20 +543,11 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
         if (stopping) {
           return;
         }
-        const again = await awaitReady(own.commandDone, RECONNECT_PROBE_SECONDS);
-        if (again.kind !== 'ready') {
-          // The watchdog kills the server when its own connection breaks, so a reset that takes the
-          // forward has usually taken the server too. Say which it was: a restart that silently
-          // reloads a language model looks like a hang to whoever is waiting on a parse.
-          write(`${dim('[bica]')} ${dim('The server is gone as well.')}\n`);
-          terminateLiveRemoteCommand();
-          return;
-        }
       }
     } finally {
-      // A supervisor that returns before binding anything must still answer the caller waiting on it,
-      // or `startSession` waits for a forward that is never coming.
-      firstBind(false);
+      // A supervisor that returns before anything answered must still answer the caller waiting on
+      // it, or `startSession` waits for a forward that is never coming.
+      firstReady({ kind: 'bind-failed' });
     }
   };
 
@@ -583,40 +585,39 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       options.repoRoot,
       { dieWithConnection: true },
     );
-    const ready = await awaitReady(commandDone, args.readyTimeoutSeconds);
-    if (ready.kind === 'command') {
-      write(
-        `${warn('[bica]')} The remote command exited (${String(ready.code)}) before its socket ` +
-          'answered; nothing was forwarded. Its output is above.\n',
-      );
-      exitCode = ready.code === 0 ? 1 : ready.code;
-      return false;
-    }
-    if (ready.kind === 'timeout') {
-      write(
-        `${warn('[bica]')} Nothing answered on ${remoteSocket} within ` +
-          `${String(args.readyTimeoutSeconds)}s. Stopping the remote command; raise ` +
-          '--ready-timeout if it is simply slow to start.\n',
-      );
-      terminateLiveRemoteCommand();
-      await commandDone;
-      exitCode = 1;
-      return false;
-    }
-
+    // The forward goes up first now, because readiness is measured through it. Nothing is exposed to
+    // clients until it answers: bica's own listener is the only thing on the path they know about.
     const own: Session = { commandDone, forward: null, alive: true };
     session = own;
-    let reportFirstBind: (bound: boolean) => void = () => {};
-    const firstBound = new Promise<boolean>((resolve) => {
-      reportFirstBind = resolve;
+    let reportFirstReady: (result: FirstReady) => void = () => {};
+    const firstReady = new Promise<FirstReady>((resolve) => {
+      reportFirstReady = resolve;
     });
-    void superviseForward(own, reportFirstBind);
-    if (!(await firstBound)) {
-      write(
-        `${warn('[bica]')} ssh did not bind ${forwardPath}. Stream-local forwarding needs ` +
-          'OpenSSH 6.7 or later on both ends.\n',
-      );
+    void superviseForward(own, reportFirstReady);
+    const ready = await firstReady;
+
+    if (ready.kind !== 'ready') {
       endSession(own);
+      if (ready.kind === 'command') {
+        write(
+          `${warn('[bica]')} The remote command exited (${String(ready.code)}) before anything ` +
+            'answered; nothing was forwarded. Its output is above.\n',
+        );
+        exitCode = ready.code === 0 ? 1 : ready.code;
+        return false;
+      }
+      if (ready.kind === 'bind-failed') {
+        write(
+          `${warn('[bica]')} ssh did not bind ${forwardPath}. Stream-local forwarding needs ` +
+            'OpenSSH 6.7 or later on both ends.\n',
+        );
+      } else {
+        write(
+          `${warn('[bica]')} Nothing answered on ${remoteSocket} within ` +
+            `${String(args.readyTimeoutSeconds)}s. Stopping the remote command; raise ` +
+            '--ready-timeout if it is simply slow to start.\n',
+        );
+      }
       terminateLiveRemoteCommand();
       await commandDone;
       exitCode = 1;

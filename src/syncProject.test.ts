@@ -5,6 +5,7 @@ import YAML from 'yaml';
 
 import {
   BICA_SPEC_FILE,
+  loadRemoteEnvConfig,
   BICA_WORKSPACE_SPEC_FILE,
   DEFAULT_RETURN_FLOW_PATHS,
   findBicaSpecPath,
@@ -155,5 +156,70 @@ describe('findBicaSpecPath / resolveSyncSpecPath', () => {
       'utf8',
     );
     expect(findBicaSpecPath(dir)?.displayName).toBe(BICA_WORKSPACE_SPEC_FILE);
+  });
+});
+
+describe('the remote workspace path is guarded before anything deletes into it', () => {
+  const unsafe = ['~', '~/', '/', '.', '..', '$HOME', '  ~  '];
+
+  it.each(unsafe)('refuses %j', (value) => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-remote-path-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, 'bica.yml'),
+        'sync:\n  mode: one-way-replica\n  ignore:\n    paths: []\n',
+      );
+      fs.mkdirSync(path.join(repoRoot, '.bica'), { recursive: true });
+      fs.writeFileSync(
+        path.join(repoRoot, '.bica', 'local.yml'),
+        // Quoted: a bare `~` is null in YAML, so it would never reach the guard being tested.
+        `sshHost: somehost\nremotePath: ${JSON.stringify(value)}\n`,
+      );
+      // The first push mirrors the repo into this directory with deletions, so a home or root path
+      // takes everything else there with it.
+      expect(() => loadRemoteEnvConfig(repoRoot)).toThrow(
+        /home or root directory|home directory itself/,
+      );
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts an ordinary workspace path', () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-remote-path-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, 'bica.yml'),
+        'sync:\n  mode: one-way-replica\n  ignore:\n    paths: []\n',
+      );
+      fs.mkdirSync(path.join(repoRoot, '.bica'), { recursive: true });
+      fs.writeFileSync(
+        path.join(repoRoot, '.bica', 'local.yml'),
+        'sshHost: somehost\nremotePath: ~/code/me/repo\n',
+      );
+      expect(loadRemoteEnvConfig(repoRoot).remoteWorkspacePath).toBe(
+        '~/code/me/repo',
+      );
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an ssh host that ssh would read as an option', () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-remote-path-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, 'bica.yml'),
+        'sync:\n  mode: one-way-replica\n  ignore:\n    paths: []\n',
+      );
+      fs.mkdirSync(path.join(repoRoot, '.bica'), { recursive: true });
+      fs.writeFileSync(
+        path.join(repoRoot, '.bica', 'local.yml'),
+        'sshHost: -oProxyCommand=touch /tmp/pwned\nremotePath: ~/code/me/repo\n',
+      );
+      expect(() => loadRemoteEnvConfig(repoRoot)).toThrow(/reads? as an option|starts with/);
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 });

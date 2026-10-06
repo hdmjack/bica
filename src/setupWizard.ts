@@ -1,5 +1,6 @@
 /* eslint-disable no-console -- interactive setup */
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import prompts from 'prompts';
 
@@ -242,7 +243,10 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
   const sshHost = (sshAnswer.sshHost ?? '').trim();
 
   const repoBasename = path.basename(repoRoot);
-  const defaultRemote = `~/code/${repoBasename}`;
+  // Namespaced by user: teammates sharing one remote login otherwise all default to the same
+  // directory, where the lease refuses the second of them and, once the first finishes, their pushes
+  // overwrite each other's trees.
+  const defaultRemote = `~/code/${os.userInfo().username}/${repoBasename}`;
 
   if (scaffold.kind === 'rust') {
     console.log(

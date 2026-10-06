@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { isPlainObject } from 'es-toolkit';
 import YAML from 'yaml';
@@ -372,6 +373,39 @@ function readSshHost(repoRoot: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Paths bica must never mirror into, whatever the config says.
+ *
+ * The first destructive push makes the remote directory an exact copy of the local repo, deleting
+ * whatever else is in it. A path one level short of the intended one -- `~/code` where `~/code/repo`
+ * was meant -- therefore deletes every sibling checkout on that machine, and `~` takes the home
+ * directory with it. Both are ordinary typos, and until now nothing stood between them and the
+ * `--delete`.
+ */
+function assertRemoteWorkspacePathIsSafe(remotePath: string): void {
+  const trimmed = remotePath.trim().replace(/\/+$/, '');
+  const forbidden = new Set(['~', '', '/', '.', '..', '$HOME', '~/']);
+  if (forbidden.has(trimmed)) {
+    throw new Error(
+      `remotePath ${JSON.stringify(remotePath)} is a home or root directory, and bica mirrors the ` +
+        'repository into it with deletions. Point it at a directory of its own, e.g. ' +
+        '~/code/<repo>-<yourname>.',
+    );
+  }
+  // A single segment under the home directory is the "one level short" case: `~/code` instead of
+  // `~/code/<repo>`. Not forbidden outright -- somebody may genuinely keep one checkout at `~/work`
+  // -- but worth naming, because the cost of being wrong is every sibling checkout under it.
+  const segments = trimmed
+    .replace(/^~\/?/, '')
+    .split('/')
+    .filter((seg) => seg.length > 0);
+  if (segments.length === 0) {
+    throw new Error(
+      `remotePath ${JSON.stringify(remotePath)} resolves to the remote home directory itself.`,
+    );
+  }
+}
+
 function readRemoteWorkspacePath(
   repoRoot: string,
   local: LocalBicaSettings,
@@ -385,7 +419,11 @@ function readRemoteWorkspacePath(
     return fromFile;
   }
   const repoBasename = path.basename(repoRoot);
-  return `~/code/${repoBasename}`;
+  // The default includes the local username, so that teammates sharing a remote login do not all
+  // land on one workspace. They would not collide quietly: the second is refused by the lease, and
+  // once the first finishes, the second's push mirrors over its tree and reinstalls from a different
+  // lockfile. One directory per person costs nothing and removes the whole class.
+  return `~/code/${os.userInfo().username}/${repoBasename}`;
 }
 
 export function loadRemoteEnvConfig(repoRoot: string): RemoteEnvConfig {
@@ -397,10 +435,29 @@ export function loadRemoteEnvConfig(repoRoot: string): RemoteEnvConfig {
     );
   }
 
-  return {
-    sshHost,
-    remoteWorkspacePath: readRemoteWorkspacePath(repoRoot, local),
-  };
+  const remoteWorkspacePath = readRemoteWorkspacePath(repoRoot, local);
+  // Checked here rather than at each destructive step, because every one of them -- the mirroring
+  // sync, the pinned push, the `.git` mirror -- takes this one value and deletes what it does not
+  // recognise.
+  assertRemoteWorkspacePathIsSafe(remoteWorkspacePath);
+  if (!isSshHostSafe(sshHost)) {
+    throw new Error(
+      `sshHost ${JSON.stringify(sshHost)} starts with "-", which ssh would read as an option rather ` +
+        'than a host. Rename the host in ~/.ssh/config or .bica/local.yml.',
+    );
+  }
+
+  return { sshHost, remoteWorkspacePath };
+}
+
+/**
+ * An ssh host that begins with `-` is an option, not a host.
+ *
+ * `-oProxyCommand=…` in the host position is local command execution, and the value reaches us from a
+ * config file. Cheap to refuse, and there is no legitimate host of that shape.
+ */
+function isSshHostSafe(sshHost: string): boolean {
+  return !sshHost.trim().startsWith('-');
 }
 
 export interface PrepareResult {

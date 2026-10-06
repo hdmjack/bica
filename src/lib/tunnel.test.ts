@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildForwardSshArgs,
-  joinSockets,
   buildSocketReadyScript,
+  joinSockets,
   localSocketObstruction,
   parseTunnelArgs,
 } from './tunnel';
@@ -109,39 +109,6 @@ describe('buildForwardSshArgs', () => {
     expect(args).toContain('ExitOnForwardFailure=yes');
     expect(args).toContain('StreamLocalBindUnlink=yes');
     expect(args.slice(-3)).toEqual(['-L', '/tmp/a.sock:/srv/b.sock', 'mini']);
-  });
-});
-
-describe('buildSocketReadyScript', () => {
-  it('waits for an answer, not merely for a file at the path', () => {
-    const script = buildSocketReadyScript('/srv/b.sock', 30);
-    expect(script).toContain("[ -S '/srv/b.sock' ] || return 1");
-    expect(script).toContain('s.connect(sys.argv[1])');
-    expect(script).toContain("python3 -c '");
-  });
-
-  it('falls back to the file check where no interpreter can connect', () => {
-    expect(buildSocketReadyScript('/srv/b.sock', 30)).toContain(
-      'command -v python3 >/dev/null 2>&1 || return 0',
-    );
-  });
-
-  it('keeps the connect program free of single quotes, which would end its argument', () => {
-    const script = buildSocketReadyScript('/srv/b.sock', 30);
-    const program = script.slice(
-      script.indexOf("python3 -c '") + "python3 -c '".length,
-    );
-    expect(program.slice(0, program.indexOf("'"))).toContain('sys.exit(1)');
-  });
-
-  it('quotes the path and gives the loop a deadline', () => {
-    const script = buildSocketReadyScript("/srv/it's here.sock", 7);
-    expect(script).toContain(`'/srv/it'\\''s here.sock'`);
-    expect(script).toContain('+ 7 ))');
-  });
-
-  it('rounds a fractional timeout up, since shell arithmetic is integer', () => {
-    expect(buildSocketReadyScript('/srv/b.sock', 1.2)).toContain('+ 2 ))');
   });
 });
 
@@ -330,5 +297,25 @@ describe('parseTunnelArgs: the restart flag has two jobs', () => {
         'serve',
       ]),
     ).toThrow(/--restart must be one of/);
+  });
+});
+
+describe('buildSocketReadyScript', () => {
+  it('waits for a socket using POSIX test alone, with no interpreter', () => {
+    const script = buildSocketReadyScript('/srv/b.sock', 30);
+    expect(script).toContain("[ ! -S '/srv/b.sock' ]");
+    // No python3, perl or netcat: the remote may have none of them, and a probe that silently
+    // degrades to this same check is worse than doing this check openly.
+    expect(script).not.toMatch(/python|perl|nc |socat/);
+  });
+
+  it('quotes the path and gives the loop a deadline', () => {
+    const script = buildSocketReadyScript("/srv/it's here.sock", 7);
+    expect(script).toContain(`'/srv/it'\\''s here.sock'`);
+    expect(script).toContain('+ 7 ))');
+  });
+
+  it('rounds a fractional timeout up, since shell arithmetic is integer', () => {
+    expect(buildSocketReadyScript('/srv/b.sock', 1.2)).toContain('+ 2 ))');
   });
 });
