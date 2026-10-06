@@ -2,8 +2,6 @@
 
 **Bica** is a small CLI for **remote dev workspaces**: file sync (`prepare` / `start` / `stop` / …), interactive `ssh`, and **argv-safe** remote commands (`bica run …`). It reads **`bica.yml`** at the **Git repository root** (legacy: **`bica-workspace.yml`**). SSH host / remote path can live in **`.bica/local.yml`** (gitignored) or **`BICA_*`** env — run **`bica init`** for an interactive setup.
 
-This tree is designed to live in **its own repository**. The copy under `web-app/packages/bica` is wired in via `file:./packages/bica` so the monorepo can depend on it until you publish or subtree-split.
-
 ## `bica run`
 
 Remote commands **must** include the `run` subcommand (e.g. **`bica run pnpm test`**). There is no shorthand like `bica pnpm test`.
@@ -74,7 +72,7 @@ It only bites when the files are missing *locally*, so a checkout where you have
 yourself never sees it, and a fresh clone or a new `git worktree` sees it immediately. That asymmetry
 is what makes it read as a code error rather than a sync one.
 
-A real example from `web-app`: `ui/src/icons/essentials/.gitignore` ignores `Icon*.tsx`, and
+A real example: a package whose `.gitignore` ignores generated `Icon*.tsx`, and
 `ui/package.json`'s `postinstall` generates exactly those. Point bica at a worktree that has never
 installed locally and the remote typecheck fails with hundreds of `TS2307 Cannot find module
 '@acme/ui/icons/...'` — the modules were generated, then deleted.
@@ -855,12 +853,3 @@ pnpm dev
 pnpm dev -- plugins list
 ```
 
-From the Acme monorepo: **`pnpm bica:build`** (typecheck), **`pnpm bica:dev`** (maintainer watch loop).
-
-## Splitting from a monorepo
-
-To move this folder to a dedicated repo: copy **`packages/bica`** (this package root), run **`pnpm install`** there, fix **`repository`** / **`homepage`** in **`package.json`** if URLs differ, then in the monorepo replace the vendored path with **`"bica": "git+https://github.com/org/bica.git#semver:…"`** or a registry version.
-
-## web-app (vendored copy)
-
-In the Acme monorepo, **`bica`** is **`file:./packages/bica`** on the root package and **`packages/bica`** is listed in **`pnpm-workspace.yaml`** so its dependencies (e.g. **chalk**) link correctly. Use **`pnpm bica`** / **`pnpm remote`** from the monorepo root — those scripts invoke the **`bica`** binary from `node_modules`. **`pnpm bica:build`** typechecks bica; **`pnpm bica:dev`** runs the maintainer watch loop.
