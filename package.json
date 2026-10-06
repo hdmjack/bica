@@ -48,5 +48,8 @@
   "repository": {
     "type": "git",
     "url": "git+ssh://git@github.com/hdmjack/bica.git"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
   }
 }
