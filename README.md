@@ -40,19 +40,19 @@ behave on native Windows. See [Platform support](#platform-support).
 ## Install
 
 ```bash
-pnpm add -g git+ssh://git@github.com/hdmjack/bica.git#v0.1.0
+pnpm add -g hdmjack/bica
 ```
 
 That is the whole install: it brings its own dependencies and needs no build step. Check it with
-`bica --version`. The ssh form works whether or not the repository is public, as long as you can
-already `git clone` from GitHub over ssh.
+`bica --version`. Pin a version with `pnpm add -g hdmjack/bica#v0.1.0`, and update with the same
+command naming a later tag.
 
 pnpm prints `dependencies have build scripts that were ignored: esbuild` and that is expected —
 esbuild arrives through tsx, ships a prebuilt binary for your platform, and has nothing to build.
 
-**Updating** is the same command with a later tag. `bica --version` tells you what you have, and the
-[CHANGELOG](CHANGELOG.md) says what changed — worth reading before updating, because two entries so
-far change what an *older* bica sees on a shared remote.
+`bica --version` tells you what you have, and the [CHANGELOG](CHANGELOG.md) says what changed — worth
+reading before updating, because two entries so far change what an *older* bica sees on a shared
+remote.
 
 **Working on bica itself** wants a clone instead:
 
