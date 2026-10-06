@@ -136,6 +136,44 @@ const SSH_HOST_TEXT_MESSAGE =
   'SSH target (Host alias from ~/.ssh/config or user@hostname; saved to .bica/local.yml)';
 
 /**
+ * Make sure `.bica/` is ignored by the repository it was just written into.
+ *
+ * `.bica/local.yml` holds one person's ssh host and remote path, and `.bica/project.yml` holds their
+ * absolute local path. Both are described everywhere as gitignored, which was true only because the
+ * one repository bica grew up in happened to have the line already. In any other repository the
+ * first `bica init` left them to be committed, and the next person to clone would inherit somebody
+ * else's machine.
+ *
+ * Appended rather than rewritten, and only when no existing rule already covers it.
+ */
+export function ensureBicaIsGitignored(repoRoot: string): 'added' | 'present' | 'failed' {
+  const gitignore = path.join(repoRoot, '.gitignore');
+  try {
+    let existing = '';
+    try {
+      existing = fs.readFileSync(gitignore, 'utf8');
+    } catch {
+      // No .gitignore yet; one with this single rule is still the right outcome.
+    }
+    const covered = existing
+      .split('\n')
+      .map((line) => line.trim())
+      .some((line) => line === '.bica' || line === '.bica/' || line === '/.bica/');
+    if (covered) {
+      return 'present';
+    }
+    const separator = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+    fs.appendFileSync(
+      gitignore,
+      `${separator}\n# bica: your ssh host, remote path and generated sync project file\n.bica/\n`,
+    );
+    return 'added';
+  } catch {
+    return 'failed';
+  }
+}
+
+/**
  * Interactive first-time setup: writes bica.yml and .bica/local.yml (gitignored SSH/path).
  */
 export async function runSetupWizard(repoRoot: string): Promise<void> {
@@ -277,9 +315,18 @@ export async function runSetupWizard(repoRoot: string): Promise<void> {
     writeLocalBicaSettings(repoRoot, { sshHost, remotePath });
     process.env.BICA_SSH_HOST = sshHost;
     process.env.BICA_REMOTE_PATH = remotePath;
-    console.log(
-      ok('Wrote .bica/local.yml (gitignored) with sshHost and remotePath.'),
-    );
+    const ignored = ensureBicaIsGitignored(repoRoot);
+    console.log(ok('Wrote .bica/local.yml with sshHost and remotePath.'));
+    if (ignored === 'added') {
+      console.log(ok('Added `.bica/` to .gitignore — it holds settings that are yours alone.'));
+    } else if (ignored === 'failed') {
+      console.log(
+        warn(
+          'Could not update .gitignore. Add `.bica/` to it yourself: it holds your ssh host and\n' +
+            'remote path, which should not be committed.',
+        ),
+      );
+    }
   } else {
     console.log(
       dim(

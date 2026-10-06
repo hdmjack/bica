@@ -294,6 +294,32 @@ Examples
 `);
 }
 
+/**
+ * bica's own version, read from the package it ships in.
+ *
+ * Worth having because bica keeps state on the remote that several people and several versions can
+ * reach -- the workspace lease, the install record -- so "which bica is this?" is a question with
+ * consequences, and until now there was no way to answer it.
+ */
+function readOwnVersion(): string {
+  const dir = path.dirname(fileURLToPath(import.meta.url));
+  try {
+    const raw = fs.readFileSync(path.join(dir, '..', 'package.json'), 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'version' in parsed &&
+      typeof (parsed as { version?: unknown }).version === 'string'
+    ) {
+      return (parsed as { version: string }).version;
+    }
+  } catch {
+    // Falls through: a version we cannot read is worth saying so about, not worth failing over.
+  }
+  return 'unknown';
+}
+
 function die(message: string): never {
   console.error(message);
   process.exit(1);
@@ -1169,6 +1195,11 @@ async function main(): Promise<void> {
   // Maintainer: tsx watch (see scripts/dev.cjs) re-runs the CLI on save; default argv is this
   // no-op so we do not print the full help page on every file change.
   if (rest.length === 1 && rest[0] === 'watch-idle') {
+    process.exit(0);
+  }
+
+  if (rest[0] === '--version' || rest[0] === '-v' || rest[0] === 'version') {
+    console.log(readOwnVersion());
     process.exit(0);
   }
 

@@ -524,7 +524,7 @@ const REMOTE_LOGIN_RC_ENV_HINT_LINES = [
   'If many KEY=value lines appear once ssh connects, they usually come from the',
   'remote login shell (e.g. ~/.zprofile). In zsh, export with no variable names lists',
   'every export. That is not bica printing environment variables.',
-  'More: packages/bica/README.md (Troubleshooting).',
+  "More: bica's README, under Troubleshooting.",
 ] as const;
 
 function remoteEnvHintBlock(isDebug: boolean): string {

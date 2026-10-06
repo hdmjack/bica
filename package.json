@@ -1,7 +1,8 @@
 {
   "name": "bica",
-  "version": "0.0.1",
-  "description": "Remote workspace CLI — file sync, SSH, and argv-safe remote commands",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remote workspace CLI \u2014 file sync, SSH, and argv-safe remote commands",
   "license": "MIT",
   "author": "Haakon Jack",
   "engines": {
@@ -12,9 +13,13 @@
   },
   "files": [
     "bin",
-    "scripts",
-    "src",
+    "scripts/build.cjs",
+    "scripts/dev.cjs",
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
     "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
     "tsconfig.json"
   ],
   "scripts": {
@@ -39,5 +44,9 @@
     "eslint": "^10.2.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/hdmjack/bica.git"
   }
 }
