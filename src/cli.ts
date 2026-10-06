@@ -37,6 +37,7 @@ import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
 import {
   acquireWorkspace,
   runPinned,
+  RemoteUnreachableError,
   WorkspaceInUseError,
 } from './lib/pinnedRun';
 import {
@@ -1062,7 +1063,7 @@ async function cmdRun(options: {
   } catch (e: unknown) {
     // A busy workspace is not a bica failure and not a verdict on the code. Its own exit code lets a
     // caller tell "try later" from "something broke".
-    if (e instanceof WorkspaceInUseError) {
+    if (e instanceof WorkspaceInUseError || e instanceof RemoteUnreachableError) {
       process.stderr.write(`${e.message}\n`);
       process.exitCode = e.exitCode;
       return;

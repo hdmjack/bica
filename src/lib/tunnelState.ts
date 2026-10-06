@@ -224,30 +224,57 @@ export function cleanUpAfterDeadTunnel(record: TunnelRecord): string[] {
  * there bound to a socket that has been unlinked, holding a connection open to the remote -- which is
  * why the server on the other end stays alive long after the tunnel that started it.
  *
- * Matched by the socket paths in their own argv rather than by recorded pids, because the pids change
- * every time a forward is re-established and a record written on each reconnect would be a file
- * written for every network hiccup. Both paths are digests unique to this tunnel, so nothing else can
- * match them.
+ * Matched by argv rather than by recorded pids, because the pids change every time a forward is
+ * re-established and a record written on each reconnect would be a file written for every network
+ * hiccup.
+ *
+ * The match is deliberately narrow, and the first version of it was not. It also searched for the
+ * *remote* socket path, which is an ordinary name the user chose -- `/tmp/parser.sock` and the like --
+ * and `pgrep -f` compares it against every command line on the machine. So listing your tunnels could
+ * SIGTERM a local server started with the same path, a tail on a log of that name, or a live tunnel of
+ * someone else's pointing at the same remote socket. Only the forward socket is used now: it is a
+ * digest under bica's own state directory, it appears in no command line but this tunnel's forward,
+ * and the process found must be an `ssh` before anything is signalled.
  */
 function killOrphanedSsh(record: TunnelRecord): number[] {
-  const patterns = [forwardSocketPathFor(record.localSocket), record.remoteSocket];
+  const pattern = forwardSocketPathFor(record.localSocket);
+  const found = spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8' });
+  if (found.error !== undefined) {
+    // No pgrep: the sweep is off rather than silently believed to have happened.
+    return [];
+  }
   const killed: number[] = [];
-  for (const pattern of patterns) {
-    const found = spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8' });
-    for (const line of (found.stdout ?? '').split('\n')) {
-      const pid = Number(line.trim());
-      // Never this process: `pgrep -f` matches any command line containing the path, and a bica
-      // command cleaning up after a tunnel has that path in its own arguments.
-      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
-        continue;
-      }
-      try {
-        process.kill(pid, 'SIGTERM');
-        killed.push(pid);
-      } catch {
-        // Gone between finding it and signalling it, which is the outcome this wanted.
-      }
+  for (const line of (found.stdout ?? '').split('\n')) {
+    const pid = Number(line.trim());
+    // Never this process: a bica command cleaning up after a tunnel has that path in its own argv.
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+      continue;
+    }
+    if (!processIsSsh(pid)) {
+      continue;
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+      killed.push(pid);
+    } catch {
+      // Gone between finding it and signalling it, which is the outcome this wanted.
     }
   }
   return killed;
+}
+
+/**
+ * Whether a pid is an `ssh`, asked of the process table rather than inferred.
+ *
+ * The belt to the digest's braces. Signalling by pattern match is only ever as good as the pattern,
+ * and the cost of being wrong here is somebody else's process dying.
+ */
+function processIsSsh(pid: number): boolean {
+  const ps = spawnSync('/bin/ps', ['-o', 'comm=', '-p', String(pid)], {
+    encoding: 'utf8',
+  });
+  if (ps.error !== undefined || ps.status !== 0) {
+    return false;
+  }
+  return path.basename((ps.stdout ?? '').trim()) === 'ssh';
 }

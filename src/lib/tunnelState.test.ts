@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
 import * as os from 'node:os';
@@ -167,5 +168,63 @@ describe('cleaning up after a tunnel that was killed', () => {
     const rec = record({ localSocket });
     expect(cleanUpAfterDeadTunnel(rec)).toEqual([]);
     expect(fs.existsSync(localSocket)).toBe(true);
+  });
+});
+
+describe('what the orphan sweep is allowed to kill', () => {
+  const realHome = process.env.HOME;
+
+  beforeEach(() => {
+    fs.rmSync(HOME, { force: true, recursive: true });
+    fs.mkdirSync(HOME, { recursive: true });
+    process.env.HOME = HOME;
+  });
+
+  afterEach(() => {
+    if (realHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = realHome;
+    }
+    fs.rmSync(HOME, { force: true, recursive: true });
+  });
+
+  it('spares a process that merely has the remote socket path in its arguments', async () => {
+    // The remote socket is an ordinary name the user chose -- /tmp/parser.sock and the like -- and
+    // `pgrep -f` is a substring match over every command line on the machine. Searching for it meant
+    // `bica tunnel --list` could SIGTERM a local server of the same name, a tail on its log, or
+    // someone else's live tunnel to the same remote socket.
+    const remoteSocket = '/tmp/bica-decoy-sweep-test.sock';
+    // The loop matters: `sh -c 'sleep 30' <arg>` execs straight into sleep, which drops the argument
+    // from the command line and so would not be found by the very search being tested.
+    const decoy = spawn(
+      'sh',
+      ['-c', 'while :; do sleep 1; done', remoteSocket],
+      { stdio: 'ignore' },
+    );
+    // Watch for the exit rather than reading `exitCode`: a child killed by a signal keeps a null
+    // exit code and reports the signal separately, so the obvious assertion holds either way.
+    let exited = false;
+    decoy.on('exit', () => {
+      exited = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 200));
+      expect(decoy.pid).toBeDefined();
+      expect(exited).toBe(false);
+
+      cleanUpAfterDeadTunnel(
+        record({
+          localSocket: path.join(HOME, 'gone.sock'),
+          remoteSocket,
+          pid: 2 ** 30,
+        }),
+      );
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+      expect(exited).toBe(false);
+    } finally {
+      decoy.kill('SIGKILL');
+    }
   });
 });

@@ -82,6 +82,21 @@ export class WorkspaceInUseError extends Error {
 }
 
 /**
+ * Exit code for "the remote could not be reached or entered; nothing ran".
+ *
+ * Shared with the remote-side `cd` failure, and for the same reason: both mean the command never
+ * started, which is the distinction a caller needs. What it must never be confused with is 98, which
+ * says another run holds the workspace -- "wait and retry" is useless advice to someone whose ssh is
+ * not working, and that is precisely what it used to say.
+ */
+export const REMOTE_UNREACHABLE_EXIT = 96;
+
+/** Thrown when ssh failed, so nothing is known about the lease or the workspace. */
+export class RemoteUnreachableError extends Error {
+  readonly exitCode = REMOTE_UNREACHABLE_EXIT;
+}
+
+/**
  * Lease the remote workspace for the lifetime of this run.
  *
  * The lease lives on the remote, not in the checkout, because that is where the contended thing is.
@@ -115,6 +130,17 @@ export function acquireWorkspace(options: {
       lease.break(remoteWorkspacePath, result.heldBy);
     }
     result = lease.acquire(remoteWorkspacePath, owner, options.command);
+  }
+  if (!result.ok && result.transport !== undefined) {
+    // Reported before any lease reasoning, because none of it applies: a probe that never ran tells
+    // us nothing about who holds what.
+    const { status, stderr } = result.transport;
+    const detail = stderr.length > 0 ? `\n${stderr}` : '';
+    throw new RemoteUnreachableError(
+      `Could not reach ${options.sshHost} over ssh (exit ${String(status)}), so nothing ran.${detail}\n` +
+        `Check that \`ssh ${options.sshHost}\` works from here, and that the remote has the login ` +
+        'shell bica uses (zsh by default; set BICA_LOGIN_SHELL=bash for a remote without it).',
+    );
   }
   if (!result.ok) {
     throw new WorkspaceInUseError(

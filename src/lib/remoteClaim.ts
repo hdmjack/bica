@@ -50,12 +50,28 @@ export interface ClaimOwner {
   startedAt?: number;
 }
 
+/**
+ * ssh never got far enough to learn anything about the lease.
+ *
+ * Kept apart from "someone holds it" because the two need opposite reactions and used to produce the
+ * same sentence: an unreachable host, a missing key or a remote without the configured login shell
+ * were all reported as `This remote workspace is in use by claim probe failed (ssh exit 255)`, with
+ * advice to wait for a run that does not exist. ssh's own words are the useful part, so they are
+ * carried rather than discarded.
+ */
+export interface ClaimTransportFailure {
+  status: number;
+  stderr: string;
+}
+
 export type ClaimResult =
   | { ok: true }
   | {
       ok: false;
       heldBy: ClaimOwner | null;
       raw: string;
+      /** Set when ssh itself failed, in which case nothing is known about the lease. */
+      transport?: ClaimTransportFailure;
       /** The command the holder is running, when it recorded one. */
       command?: string;
       /** The remote's clock at the moment of refusal, for an age. */
@@ -129,9 +145,9 @@ export function parseOwner(raw: string): ClaimOwner | null {
 function runRemoteScript(
   sshHost: string,
   script: string,
-): { status: number; stdout: string } {
+): { status: number; stdout: string; stderr: string } {
   const r = runRemoteScriptOverStdin(sshHost, script);
-  return { status: r.status, stdout: r.stdout.trim() };
+  return { status: r.status, stdout: r.stdout.trim(), stderr: r.stderr.trim() };
 }
 
 /**
@@ -310,9 +326,14 @@ export function remoteAcquireClaim(
     REMOTE_CLAIM_DIR,
     command,
   );
-  const { status, stdout } = runRemoteScript(sshHost, script);
+  const { status, stdout, stderr } = runRemoteScript(sshHost, script);
   if (status !== 0) {
-    return { ok: false, heldBy: null, raw: `claim probe failed (ssh exit ${String(status)})` };
+    return {
+      ok: false,
+      heldBy: null,
+      raw: `claim probe failed (ssh exit ${String(status)})`,
+      transport: { status, stderr },
+    };
   }
   if (stdout.startsWith('OK')) {
     return { ok: true };

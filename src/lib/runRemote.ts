@@ -280,11 +280,17 @@ export function runRemoteScriptOverStdin(
     login?: boolean;
   },
 ): { status: number; stdout: string; stderr: string } {
-  const shell = loginShellFromEnv();
   const login = options?.login === true;
-  const runner = shell.includes('bash')
-    ? [shell, ...(login ? ['-l'] : ['--noprofile', '--norc']), '-s']
-    : [shell, ...(login ? ['-l'] : ['-f']), '-s'];
+  // A probe runs under plain `sh`, not under the configured login shell.
+  //
+  // These scripts are POSIX and need no tooling: they read a claim file, test a directory, write a
+  // record. Running them through `zsh` -- the default, because the *commands* usually want a login
+  // shell that a version manager has set up -- made every one of them depend on zsh existing on the
+  // remote. On a Linux host without it, every probe returned 127, and because a failed claim probe
+  // was indistinguishable from a held lease, the user was told to wait for a run that did not exist.
+  // `sh` is the one shell POSIX guarantees.
+  const shell = login ? loginShellFromEnv() : 'sh';
+  const runner = login ? [shell, '-l', '-s'] : [shell, '-s'];
   const result = spawnSync('ssh', ['-T', sshHost, ...runner], {
     input: script,
     encoding: 'utf8',
@@ -696,6 +702,37 @@ export function wrapCommandToDieWithConnection(command: string): string {
  * Defaults to `zsh -lc` so macOS picks up ~/.zprofile / ~/.zshrc (pnpm, nvm, Homebrew, etc.).
  * Non-macOS remotes: set BICA_LOGIN_SHELL=bash (and optionally BICA_LOGIN_FLAGS=-lc).
  */
+
+/** Hosts whose login shell has been confirmed to exist, so the check costs one probe per host. */
+const confirmedLoginShells = new Map<string, boolean>();
+
+/**
+ * Whether the configured login shell exists on the remote.
+ *
+ * Worth a probe because its absence does not fail -- it half-succeeds, which is worse. ssh joins its
+ * arguments into one string and the remote's *own* login shell parses the result, so when `zsh` is
+ * missing the first line of the script becomes a "command not found" and every following line is
+ * executed by whatever shell the remote actually has. The run then proceeds without its PATH preamble
+ * and fails later, somewhere else, for a reason that looks nothing like the cause.
+ *
+ * Probed under `sh`, which POSIX guarantees, so this check cannot itself depend on the thing it is
+ * checking for.
+ */
+export function remoteLoginShellExists(sshHost: string, shell: string): boolean {
+  const key = `${sshHost}\u0000${shell}`;
+  const cached = confirmedLoginShells.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const { status } = runRemoteScriptOverStdin(
+    sshHost,
+    `command -v ${shellSingleQuoteRemotePathForSh(shell)} >/dev/null 2>&1\n`,
+  );
+  const exists = status === 0;
+  confirmedLoginShells.set(key, exists);
+  return exists;
+}
+
 /**
  * The ssh carrying the run, while one is in flight.
  *
@@ -774,6 +811,15 @@ export async function runRemoteCommand(
 
   const shell = loginShellFromEnv();
   const flags = loginFlagsFromEnv();
+  if (!remoteLoginShellExists(sshHost, shell)) {
+    process.stderr.write(
+      `[bica] ${sshHost} has no \`${shell}\`, which is the shell bica runs commands under, so nothing ran.\n` +
+        `[bica] Set BICA_LOGIN_SHELL to one it does have (bash on most Linux hosts): BICA_LOGIN_SHELL=bash bica run …\n` +
+        '[bica] Checked rather than attempted because a missing login shell does not fail cleanly: ssh hands the\n' +
+        "[bica] script to the remote's own shell, which runs most of it without the setup line and fails later.\n",
+    );
+    return REMOTE_CD_FAILED_EXIT;
+  }
 
   // Only force a PTY for a genuine interactive terminal. When piped/redirected, `-T` keeps
   // remote tool output clean (no ANSI color, no `\r` spinners, line-buffered).
