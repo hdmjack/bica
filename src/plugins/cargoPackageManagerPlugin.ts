@@ -2,17 +2,11 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import type {
-  AutoDiscoverContext,
-  PackageManagerPlugin,
-  PackageManagerStateContext,
-} from './types';
+import type { AutoDiscoverContext, PackageManagerPlugin } from './types';
 
 const LOCKFILE = 'Cargo.lock';
 const MANIFEST = 'Cargo.toml';
 
-/** Relative to the workspace's state dir, so `.bica/hashes/…` for the default run. */
-const CARGO_FETCH_HASH_RELATIVE = path.join('hashes', 'cargo-fetch');
 
 /**
  * argv1 values that resolve / mutate the lockfile and so should refresh the recorded fingerprint.
@@ -63,27 +57,6 @@ export const cargoPackageManagerPlugin: PackageManagerPlugin = {
   },
   readLocalFingerprint(repoRoot: string): string | null {
     return digestFile(repoRoot, LOCKFILE);
-  },
-  readStoredHash(ctx: PackageManagerStateContext): string | null {
-    const p = path.join(ctx.stateDir, CARGO_FETCH_HASH_RELATIVE);
-    try {
-      const t = fs.readFileSync(p, 'utf8').trim();
-      return t.length > 0 ? t : null;
-    } catch {
-      return null;
-    }
-  },
-  writeStoredHash(ctx: PackageManagerStateContext, digest: string): void {
-    const p = path.join(ctx.stateDir, CARGO_FETCH_HASH_RELATIVE);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, `${digest}\n`, 'utf8');
-  },
-  clearStoredHash(ctx: PackageManagerStateContext): void {
-    try {
-      fs.rmSync(path.join(ctx.stateDir, CARGO_FETCH_HASH_RELATIVE), { force: true });
-    } catch {
-      // Nothing recorded, or unreadable. Either way the next run installs, which is the safe default.
-    }
   },
   isInstallArgv(remoteArgv: string[]): boolean {
     if (remoteArgv[0] !== 'cargo') {

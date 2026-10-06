@@ -1,5 +1,3 @@
-import * as path from 'node:path';
-
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
 import { remoteMissingGeneratedPaths } from './generatedPaths';
@@ -8,46 +6,33 @@ import {
   resolveActivePackageManagerPlugins,
 } from '../resolveActivePlugins';
 import {
+  clearRemoteInstallRecord,
+  readRemoteInstallRecord,
+  writeRemoteInstallRecord,
+} from './remoteInstallState';
+import {
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
   runRemoteCommand,
 } from './runRemote';
-import type {
-  PackageManagerPlugin,
-  PackageManagerStateContext,
-} from '../plugins/types';
+import type { PackageManagerPlugin } from '../plugins/types';
 import type { PrepareResult } from '../syncProject';
 
-/** Where the record of what the remote workspace has installed lives. */
-export function packageManagerStateContext(
-  repoRoot: string,
-): PackageManagerStateContext {
+/**
+ * What the lockfile here says against what the remote says it installed.
+ *
+ * Both readings are taken once and compared together, because they used to be taken separately and
+ * the second of them is now an ssh round trip.
+ */
+function compareFingerprints(options: {
+  local: string | null;
+  remote: string | null;
+}): { initial: boolean; drift: boolean } {
+  const { local, remote } = options;
   return {
-    repoRoot,
-    stateDir: path.join(repoRoot, '.bica'),
+    initial: remote === null && local !== null,
+    drift: remote !== null && local !== null && remote !== local,
   };
-}
-
-function isFingerprintOutOfSync(
-  plugin: PackageManagerPlugin,
-  ctx: PackageManagerStateContext,
-): boolean {
-  const local = plugin.readLocalFingerprint(ctx.repoRoot);
-  const stored = plugin.readStoredHash(ctx);
-  if (!stored || !local) {
-    return false;
-  }
-  return stored !== local;
-}
-
-/** No `.bica/hashes/...` yet but we have a lockfile digest — typical first `bica run` after sync. */
-function needsInitialRemoteInstall(
-  plugin: PackageManagerPlugin,
-  ctx: PackageManagerStateContext,
-): boolean {
-  const local = plugin.readLocalFingerprint(ctx.repoRoot);
-  const stored = plugin.readStoredHash(ctx);
-  return stored === null && local !== null;
 }
 
 /** Registry-auth hint only makes sense for package managers that authenticate to a registry. */
@@ -123,7 +108,6 @@ export async function runRemoteCommandWithPmHooks(options: {
 }): Promise<number> {
   const { prep, remoteArgv, pmOverride } = options;
   const { repoRoot, config } = prep;
-  const stateCtx = packageManagerStateContext(repoRoot);
 
   const dirReady = await ensureRemoteWorkspaceDirectory(
     config.sshHost,
@@ -141,14 +125,17 @@ export async function runRemoteCommandWithPmHooks(options: {
     matchingPackageManagerPlugins(active, argv, pmOverride),
   );
 
-  // A workspace we just created has no node_modules, whatever the local fingerprint claims. The
-  // fingerprint records what a *remote* workspace has installed but lives locally, so anything that
-  // removes the remote directory -- a manual rm, a wiped host, a recreated workspace -- leaves it
-  // asserting an install that no longer exists. The next run would then skip the install and execute
-  // against an empty workspace. Clearing it on creation keeps the claim tied to something real.
+  // A workspace we just created has no node_modules, whatever any record claims. The record lives
+  // beside the workspace rather than inside it -- a record inside would be deleted by the sync -- so
+  // anything that removes the directory itself leaves the record asserting an install that no longer
+  // exists. Clearing it on creation keeps the claim tied to something real.
   if (dirReady.created) {
     for (const plugin of active) {
-      plugin.clearStoredHash(stateCtx);
+      clearRemoteInstallRecord(
+        config.sshHost,
+        config.remoteWorkspacePath,
+        plugin.id,
+      );
     }
   }
 
@@ -163,9 +150,19 @@ export async function runRemoteCommandWithPmHooks(options: {
 
   if (plugin) {
     const isInstall = candidates.some((argv) => plugin.isInstallArgv(argv));
-    const initial = !isInstall && needsInitialRemoteInstall(plugin, stateCtx);
-    const lockfileDrift =
-      !isInstall && isFingerprintOutOfSync(plugin, stateCtx);
+    const localFingerprint = plugin.readLocalFingerprint(repoRoot);
+    const compared = isInstall
+      ? { initial: false, drift: false }
+      : compareFingerprints({
+          local: localFingerprint,
+          remote: readRemoteInstallRecord(
+            config.sshHost,
+            config.remoteWorkspacePath,
+            plugin.id,
+          ),
+        });
+    const initial = compared.initial;
+    const lockfileDrift = compared.drift;
     // Ask whether the output is actually there, rather than inferring it from the lockfile. A
     // `git worktree` has every gitignored generated file missing and an unchanged lockfile, so the
     // fingerprint says "installed" while the workspace cannot compile. Only probed when the repo
@@ -191,7 +188,7 @@ export async function runRemoteCommandWithPmHooks(options: {
       const reason = initial
         ? `[bica] No remote install recorded yet (${plugin.id}); running ${plugin.remoteInstallCommand}.`
         : lockfileDrift
-          ? `[bica] Lockfile changed since last remote install (${plugin.id}); reinstalling.`
+          ? `[bica] The remote workspace last installed from a different lockfile (${plugin.id}); reinstalling.`
           : `[bica] Generated output missing on the remote (${missingGenerated.join(', ')}); ` +
             `running ${repairCommand} to produce it.`;
       process.stderr.write(`${reason}\n`);
@@ -213,9 +210,13 @@ export async function runRemoteCommandWithPmHooks(options: {
         maybeWriteCredentialsHint(plugin);
         return installCode;
       }
-      const fp = plugin.readLocalFingerprint(repoRoot);
-      if (fp !== null) {
-        plugin.writeStoredHash(stateCtx, fp);
+      if (localFingerprint !== null) {
+        writeRemoteInstallRecord(
+          config.sshHost,
+          config.remoteWorkspacePath,
+          plugin.id,
+          localFingerprint,
+        );
       }
     }
   }
@@ -233,7 +234,12 @@ export async function runRemoteCommandWithPmHooks(options: {
     if (wasInstall && code === 0) {
       const fp = plugin.readLocalFingerprint(repoRoot);
       if (fp !== null) {
-        plugin.writeStoredHash(stateCtx, fp);
+        writeRemoteInstallRecord(
+          config.sshHost,
+          config.remoteWorkspacePath,
+          plugin.id,
+          fp,
+        );
       }
     } else if (wasInstall && code !== 0) {
       maybeWriteCredentialsHint(plugin);

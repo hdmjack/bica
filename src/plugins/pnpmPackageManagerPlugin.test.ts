@@ -4,7 +4,6 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { pnpmPackageManagerPlugin as plugin } from './pnpmPackageManagerPlugin';
-import type { PackageManagerStateContext } from './types';
 
 let dir = '';
 
@@ -15,13 +14,6 @@ beforeEach(() => {
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
-
-function ctx(): PackageManagerStateContext {
-  return {
-    repoRoot: dir,
-    stateDir: path.join(dir, '.bica'),
-  };
-}
 
 describe('remoteInstallCommand', () => {
   it('runs under CI, because the remote never has a TTY', () => {
@@ -35,15 +27,24 @@ describe('remoteInstallCommand', () => {
 describe('fingerprinting', () => {
   it('has no fingerprint without a lockfile', () => {
     expect(plugin.readLocalFingerprint(dir)).toBeNull();
-    expect(plugin.readStoredHash(ctx())).toBeNull();
   });
 
-  it('round-trips a lockfile digest', () => {
+  it('digests the lockfile itself, so the same lockfile fingerprints alike anywhere', () => {
     fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
-    const local = plugin.readLocalFingerprint(dir);
-    expect(local).not.toBeNull();
-    plugin.writeStoredHash(ctx(), local as string);
-    expect(plugin.readStoredHash(ctx())).toBe(local);
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-pnpm-twin-'));
+    try {
+      fs.writeFileSync(
+        path.join(elsewhere, 'pnpm-lock.yaml'),
+        'lockfileVersion: 9\n',
+      );
+      // Two checkouts of one lockfile describe one `node_modules`, which is what lets the record
+      // they share on the remote mean anything.
+      expect(plugin.readLocalFingerprint(dir)).toBe(
+        plugin.readLocalFingerprint(elsewhere),
+      );
+    } finally {
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   it('changes when the lockfile changes, which is what triggers a reinstall', () => {
@@ -54,14 +55,6 @@ describe('fingerprinting', () => {
     expect(plugin.readLocalFingerprint(dir)).not.toBe(before);
   });
 
-  it('clearStoredHash forgets a recorded install', () => {
-    // The record describes a *remote* workspace but lives locally, so it must be dropped whenever
-    // that workspace is recreated, or the next run skips the install into an empty directory.
-    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
-    plugin.writeStoredHash(ctx(), plugin.readLocalFingerprint(dir) as string);
-    plugin.clearStoredHash(ctx());
-    expect(plugin.readStoredHash(ctx())).toBeNull();
-  });
 });
 
 describe('argv matching', () => {

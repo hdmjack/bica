@@ -14,18 +14,6 @@ export interface CredentialsSyncContext {
   confirm: ConfirmFn;
 }
 
-/**
- * Where a package-manager plugin records what the *remote* workspace has installed.
- *
- * The record lives locally but describes remote state, so it is cleared whenever the remote workspace
- * is recreated — otherwise it would assert an install that no longer exists and the next run would
- * skip installing into an empty directory.
- */
-export interface PackageManagerStateContext {
-  repoRoot: string;
-  /** Absolute directory holding bica's local state for this checkout. */
-  stateDir: string;
-}
 
 /**
  * Optional install / lockfile lifecycle for a package manager invoked as remote argv[0].
@@ -43,10 +31,6 @@ export interface PackageManagerPlugin {
   };
   /** Local lockfile / inputs digest, or null if nothing to compare. Lane-independent. */
   readLocalFingerprint(repoRoot: string): string | null;
-  readStoredHash(ctx: PackageManagerStateContext): string | null;
-  writeStoredHash(ctx: PackageManagerStateContext, digest: string): void;
-  /** Forget the recorded install, so the next run reinstalls. Used when the workspace is recreated. */
-  clearStoredHash(ctx: PackageManagerStateContext): void;
   /** True when remote argv denotes an install/add that should refresh the fingerprint. */
   isInstallArgv(remoteArgv: string[]): boolean;
   /** Single remote shell command to run a full install (POSIX-safe; no user argv). */

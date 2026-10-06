@@ -9,14 +9,41 @@ import {
   remoteWorkspaceDirExists,
   runRemoteCommand,
 } from './runRemote';
+import { installRecordPathExpr } from './remoteInstallState';
 import { runRemoteCommandWithPmHooks } from './runWithPackageManagerPlugins';
-import type { PackageManagerStateContext } from '../plugins/types';
 import type { PrepareResult } from '../syncProject';
+
+/**
+ * The remote filesystem, as far as these tests are concerned: the install records bica keeps there.
+ *
+ * A map rather than a stub per call, because the point of the record moving to the remote is that two
+ * checkouts share one. Only a shared store can show that, and the scripts are small enough to read.
+ */
+const remoteFiles = vi.hoisted(() => new Map<string, string>());
 
 vi.mock('./runRemote', () => ({
   runRemoteCommand: vi.fn(() => Promise.resolve(0)),
   remoteWorkspaceDirExists: vi.fn(() => true),
   remoteMkdirWorkspace: vi.fn(() => 0),
+  shellSingleQuoteRemotePathForSh: (v: string) =>
+    `'${v.replaceAll("'", `'\\''`)}'`,
+  runRemoteScriptOverStdin: vi.fn((_host: string, script: string) => {
+    const write = /printf '%s\\n' '(.+)' > (\S+)/.exec(script);
+    if (write) {
+      remoteFiles.set(write[2], `${write[1]}\n`);
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    const read = /^cat (\S+) /.exec(script);
+    if (read) {
+      return { status: 0, stdout: remoteFiles.get(read[1]) ?? '', stderr: '' };
+    }
+    const remove = /^rm -f (\S+)/.exec(script);
+    if (remove) {
+      remoteFiles.delete(remove[1]);
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    throw new Error(`unexpected remote script: ${script}`);
+  }),
 }));
 
 const BICA_YML = `sync:
@@ -35,12 +62,23 @@ function writePnpmWorkspace(repoRoot: string, lockfileBody: string): void {
   fs.writeFileSync(path.join(repoRoot, 'pnpm-lock.yaml'), lockfileBody, 'utf8');
 }
 
-/** Fingerprint storage for the default lane, which is what these tests exercise. */
-function stateCtx(repoRoot: string): PackageManagerStateContext {
-  return {
-    repoRoot,
-    stateDir: path.join(repoRoot, '.bica'),
-  };
+/** What the remote says this workspace installed from, as the production code would read it. */
+function remoteRecord(remoteWorkspacePath = '/remote/repo'): string | null {
+  const stored = remoteFiles.get(
+    installRecordPathExpr(remoteWorkspacePath, 'pnpm'),
+  );
+  return stored === undefined ? null : stored.trim();
+}
+
+/** Record an install against a remote workspace, the way a previous run would have left it. */
+function recordRemoteInstall(
+  digest: string,
+  remoteWorkspacePath = '/remote/repo',
+): void {
+  remoteFiles.set(
+    installRecordPathExpr(remoteWorkspacePath, 'pnpm'),
+    `${digest}\n`,
+  );
 }
 
 function makePrep(repoRoot: string): PrepareResult {
@@ -66,6 +104,7 @@ describe('runRemoteCommandWithPmHooks', () => {
   const mkdirRemote = vi.mocked(remoteMkdirWorkspace);
 
   beforeEach(() => {
+    remoteFiles.clear();
     runRemote.mockReset();
     runRemote.mockResolvedValue(0);
     dirExists.mockReset();
@@ -102,7 +141,7 @@ describe('runRemoteCommandWithPmHooks', () => {
 
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
-      expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(fp);
+      expect(remoteRecord()).toBe(fp);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -114,7 +153,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const fpOld = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fpOld).not.toBeNull();
-      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot), fpOld!);
+      recordRemoteInstall(fpOld!);
 
       fs.writeFileSync(
         path.join(repoRoot, 'pnpm-lock.yaml'),
@@ -145,7 +184,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
-      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot), fp!);
+      recordRemoteInstall(fp!);
 
       const prep = makePrep(repoRoot);
       const code = await runRemoteCommandWithPmHooks({
@@ -188,7 +227,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
       const fpOld = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fpOld).not.toBeNull();
-      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot), fpOld!);
+      recordRemoteInstall(fpOld!);
 
       fs.writeFileSync(
         path.join(repoRoot, 'pnpm-lock.yaml'),
@@ -217,7 +256,7 @@ describe('runRemoteCommandWithPmHooks', () => {
     const repoRoot = makeTempRepo();
     try {
       writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
-      pnpmPackageManagerPlugin.writeStoredHash(stateCtx(repoRoot),
+      recordRemoteInstall(
         pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!,
       );
 
@@ -254,7 +293,7 @@ describe('runRemoteCommandWithPmHooks', () => {
       );
       const fp = pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot);
       expect(fp).not.toBeNull();
-      expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(fp);
+      expect(remoteRecord()).toBe(fp);
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
@@ -279,7 +318,7 @@ describe('runRemoteCommandWithPmHooks', () => {
     expect(runRemote.mock.calls[0]?.[2]).toBe(
       pnpmPackageManagerPlugin.remoteInstallCommand,
     );
-    expect(pnpmPackageManagerPlugin.readStoredHash(stateCtx(repoRoot))).toBe(
+    expect(remoteRecord()).toBe(
       pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot),
     );
   });
@@ -287,8 +326,7 @@ describe('runRemoteCommandWithPmHooks', () => {
   it('does not treat a wrapped run as an install just because a command mentions one', async () => {
     const repoRoot = makeTempRepo();
     writePnpmWorkspace(repoRoot, 'lockfileVersion: 9\n');
-    pnpmPackageManagerPlugin.writeStoredHash(
-      stateCtx(repoRoot),
+    recordRemoteInstall(
       pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!,
     );
     await runRemoteCommandWithPmHooks({
@@ -299,5 +337,113 @@ describe('runRemoteCommandWithPmHooks', () => {
     });
     // Fingerprint already current, so the only remote call is the command itself.
     expect(runRemote.mock.calls).toHaveLength(1);
+  });
+});
+describe('two checkouts sharing one remote workspace', () => {
+  const runRemote = vi.mocked(runRemoteCommand);
+  const made: string[] = [];
+
+  beforeEach(() => {
+    remoteFiles.clear();
+    runRemote.mockReset();
+    runRemote.mockResolvedValue(0);
+    vi.mocked(remoteWorkspaceDirExists).mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    for (const dir of made.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const checkout = (lockfile: string): string => {
+    const root = makeTempRepo();
+    made.push(root);
+    writePnpmWorkspace(root, lockfile);
+    return root;
+  };
+
+  const installCommands = (): string[] =>
+    runRemote.mock.calls
+      .map((call) => String(call[2]))
+      .filter((cmd) => cmd === pnpmPackageManagerPlugin.remoteInstallCommand);
+
+  /**
+   * The failure this file exists to prevent, as it actually happened: a dev dependency added in one
+   * worktree, pruned by a run from a sibling worktree pointing at the same remote path, and the first
+   * worktree then skipping its install because the record it consulted was its own.
+   */
+  it('reinstalls for A after B installed a different lockfile into the same remote', async () => {
+    const a = checkout("lockfileVersion: '9.0'\npackages:\n  a: {}\n");
+    const b = checkout("lockfileVersion: '9.0'\npackages:\n  b: {}\n");
+
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(a),
+      remoteArgv: ['pnpm', 'typecheck'],
+      pmOverride: undefined,
+    });
+    expect(installCommands()).toHaveLength(1);
+
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(b),
+      remoteArgv: ['pnpm', 'test'],
+      pmOverride: undefined,
+    });
+    expect(installCommands()).toHaveLength(2);
+
+    // A's own lockfile has not changed, and under a per-checkout record this skipped the install and
+    // ran against a `node_modules` B had since pruned.
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(a),
+      remoteArgv: ['pnpm', 'typecheck'],
+      pmOverride: undefined,
+    });
+    expect(installCommands()).toHaveLength(3);
+    expect(remoteRecord()).toBe(
+      pnpmPackageManagerPlugin.readLocalFingerprint(a),
+    );
+  });
+
+  it('still skips the install when the other checkout installed the same lockfile', async () => {
+    const lockfile = "lockfileVersion: '9.0'\npackages:\n  same: {}\n";
+    const a = checkout(lockfile);
+    const b = checkout(lockfile);
+
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(a),
+      remoteArgv: ['pnpm', 'typecheck'],
+      pmOverride: undefined,
+    });
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(b),
+      remoteArgv: ['pnpm', 'test'],
+      pmOverride: undefined,
+    });
+
+    // One install between them: identical lockfiles describe one `node_modules`, whoever asked first.
+    expect(installCommands()).toHaveLength(1);
+  });
+
+  it('keeps separate records for checkouts pointing at different remote workspaces', async () => {
+    const lockfile = "lockfileVersion: '9.0'\npackages:\n  one: {}\n";
+    const a = checkout(lockfile);
+    const b = checkout(lockfile);
+    const prepB = makePrep(b);
+    prepB.config.remoteWorkspacePath = '/remote/other';
+
+    await runRemoteCommandWithPmHooks({
+      prep: makePrep(a),
+      remoteArgv: ['pnpm', 'typecheck'],
+      pmOverride: undefined,
+    });
+    await runRemoteCommandWithPmHooks({
+      prep: prepB,
+      remoteArgv: ['pnpm', 'test'],
+      pmOverride: undefined,
+    });
+
+    // Two workspaces are two `node_modules`, so each needs its own install and its own record.
+    expect(installCommands()).toHaveLength(2);
+    expect(remoteRecord('/remote/other')).toBe(remoteRecord('/remote/repo'));
   });
 });
