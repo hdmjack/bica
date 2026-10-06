@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -182,4 +183,71 @@ export function forwardSocketPathFor(localSocket: string): string {
 /** Where a detached tunnel's output goes: beside its record, so the two are found together. */
 export function tunnelLogPathFor(localSocket: string): string {
   return recordPathFor(localSocket).replace(/\.json$/, '.log');
+}
+
+/**
+ * Clear up after a tunnel whose process is gone.
+ *
+ * A tunnel that is stopped cleans up after itself; one that is killed outright cannot, and what it
+ * leaves is worse than nothing. The socket file stays on disk with no listener behind it, so clients
+ * get a refused connection where an absent path would have told them plainly that no tunnel is
+ * running -- and for a client that now reports a missing server rather than working around it, those
+ * two outcomes read very differently.
+ *
+ * Nothing can be done from inside a process that is already dead, so this is done by the next bica
+ * command that looks. Returns what it removed, so the caller can say so rather than tidying silently.
+ */
+export function cleanUpAfterDeadTunnel(record: TunnelRecord): string[] {
+  const removed: string[] = [];
+  removed.push(...killOrphanedSsh(record).map((pid) => `ssh (pid ${pid})`));
+  for (const p of [
+    record.localSocket,
+    forwardSocketPathFor(record.localSocket),
+  ]) {
+    try {
+      if (fs.lstatSync(p).isSocket()) {
+        fs.unlinkSync(p);
+        removed.push(p);
+      }
+    } catch {
+      // Already gone, which is the outcome this wanted.
+    }
+  }
+  return removed;
+}
+
+/**
+ * Kill the ssh processes a dead tunnel left running.
+ *
+ * A tunnel that is killed outright does not take its children with it. The forwarding ssh is the one
+ * that lasts: it holds no pipe to its parent, so nothing tells it the tunnel is gone, and it sits
+ * there bound to a socket that has been unlinked, holding a connection open to the remote -- which is
+ * why the server on the other end stays alive long after the tunnel that started it.
+ *
+ * Matched by the socket paths in their own argv rather than by recorded pids, because the pids change
+ * every time a forward is re-established and a record written on each reconnect would be a file
+ * written for every network hiccup. Both paths are digests unique to this tunnel, so nothing else can
+ * match them.
+ */
+function killOrphanedSsh(record: TunnelRecord): number[] {
+  const patterns = [forwardSocketPathFor(record.localSocket), record.remoteSocket];
+  const killed: number[] = [];
+  for (const pattern of patterns) {
+    const found = spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8' });
+    for (const line of (found.stdout ?? '').split('\n')) {
+      const pid = Number(line.trim());
+      // Never this process: `pgrep -f` matches any command line containing the path, and a bica
+      // command cleaning up after a tunnel has that path in its own arguments.
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) {
+        continue;
+      }
+      try {
+        process.kill(pid, 'SIGTERM');
+        killed.push(pid);
+      } catch {
+        // Gone between finding it and signalling it, which is the outcome this wanted.
+      }
+    }
+  }
+  return killed;
 }

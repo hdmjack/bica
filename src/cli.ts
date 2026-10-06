@@ -14,10 +14,17 @@ import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 import { parseArgs } from './cliArgs';
 import { isProcessAlive } from './lib/fileLock';
 import { gitDependentHint } from './lib/gitDependentHint';
-import { formatTunnelList, parseTunnelArgs, runTunnel, TUNNEL_USAGE } from './lib/tunnel';
+import {
+  DEFAULT_READY_TIMEOUT_SECONDS,
+  formatTunnelList,
+  parseTunnelArgs,
+  runTunnel,
+  TUNNEL_USAGE,
+} from './lib/tunnel';
 import type { TunnelArgs } from './lib/tunnel';
 import {
   claimLocalSocket,
+  cleanUpAfterDeadTunnel,
   describeTunnel,
   listTunnelRecords,
   readTunnelRecord,
@@ -213,8 +220,13 @@ Long-lived remote processes
                               is nothing there.
                               --detach runs it in the background, surviving this shell, and prints
                               where its output goes.
-  tunnel --list               Tunnels that have recorded themselves, live ones first.
+  tunnel --list               Tunnels that have recorded themselves, live ones first. Also removes
+                              the socket a killed tunnel left behind, so clients see no server
+                              rather than a refused connection.
   tunnel --stop <local.sock>  Stop the tunnel serving that path and clear its record.
+  tunnel --restart <local.sock>
+                              Start a recorded tunnel again with the same host, paths, command and
+                              restart mode -- for one that was killed rather than stopped.
 
 Plugins
   credentials sync [id...]    Run enabled credentials plugins. With ids, only those plugins (must
@@ -473,9 +485,71 @@ async function pollFor(
   return check();
 }
 
-/** `bica tunnel --list`: what is running, and what merely left a record behind. */
+/**
+ * `bica tunnel --list`: what is running, and what merely left a record behind.
+ *
+ * Listing also tidies, which a read-only command would not normally do. The thing being tidied is a
+ * socket file with no listener behind it -- left by a tunnel that was killed rather than stopped --
+ * and it actively misleads: a client connecting there is refused, where an absent path would have
+ * said plainly that no tunnel is running. Nothing else is scheduled to notice, so the next command
+ * that looks is the right moment.
+ */
 function cmdTunnelList(): void {
-  console.log(formatTunnelList(listTunnelRecords()));
+  const entries = listTunnelRecords();
+  console.log(formatTunnelList(entries));
+  for (const { record, alive } of entries) {
+    if (alive) {
+      continue;
+    }
+    // The socket goes; the record stays. The record is what `--restart` rebuilds the tunnel from --
+    // host, paths, command, restart mode -- so clearing it would make the very next line of advice
+    // impossible to follow, which is exactly what it did the first time this was written.
+    const removed = cleanUpAfterDeadTunnel(record);
+    if (removed.length > 0) {
+      process.stderr.write(
+        `${dim('[bica]')} ${dim(`Cleared up after the dead tunnel for ${record.localSocket}: ${removed.join(', ')}.`)}\n` +
+          `${dim('[bica]')} ${dim(`Clients now find no server rather than a refused connection. Start it again with \`bica tunnel --restart ${record.localSocket}\`.`)}\n`,
+      );
+    }
+  }
+}
+
+/**
+ * `bica tunnel --restart <local-socket>`: start a recorded tunnel again, as it was.
+ *
+ * The record already holds everything the original invocation did -- host, both socket paths, the
+ * remote argv, the restart mode -- so reviving one need not mean finding the `uv run --with …` line
+ * that started it. That matters most for the case this exists for: a tunnel killed outright, found
+ * dead hours later by whoever needed it.
+ */
+async function cmdTunnelRestart(localSocket: string): Promise<void> {
+  const target = path.resolve(localSocket);
+  const record = readTunnelRecord(target);
+  if (record === null) {
+    die(
+      `No tunnel is recorded for ${target}, so there is nothing to restart.\n` +
+        'Start one with `bica tunnel --local=… --remote=… -- <command>`.',
+    );
+  }
+  if (isProcessAlive(record.pid)) {
+    die(
+      `That tunnel is already running:\n  ${describeTunnel(record, true)}\n` +
+        `Stop it first with \`bica tunnel --stop ${target}\` if you mean to replace it.`,
+    );
+  }
+  cleanUpAfterDeadTunnel(record);
+  removeTunnelRecord(target);
+  process.stderr.write(
+    `${dim('[bica]')} ${dim(`Starting the recorded tunnel for ${target} again.`)}\n`,
+  );
+  await detachTunnel({
+    localSocket: record.localSocket,
+    remoteSocket: record.remoteSocket,
+    remoteArgv: record.remoteArgv,
+    restart: record.restart,
+    readyTimeoutSeconds: DEFAULT_READY_TIMEOUT_SECONDS,
+    detach: true,
+  });
 }
 
 /**
@@ -532,12 +606,25 @@ async function detachTunnel(args: TunnelArgs): Promise<void> {
   const logPath = tunnelLogPathFor(args.localSocket);
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const log = fs.openSync(logPath, 'a');
-  // `execArgv` first, or the child is a plain node that cannot read the TypeScript it is pointed at:
+  // Built from the arguments, not from this process's own command line.
+  //
+  // Copying argv worked only while the command being detached was literally the one that had been
+  // typed. `--restart` revives a tunnel from its record, so its argv is `tunnel --restart <path>` --
+  // and a child given that starts no tunnel at all, it tries to revive one again.
+  //
+  // `execArgv` leads, or the child is a plain node that cannot read the TypeScript it is pointed at:
   // this process runs under a loader (tsx in development), and re-executing without the flags that
   // installed it reproduces the arguments but not the runtime.
   const argv = [
     ...process.execArgv,
-    ...process.argv.slice(1).filter((a) => a !== '--detach'),
+    process.argv[1],
+    'tunnel',
+    `--local=${args.localSocket}`,
+    `--remote=${args.remoteSocket}`,
+    `--ready-timeout=${String(args.readyTimeoutSeconds)}`,
+    `--restart=${args.restart}`,
+    '--',
+    ...args.remoteArgv,
   ];
   const child = spawn(process.execPath, argv, {
     detached: true,
@@ -579,6 +666,21 @@ async function detachTunnel(args: TunnelArgs): Promise<void> {
 async function cmdTunnel(tail: string[]): Promise<void> {
   if (tail.length === 1 && tail[0] === '--list') {
     cmdTunnelList();
+    return;
+  }
+  const restartAt = tail.findIndex(
+    (t) => t === '--restart' || t.startsWith('--restart='),
+  );
+  // `--restart <path>` revives a recorded tunnel; `--restart=<mode>` configures a new one. They are
+  // told apart by what follows, which is unambiguous: a mode is never a path and a path never a mode.
+  if (restartAt !== -1 && !tail.includes('--')) {
+    const inline = tail[restartAt].startsWith('--restart=')
+      ? tail[restartAt].slice('--restart='.length)
+      : tail[restartAt + 1];
+    if (inline === undefined || inline === '') {
+      die(`--restart needs the local socket path of the tunnel to restart.\n${TUNNEL_USAGE}`);
+    }
+    await cmdTunnelRestart(inline);
     return;
   }
   const stopAt = tail.findIndex(

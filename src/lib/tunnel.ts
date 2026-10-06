@@ -32,7 +32,7 @@ import type { RestartMode } from './tunnelState';
  */
 
 /** How long to wait for the remote command to create its socket before giving up. */
-const DEFAULT_READY_TIMEOUT_SECONDS = 60;
+export const DEFAULT_READY_TIMEOUT_SECONDS = 60;
 
 /** How often the remote readiness loop looks for the socket. */
 const READY_POLL_SECONDS = '0.2';
@@ -488,40 +488,64 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
    * costs a second, where restarting the server costs however long its model took to load -- so this
    * checks whether the server still answers before concluding the session is over.
    */
-  const superviseForward = async (own: Session): Promise<void> => {
-    while (!stopping && own.alive) {
-      const child = spawnForward();
-      own.forward = child;
-      const code = await new Promise<number>((resolve) => {
-        child.on('error', () => resolve(1));
-        child.on('close', (c) => resolve(c ?? 1));
-      });
-      own.forward = null;
-      unlinkIfSocket(forwardPath);
-      if (stopping || !own.alive) {
-        return;
+  const superviseForward = async (
+    own: Session,
+    reportFirstBind: (bound: boolean) => void,
+  ): Promise<void> => {
+    // Every forward this session ever has is spawned here, and nowhere else. Starting one in
+    // `startSession` as well left two ssh processes alive per session: the second rebinds the path
+    // (`StreamLocalBindUnlink`) and the first goes on running against a socket that is no longer
+    // there, so it is never noticed and never cleaned up -- and a client connecting during the
+    // handover got an empty reply, because the path it had just reached had been replaced underneath.
+    let announcedFirstBind = false;
+    const firstBind = (bound: boolean): void => {
+      if (!announcedFirstBind) {
+        announcedFirstBind = true;
+        reportFirstBind(bound);
       }
-      write(
-        `${warn('[bica]')} The forward closed (${String(code)}); re-establishing it.\n`,
-      );
-      await delay(RECONNECT_FIRST_DELAY_MS, stop);
-      if (stopping) {
-        return;
-      }
-      const again = await awaitReady(own.commandDone, RECONNECT_PROBE_SECONDS);
-      if (again.kind !== 'ready') {
-        // The watchdog kills the server when its own connection breaks, so a reset that takes the
-        // forward has usually taken the server too. Say which it was: a restart that silently reloads
-        // a language model looks like a hang to whoever is waiting on a parse.
+    };
+    try {
+      while (!stopping && own.alive) {
+        const child = spawnForward();
+        own.forward = child;
+        const closed = new Promise<number>((resolve) => {
+          child.on('error', () => resolve(1));
+          child.on('close', (c) => resolve(c ?? 1));
+        });
+        const bound = await awaitForwardBound();
+        firstBind(bound);
+        if (!bound) {
+          child.kill('SIGTERM');
+          own.forward = null;
+          return;
+        }
+        const code = await closed;
+        own.forward = null;
+        unlinkIfSocket(forwardPath);
+        if (stopping || !own.alive) {
+          return;
+        }
         write(
-          `${dim('[bica]')} ${dim('The server is gone as well.')}\n`,
+          `${warn('[bica]')} The forward closed (${String(code)}); re-establishing it.\n`,
         );
-        terminateLiveRemoteCommand();
-        return;
+        await delay(RECONNECT_FIRST_DELAY_MS, stop);
+        if (stopping) {
+          return;
+        }
+        const again = await awaitReady(own.commandDone, RECONNECT_PROBE_SECONDS);
+        if (again.kind !== 'ready') {
+          // The watchdog kills the server when its own connection breaks, so a reset that takes the
+          // forward has usually taken the server too. Say which it was: a restart that silently
+          // reloads a language model looks like a hang to whoever is waiting on a parse.
+          write(`${dim('[bica]')} ${dim('The server is gone as well.')}\n`);
+          terminateLiveRemoteCommand();
+          return;
+        }
       }
-      if (!(await awaitForwardBound())) {
-        return;
-      }
+    } finally {
+      // A supervisor that returns before binding anything must still answer the caller waiting on it,
+      // or `startSession` waits for a forward that is never coming.
+      firstBind(false);
     }
   };
 
@@ -539,6 +563,18 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     write(
       `${dim('[bica]')} ${dim(`Starting ${args.remoteArgv[0]} on ${sshHost}…`)}\n`,
     );
+    // Clear the remote socket before starting, so readiness cannot be answered by the last server.
+    //
+    // A server that is on its way out -- the predecessor of a restart, say -- still answers a connect
+    // for the moment it takes to die. The probe believes it, the forward goes up against a socket
+    // that is about to be unlinked, and the first client through gets an empty reply from a server
+    // that no longer exists. Removing the path first means the only thing that can answer is the
+    // server this session just started. The server does the same unlinking itself when it binds, so
+    // this claims nothing the command was not about to claim anyway.
+    await runRemoteScriptAsync(
+      sshHost,
+      `rm -f ${shellSingleQuoteRemotePathForSh(remoteSocket)}\n`,
+    ).done;
     // No lease, and so no run id or claim: see the note on this function.
     const commandDone = runRemoteCommand(
       sshHost,
@@ -568,9 +604,14 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       return false;
     }
 
-    const own: Session = { commandDone, forward: spawnForward(), alive: true };
+    const own: Session = { commandDone, forward: null, alive: true };
     session = own;
-    if (!(await awaitForwardBound())) {
+    let reportFirstBind: (bound: boolean) => void = () => {};
+    const firstBound = new Promise<boolean>((resolve) => {
+      reportFirstBind = resolve;
+    });
+    void superviseForward(own, reportFirstBind);
+    if (!(await firstBound)) {
       write(
         `${warn('[bica]')} ssh did not bind ${forwardPath}. Stream-local forwarding needs ` +
           'OpenSSH 6.7 or later on both ends.\n',
@@ -609,8 +650,6 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
         `${dim('[bica]')} ${dim(`${args.localSocket} stays open; the next client starts it again.`)}\n`,
       );
     });
-    void superviseForward(own);
-
     write(
       `${dim('[bica]')} ${dim(`Tunnel up: ${args.localSocket} → ${sshHost}:${remoteSocket}. Ctrl+C to stop.`)}\n`,
     );

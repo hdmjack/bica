@@ -470,6 +470,21 @@ and the parent waits for the child to record itself before reporting it as up. T
 shell or an agent harness kills its background jobs on a timer — a tunnel started this way is not one
 of them.
 
+**A tunnel that is killed outright cannot tidy up, so the next command does.** A stop, a `Ctrl+C` or
+a crash all run the cleanup; a `SIGKILL` runs nothing, and what it leaves behind is worse than
+nothing — the socket file stays on disk with no listener, so clients are refused where an absent path
+would have told them plainly that no tunnel is running. `bica tunnel --list` therefore clears up after
+any tunnel it finds dead, and says what it removed.
+
+It also kills the ssh processes such a tunnel left running. The forwarding ssh is the one that
+lasts — it holds no pipe to its parent, so nothing tells it the tunnel is gone, and it keeps a
+connection open to the remote, which is why a server there can still be alive long after the tunnel
+that started it. The record itself is kept, because that is what a restart is rebuilt from.
+
+`bica tunnel --restart <local-socket>` starts a recorded tunnel again with the same host, paths,
+command and restart mode. The record holds the whole invocation, so reviving a tunnel does not mean
+finding the `uv run --with …` line that started it.
+
 **One tunnel per local socket.** Each records itself under `~/.bica/tunnels`, keyed by a digest of the
 path it serves, and a second start against a live one is refused with that tunnel named rather than
 quietly taking its clients. A record whose process is gone is litter rather than a conflict: it is

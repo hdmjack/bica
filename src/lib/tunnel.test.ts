@@ -307,3 +307,28 @@ describe('joinSockets', () => {
     expect(await replyThroughProxy(2 * 1024 * 1024)).toBe(2 * 1024 * 1024);
   });
 });
+
+describe('parseTunnelArgs: the restart flag has two jobs', () => {
+  it('reads --restart=<mode> as a mode when a command follows', () => {
+    const args = parseTunnelArgs([
+      '--local=/tmp/a.sock',
+      '--remote=/srv/b.sock',
+      '--restart=on-demand',
+      '--',
+      'serve',
+    ]);
+    expect(args.restart).toBe('on-demand');
+  });
+
+  it('refuses a socket path where a mode belongs, rather than guessing', () => {
+    expect(() =>
+      parseTunnelArgs([
+        '--local=/tmp/a.sock',
+        '--remote=/srv/b.sock',
+        '--restart=/tmp/a.sock',
+        '--',
+        'serve',
+      ]),
+    ).toThrow(/--restart must be one of/);
+  });
+});

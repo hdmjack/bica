@@ -1,10 +1,12 @@
 import * as fs from 'node:fs';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   claimLocalSocket,
+  cleanUpAfterDeadTunnel,
   describeTunnel,
   forwardSocketPathFor,
   listTunnelRecords,
@@ -113,5 +115,57 @@ describe('the tunnel registry', () => {
 
   it('returns nothing at all when no tunnel has ever run', () => {
     expect(listTunnelRecords()).toEqual([]);
+  });
+});
+
+describe('cleaning up after a tunnel that was killed', () => {
+  const realHome = process.env.HOME;
+
+  beforeEach(() => {
+    fs.rmSync(HOME, { force: true, recursive: true });
+    fs.mkdirSync(HOME, { recursive: true });
+    process.env.HOME = HOME;
+  });
+
+  afterEach(() => {
+    if (realHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = realHome;
+    }
+    fs.rmSync(HOME, { force: true, recursive: true });
+  });
+
+  it('removes the socket a dead tunnel left bound to nothing', async () => {
+    const localSocket = path.join(HOME, 'left-behind.sock');
+    const server = net.createServer();
+    await new Promise<void>((r) => server.listen(localSocket, r));
+    await new Promise<void>((r) => server.close(() => r()));
+    // A socket file with no listener is what a killed tunnel leaves: present, and refusing.
+    fs.writeFileSync(localSocket, '');
+    fs.rmSync(localSocket);
+    const server2 = net.createServer();
+    await new Promise<void>((r) => server2.listen(localSocket, r));
+
+    const rec = record({ localSocket, pid: 2 ** 30 });
+    writeTunnelRecord(rec);
+    const removed = cleanUpAfterDeadTunnel(rec);
+    await new Promise<void>((r) => server2.close(() => r()));
+
+    expect(removed).toContain(localSocket);
+    expect(fs.existsSync(localSocket)).toBe(false);
+  });
+
+  it('leaves a path alone when there is no socket at it', () => {
+    const rec = record({ localSocket: path.join(HOME, 'never-existed.sock') });
+    expect(cleanUpAfterDeadTunnel(rec)).toEqual([]);
+  });
+
+  it('does not delete a regular file that happens to share the path', () => {
+    const localSocket = path.join(HOME, 'notes.txt');
+    fs.writeFileSync(localSocket, 'something of the user’s');
+    const rec = record({ localSocket });
+    expect(cleanUpAfterDeadTunnel(rec)).toEqual([]);
+    expect(fs.existsSync(localSocket)).toBe(true);
   });
 });
