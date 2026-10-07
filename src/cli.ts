@@ -49,10 +49,6 @@ import {
 } from './lib/remoteClaim';
 import type { ClaimOwner } from './lib/remoteClaim';
 import {
-  assignLabels,
-  buildParallelScript,
-} from './lib/parallelCommands';
-import {
   assertMutagenInstalled,
   findAllSessionsForRepo,
   mutagenProjectStart,
@@ -850,6 +846,8 @@ async function runWithLiveSession(options: {
   pm: string | undefined;
   tail: string[];
   matchArgvs?: string[][];
+  /** The user's commands when several are to run at once; see `concurrentCommands`. */
+  concurrentCommands?: string[][];
   captured: boolean;
   /**
    * The lease this run already holds. Passed through to the remote script so it can publish its own
@@ -963,6 +961,7 @@ async function runWithLiveSession(options: {
       prep,
       remoteArgv: tail,
       matchArgvs: options.matchArgvs,
+      concurrentCommands: options.concurrentCommands,
       generatedPaths: options.prep.generatedPaths,
       generatedCommand: options.prep.generatedCommand,
       pmOverride: pm,
@@ -1140,9 +1139,10 @@ async function cmdRun(options: {
     }
   };
 
-  const remoteArgv = parallel
-    ? ['sh', '-c', buildParallelScript(assignLabels(options.commands))]
-    : options.commands[0];
+  // Several commands are coordinated here, not by a script written for the remote: `remoteArgv` is
+  // the first of them and is ignored when `concurrentCommands` has more than one.
+  const remoteArgv = options.commands[0];
+  const concurrentCommands = parallel ? options.commands : undefined;
 
   const prep = prepareSyncProjectFile({ verbose: false });
   let code: number;
@@ -1152,6 +1152,7 @@ async function cmdRun(options: {
         prep,
         remoteArgv,
         matchArgvs: options.commands,
+        concurrentCommands,
         pmOverride: pm,
         returnFlowOptIn: options.returnFlow,
         writeBackOptIn: options.writeBack,
@@ -1165,6 +1166,7 @@ async function cmdRun(options: {
         pm,
         tail: remoteArgv,
         matchArgvs: options.commands,
+        concurrentCommands,
         captured,
         owner,
         chrome,

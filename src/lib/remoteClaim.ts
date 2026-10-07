@@ -46,6 +46,13 @@ export interface ClaimOwner {
    * {@link remoteRunIsAlive}.
    */
   remotePid?: number;
+  /**
+   * Every remote process group this run owns, when it has more than one.
+   *
+   * `remotePid` stays as the first of them so that an older bica, and every existing reader, keeps
+   * working against a claim written by this one.
+   */
+  remotePids?: number[];
   /** When the claim was taken, on the remote's clock. Only comparable against a remote reading. */
   startedAt?: number;
 }
@@ -131,9 +138,16 @@ export function parseOwner(raw: string): ClaimOwner | null {
     return hit === undefined ? undefined : Number(hit.slice(name.length + 1));
   };
   const owner: ClaimOwner = { runId, host, pid: parsed };
-  const remotePid = tagged('rpid');
-  if (remotePid !== undefined) {
-    owner.remotePid = remotePid;
+  // Every `rpid=`, not the first. A run of several commands at once opens one connection per command,
+  // and each publishes the pid of the shell leading its own process group -- so a run is several
+  // groups, and it is alive while any of them is.
+  const remotePids = fields
+    .slice(3)
+    .filter((f) => /^rpid=\d+$/.test(f))
+    .map((f) => Number(f.slice('rpid='.length)));
+  if (remotePids.length > 0) {
+    owner.remotePid = remotePids[0];
+    owner.remotePids = remotePids;
   }
   const startedAt = tagged('t');
   if (startedAt !== undefined) {
@@ -239,9 +253,15 @@ export function buildClaimCancelScript(
   return (
     `[ -f ${claimExpr} ] || { echo BICA_NO_CLAIM; exit 0; }\n` +
     guard +
+    // Looped, because a claim can name several process groups -- one per command of a concurrent run.
+    // The previous single-value form put a multi-line string into one `kill`, which signalled nothing.
     `_p=$(tr ' ' '\\n' < ${claimExpr} 2>/dev/null | grep '^rpid=' | cut -d= -f2)\n` +
     'if [ -n "$_p" ]; then\n' +
-    '  if kill -TERM -"$_p" 2>/dev/null; then echo BICA_SIGNALLED; else echo BICA_GROUP_GONE; fi\n' +
+    '  _any=0\n' +
+    '  for _g in $_p; do\n' +
+    '    if kill -TERM -"$_g" 2>/dev/null; then _any=1; fi\n' +
+    '  done\n' +
+    '  if [ "$_any" -eq 1 ]; then echo BICA_SIGNALLED; else echo BICA_GROUP_GONE; fi\n' +
     'else\n' +
     '  echo BICA_NEVER_RAN\n' +
     'fi\n' +
@@ -456,10 +476,15 @@ export function claimIsStale(
   if (isProcessAlive(heldBy.pid)) {
     return false;
   }
-  if (heldBy.remotePid === undefined) {
+  const groups = heldBy.remotePids ?? (
+    heldBy.remotePid === undefined ? [] : [heldBy.remotePid]
+  );
+  if (groups.length === 0) {
     return true;
   }
-  return !isRemoteProcessAlive(heldBy.remotePid);
+  // Stale only when every group is gone. A run of several commands finishes them one at a time, and
+  // judging it by the first would declare the workspace free while the rest were still writing to it.
+  return !groups.some((pid) => isRemoteProcessAlive(pid));
 }
 
 /**

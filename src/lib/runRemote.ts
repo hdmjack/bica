@@ -519,35 +519,6 @@ function isBicaDebug(): boolean {
   return process.env.BICA_DEBUG?.trim() === '1';
 }
 
-/** Lines printed before ssh so users know KEY=value spam is usually remote zsh login rc. */
-const REMOTE_LOGIN_RC_ENV_HINT_LINES = [
-  'If many KEY=value lines appear once ssh connects, they usually come from the',
-  'remote login shell (e.g. ~/.zprofile). In zsh, export with no variable names lists',
-  'every export. That is not bica printing environment variables.',
-  "More: bica's README, under Troubleshooting.",
-] as const;
-
-function remoteEnvHintBlock(isDebug: boolean): string {
-  const label = isDebug
-    ? chalk.bold.magenta('[bica-debug]')
-    : chalk.bold.cyan('[bica]');
-  const body = REMOTE_LOGIN_RC_ENV_HINT_LINES.map(
-    (line) => `${label} ${dim(line)}`,
-  ).join('\n');
-  return `\n${body}\n`;
-}
-
-/** stderr before ssh: formatted env-dump explanation (not bica). */
-function writeRemoteEnvHintToStderr(): void {
-  if (process.stderr.isTTY) {
-    process.stderr.write(remoteEnvHintBlock(false));
-    return;
-  }
-  if (isBicaDebug()) {
-    process.stderr.write(remoteEnvHintBlock(true));
-  }
-}
-
 /** PATH + mise install globs when no remote-shell plugin (e.g. mise) is active. */
 function defaultRemoteToolingPreamble(): string {
   return (
@@ -596,7 +567,18 @@ export function buildRunRemoteSshArgs(opts: {
     opts.sshHost,
     opts.shell,
     ...opts.flags,
-    opts.remoteScript,
+    // Quoted, so that the shell bica asked for receives the whole script as one argument.
+    //
+    // ssh does not pass argv through: it joins its arguments with spaces and the remote's *own* login
+    // shell parses the result. Unquoted, `zsh -lc <script>` therefore became `zsh -lc export` --
+    // `-c` taking only the first word -- followed by every remaining line executed by the outer shell
+    // instead. Two consequences, both of which were visible for months and explained as something
+    // else: a bare `export` lists every exported variable, which is the wall of KEY=value every run
+    // printed and which bica's own help attributed to the user's `.zprofile`; and the preamble that
+    // puts a version manager's tools on PATH ran in the outer shell, never in the one it was written
+    // for. It also meant a missing login shell failed to fail: the script ran anyway, minus its first
+    // line.
+    shellSingleQuoteRemotePathForSh(opts.remoteScript),
   ];
 }
 
@@ -625,6 +607,8 @@ export function buildRemoteRunScript(options: {
   runId: string | undefined;
   /** Shell expression for the claim file, when this run holds a lease. */
   claimPathExpr?: string;
+  /** Whether to append this command's exit code to the claim. See the option of the same name. */
+  recordExitCode?: boolean;
 }): string {
   const { runId, claimPathExpr } = options;
   const leased = runId !== undefined && claimPathExpr !== undefined;
@@ -654,7 +638,11 @@ export function buildRemoteRunScript(options: {
         '  echo "[bica] Another run took this workspace while this command was executing; discarding the result." >&2',
         `  exit ${String(REMOTE_CONTENT_MISMATCH_EXIT)}`,
         'fi',
-        `printf '%s %s' "$(cat ${claimPathExpr})" "$_bica_ec" > ${claimPathExpr} 2>/dev/null || true`,
+        ...(options.recordExitCode === false
+          ? []
+          : [
+              `printf '%s %s' "$(cat ${claimPathExpr})" "$_bica_ec" > ${claimPathExpr} 2>/dev/null || true`,
+            ]),
       );
   return (
     `${options.preamble}${options.cdExpr} || exit ${String(REMOTE_CD_FAILED_EXIT)}\n` +
@@ -734,13 +722,47 @@ export function remoteLoginShellExists(sshHost: string, shell: string): boolean 
 }
 
 /**
- * The ssh carrying the run, while one is in flight.
+ * Copy a stream through, putting a label at the start of every line.
  *
- * Kept so a signal handler can reach it. Nothing else may touch it: a second concurrent run in one
- * process does not exist -- the workspace lease makes sure of that -- so a single slot is honest about
- * what can be true at once.
+ * Line-buffered, because a prefix belongs at the start of a line and chunk boundaries fall wherever
+ * the network put them. A trailing partial line is held until its newline arrives, and flushed when
+ * the stream ends so nothing is swallowed.
  */
-let liveRemote: ChildProcess | null = null;
+function pipeLabelled(
+  source: NodeJS.ReadableStream | null,
+  label: string,
+  sink: NodeJS.WritableStream,
+): void {
+  if (source === null) {
+    return;
+  }
+  const prefix = `${dim(`[${label}]`)} `;
+  let pending = '';
+  source.setEncoding('utf8');
+  source.on('data', (chunk: string) => {
+    pending += chunk;
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    for (const line of lines) {
+      sink.write(`${prefix}${line}\n`);
+    }
+  });
+  source.on('end', () => {
+    if (pending.length > 0) {
+      sink.write(`${prefix}${pending}\n`);
+      pending = '';
+    }
+  });
+}
+
+/**
+ * Every ssh carrying work for this run.
+ *
+ * A set rather than a slot. A second *run* in one process still does not exist -- the workspace lease
+ * sees to that -- but a single run now opens one connection per command, so several are in flight at
+ * once and a signal has to reach all of them.
+ */
+const liveRemotes = new Set<ChildProcess>();
 
 /**
  * Drop the ssh carrying the run, which takes the remote command with it.
@@ -755,11 +777,14 @@ let liveRemote: ChildProcess | null = null;
 export function terminateLiveRemoteCommand(
   signal: NodeJS.Signals = 'SIGTERM',
 ): boolean {
-  if (liveRemote === null || liveRemote.exitCode !== null) {
-    return false;
+  let signalled = false;
+  for (const child of liveRemotes) {
+    if (child.exitCode === null) {
+      child.kill(signal);
+      signalled = true;
+    }
   }
-  liveRemote.kill(signal);
-  return true;
+  return signalled;
 }
 
 export async function runRemoteCommand(
@@ -778,6 +803,22 @@ export async function runRemoteCommand(
      * command that finishes on its own does not need it.
      */
     dieWithConnection?: boolean;
+    /**
+     * Prefix every line of output with this label instead of passing the stream through untouched.
+     *
+     * For a run of several commands at once, where the alternative is three streams braided into one
+     * unreadable column. Absent for a single command, which keeps its output exactly as the remote
+     * wrote it -- including the carriage returns and colour a progress bar depends on.
+     */
+    label?: string;
+    /**
+     * Whether this command appends its exit code to the lease when it finishes.
+     *
+     * True for the only command of a run. False for each of several, because they would race: the
+     * record is written by rewriting the whole claim line, and concurrent writers produce a line with
+     * several exit codes in it, or none. The orchestrator records one result for the run instead.
+     */
+    recordExitCode?: boolean;
   },
 ): Promise<number> {
   const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
@@ -807,6 +848,7 @@ export async function runRemoteCommand(
       : command,
     runId: options?.assertRunId,
     claimPathExpr: options?.claimPathExpr,
+    recordExitCode: options?.recordExitCode ?? true,
   });
 
   const shell = loginShellFromEnv();
@@ -839,22 +881,28 @@ export async function runRemoteCommand(
       `[bica-debug] ssh ${sshArgs[0]} ${sshArgs[1]} ${shell} ${flags.join(' ')}\n${remoteScript}\n---\n`,
     );
   }
-  writeRemoteEnvHintToStderr();
-
   // Deliberately async, where this was `spawnSync` for most of its life. `spawnSync` pins the event
   // loop for the entire run, so a `SIGTERM` handler registered by the CLI could not run until the
   // remote command had already finished -- the signal would appear to do nothing, then be honoured
   // minutes late. Handling a caller's timeout at all requires the loop to stay free. `stdio: 'inherit'`
   // keeps the output path identical to before: the child writes to bica's own descriptors.
+  const label = options?.label;
   const child = spawn('ssh', sshArgs, {
     // The pipe is the watchdog's lifeline: held open and never written, it closes only when this
     // process does, which is precisely when the remote command should stop.
-    stdio: dieWithConnection
-      ? ['pipe', 'inherit', 'inherit']
-      : 'inherit',
+    stdio:
+      label === undefined
+        ? dieWithConnection
+          ? ['pipe', 'inherit', 'inherit']
+          : 'inherit'
+        : [dieWithConnection ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     shell: false,
   });
-  liveRemote = child;
+  if (label !== undefined) {
+    pipeLabelled(child.stdout, label, process.stdout);
+    pipeLabelled(child.stderr, label, process.stderr);
+  }
+  liveRemotes.add(child);
   try {
     return await new Promise<number>((resolve) => {
       // `error` fires instead of `close` when ssh could not be spawned at all; 1 matches what
@@ -865,7 +913,7 @@ export async function runRemoteCommand(
       });
     });
   } finally {
-    liveRemote = null;
+    liveRemotes.delete(child);
   }
 }
 

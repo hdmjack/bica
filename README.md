@@ -404,21 +404,34 @@ train you to skip the whole channel.
 ## Running several commands at once
 
 Separate commands with `--`. They run concurrently in one remote workspace, against one copy of the
-files, and each one's output is printed under its own heading:
+files, each with its own connection, and their output is labelled and streamed as it arrives:
 
 ```bash
 bica run pnpm lint -- pnpm typecheck -- pnpm test:run
 ```
 
 ```
-===== pnpm-lint =====      <output>
-===== pnpm-typecheck ===== <output>
-===== pnpm-test-run =====  <output>
+[bica] Running 3 commands at once: pnpm-lint, pnpm-typecheck, pnpm-test-run
+[pnpm-lint] …
+[pnpm-test-run] …
+[bica] pnpm-lint finished (exit 0) after 12s
+[pnpm-typecheck] …
+[bica] pnpm-typecheck finished (exit 1) after 48s
+[bica] pnpm-test-run finished (exit 0) after 115s
+
 [bica] exit codes: pnpm-lint=0 pnpm-typecheck=1 pnpm-test-run=0
 ```
 
 The run exits non-zero if any command failed, so a caller can branch on a single code rather than
-parsing output.
+parsing output. The `[bica] exit codes:` line goes to stdout and is the machine-readable part;
+everything labelled `[bica]` beside it is progress on stderr.
+
+**Output arrives live, which it did not always.** Until 0.2.0 the commands were run by a shell script
+generated for the remote, which captured each one to a file and replayed them in order once the
+slowest had finished. A run therefore printed nothing at all until it was over: a three-command run
+that hung was indistinguishable from one that had never started, and was reported as exactly that
+after two silent hours. Coordinating from this side instead means a wedged command is visible within
+seconds, and named.
 
 **One workspace, not one per command.** Commands that read the same files do not need separate copies
 of them. Measured on a real monorepo, three checks this way against one workspace each: **32 s vs
@@ -429,7 +442,8 @@ vitest to `node_modules/.vite` — so they do not interfere.
 This replaced an earlier design that gave each command its own remote workspace from a pool. That
 bought nothing for same-content commands: they contend for the same remote CPU either way, so the only
 effect was triplicating the sync, the disk and the build. Concurrency is bounded by the remote's cores,
-not by bica.
+not by bica. One connection per command is a different matter from one workspace per command: the
+connections are cheap and are what keeps the three output streams apart.
 
 ### Two runs at once
 

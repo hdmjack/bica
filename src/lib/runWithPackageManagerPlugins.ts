@@ -5,12 +5,16 @@ import {
   matchingPackageManagerPlugins,
   resolveActivePackageManagerPlugins,
 } from '../resolveActivePlugins';
+import { assignLabels } from './parallelCommands';
+import { dim } from '../terminalStyle';
 import {
   clearRemoteInstallRecord,
   readRemoteInstallRecord,
   writeRemoteInstallRecord,
 } from './remoteInstallState';
 import {
+  REMOTE_CD_FAILED_EXIT,
+  REMOTE_CONTENT_MISMATCH_EXIT,
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
   runRemoteCommand,
@@ -81,6 +85,79 @@ export async function ensureRemoteWorkspaceDirectory(
 }
 
 /**
+ * Run several commands at once in one workspace, one connection each.
+ *
+ * One workspace rather than one per command is the measured choice: commands reading the same files
+ * do not need separate copies of them. One *connection* per command is what makes their output
+ * separable while it is still arriving.
+ *
+ * None of them records its exit code into the lease. That record is written by rewriting the claim
+ * line, so concurrent writers would race and leave a line with several exit codes or none; the one
+ * result for the run is recorded here instead. Each still publishes its own process group, and the
+ * lease now treats a run as alive while any of those groups is.
+ */
+async function runConcurrently(options: {
+  commands: string[][];
+  sshHost: string;
+  remoteWorkspacePath: string;
+  repoRoot: string;
+  assertRunId?: string;
+  claimPathExpr?: string;
+}): Promise<number> {
+  const labelled = assignLabels(options.commands);
+  process.stderr.write(
+    `${dim('[bica]')} ${dim(`Running ${String(labelled.length)} commands at once: ${labelled.map((c) => c.label).join(', ')}`)}\n`,
+  );
+
+  const started = Date.now();
+  const results = await Promise.all(
+    labelled.map(async (command) => {
+      const code = await runRemoteCommand(
+        options.sshHost,
+        options.remoteWorkspacePath,
+        argvToPosixShCommand(command.argv),
+        options.repoRoot,
+        {
+          assertRunId: options.assertRunId,
+          claimPathExpr: options.claimPathExpr,
+          label: command.label,
+          recordExitCode: false,
+        },
+      );
+      const seconds = Math.round((Date.now() - started) / 1000);
+      process.stderr.write(
+        `${dim('[bica]')} ${dim(`${command.label} finished (exit ${String(code)}) after ${String(seconds)}s`)}\n`,
+      );
+      return { label: command.label, code };
+    }),
+  );
+
+  // The same line this has always printed, because callers read it rather than parsing output.
+  process.stdout.write(
+    `\n[bica] exit codes: ${results.map((r) => `${r.label}=${String(r.code)}`).join(' ')}\n`,
+  );
+  return aggregateExitCode(results.map((r) => r.code));
+}
+
+/**
+ * One exit code for a run of several commands.
+ *
+ * Ordered by what the caller has to do about it: a discarded result (97) outranks a workspace that
+ * could not be entered (96), which outranks an ordinary failure -- because the first two say nothing
+ * about the code under test and the third does. Any other failure collapses to 1, as it always has:
+ * which command failed is in the summary line.
+ */
+export function aggregateExitCode(codes: readonly number[]): number {
+  if (codes.includes(REMOTE_CONTENT_MISMATCH_EXIT)) {
+    return REMOTE_CONTENT_MISMATCH_EXIT;
+  }
+  if (codes.includes(REMOTE_CD_FAILED_EXIT)) {
+    return REMOTE_CD_FAILED_EXIT;
+  }
+  return codes.some((c) => c !== 0) ? 1 : 0;
+}
+
+/**
  * Runs the remote argv after optional package-manager preflight (install hash / reinstall prompt).
  */
 export async function runRemoteCommandWithPmHooks(options: {
@@ -105,6 +182,18 @@ export async function runRemoteCommandWithPmHooks(options: {
   assertRunId?: string;
   /** Shell expression for that lease's file on the remote. */
   claimPathExpr?: string;
+  /**
+   * The user's commands, when there is more than one and they are to run at the same time.
+   *
+   * Each gets its own ssh connection into the one workspace, and the output is labelled and streamed
+   * as it arrives. This used to be a shell script generated for the remote, which could not stream:
+   * it captured each command to a file and replayed them once the slowest had finished, so a run said
+   * nothing at all until it was over -- a three-command run sat silent for two hours and was
+   * reasonably reported as never having started. Coordinating here instead means the output, the exit
+   * codes and the teardown are Node's problem, where they are ordinary, rather than another twenty
+   * lines of POSIX shell for every feature.
+   */
+  concurrentCommands?: string[][];
 }): Promise<number> {
   const { prep, remoteArgv, pmOverride } = options;
   const { repoRoot, config } = prep;
@@ -221,13 +310,24 @@ export async function runRemoteCommandWithPmHooks(options: {
     }
   }
 
-  const code = await runRemoteCommand(
-    config.sshHost,
-    config.remoteWorkspacePath,
-    cmdStr,
-    repoRoot,
-    { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
-  );
+  const concurrent = options.concurrentCommands ?? [];
+  const code =
+    concurrent.length > 1
+      ? await runConcurrently({
+          commands: concurrent,
+          sshHost: config.sshHost,
+          remoteWorkspacePath: config.remoteWorkspacePath,
+          repoRoot,
+          assertRunId: options.assertRunId,
+          claimPathExpr: options.claimPathExpr,
+        })
+      : await runRemoteCommand(
+          config.sshHost,
+          config.remoteWorkspacePath,
+          cmdStr,
+          repoRoot,
+          { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
+        );
 
   if (plugin) {
     const wasInstall = candidates.some((argv) => plugin.isInstallArgv(argv));

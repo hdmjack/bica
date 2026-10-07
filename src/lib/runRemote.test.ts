@@ -59,8 +59,25 @@ describe('buildRunRemoteSshArgs', () => {
       'mini',
       'zsh',
       '-lc',
-      'cd "$HOME/code/foo" && pnpm typecheck',
+      `'cd "$HOME/code/foo" && pnpm typecheck'`,
     ]);
+  });
+
+  it('passes the script as one quoted word, so the shell asked for is the shell that runs it', () => {
+    // ssh joins its arguments with spaces and the remote's own login shell parses the result. An
+    // unquoted multi-line script therefore became `zsh -lc <first word>` plus every remaining line
+    // executed by the outer shell -- which is how a bare `export` came to run, printing the wall of
+    // KEY=value that every run used to start with.
+    const argv = buildRunRemoteSshArgs({
+      ...base,
+      interactive: false,
+      remoteScript: "echo one\necho 'two'\n",
+    });
+    const script = argv[argv.length - 1];
+    expect(script.startsWith("'")).toBe(true);
+    expect(script.endsWith("'")).toBe(true);
+    // The script's own quotes survive, escaped the POSIX way rather than ending the word early.
+    expect(script).toContain(`'\\''two'\\''`);
   });
 });
 

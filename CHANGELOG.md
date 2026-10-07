@@ -3,6 +3,27 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.0 — 2026-10-07
+
+### Changed
+- **A run of several commands at once is coordinated here, not by a script sent to the remote.** Each
+  command gets its own ssh connection into the one workspace, and its output is prefixed with the
+  command's label and streamed as it arrives. **The `===== label =====` blocks are gone**; anything
+  parsing them needs updating. The `[bica] exit codes: …` summary line is unchanged and still on
+  stdout.
+- The lease now records one remote process group per command, and treats a run as alive while any of
+  them is. An older bica reads the first group only, and would judge such a run stale once that one
+  command had finished — one more reason not to mix versions against one remote path.
+
+### Fixed
+- **Every run used to begin with a wall of `KEY=value` lines.** ssh joins its arguments with spaces
+  and the remote's own login shell parses the result, so `zsh -lc <script>` ran `zsh -lc export` —
+  taking only the first word — and then executed the rest of the script in the outer shell. The bare
+  `export` listed every exported variable. bica's own help attributed this to the user's `.zprofile`;
+  it was bica. The script is now passed as one quoted word, which also means the PATH preamble runs
+  in the shell it was written for, and a missing login shell fails outright instead of running
+  everything but its first line.
+
 ## 0.1.0 — 2026-10-06
 
 First version intended for anyone other than its author.

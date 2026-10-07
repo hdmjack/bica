@@ -249,6 +249,8 @@ export async function runPinned(options: {
   remoteArgv: string[];
   /** The user's commands, for package-manager plugin matching. See runRemoteCommandWithPmHooks. */
   matchArgvs?: string[][];
+  /** The user's commands when several are to run at once; see `concurrentCommands`. */
+  concurrentCommands?: string[][];
   pmOverride: string | undefined;
   /** `--return-flow` was passed. Without it a pinned run does not pull artifacts back. */
   returnFlowOptIn: boolean;
@@ -359,6 +361,7 @@ export async function runPinned(options: {
     prep,
     remoteArgv: options.remoteArgv,
     matchArgvs: options.matchArgvs,
+    concurrentCommands: options.concurrentCommands,
     generatedPaths: prep.generatedPaths,
     generatedCommand: prep.generatedCommand,
     pmOverride: options.pmOverride,

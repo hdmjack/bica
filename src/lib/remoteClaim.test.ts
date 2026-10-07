@@ -76,7 +76,27 @@ describe('parseOwner', () => {
       host: 'h1',
       pid: 42,
       remotePid: 7788,
+      remotePids: [7788],
     });
+  });
+
+  it('reads every remote pid, for a run of several commands at once', () => {
+    // One connection per command, each publishing the group it leads. `remotePid` stays as the first
+    // so that a reader written before concurrent runs existed still finds what it expects.
+    const owner = parseOwner('r1 h1 42 rpid=7788 rpid=7799 rpid=7801');
+    expect(owner?.remotePids).toEqual([7788, 7799, 7801]);
+    expect(owner?.remotePid).toBe(7788);
+  });
+
+  it('a run is alive while any of its groups is', () => {
+    // This machine's hostname: a claim from another machine is never judged stale, so a fake one
+    // would make the assertion pass for a reason that has nothing to do with process groups.
+    const owner = parseOwner(`r1 ${os.hostname()} 42 rpid=10 rpid=11`);
+    const dead = () => false;
+    const onlySecondAlive = (pid: number) => pid === 11;
+    // Judging by the first group alone would free the workspace while the second was still writing.
+    expect(claimIsStale(owner, dead, onlySecondAlive)).toBe(false);
+    expect(claimIsStale(owner, dead, dead)).toBe(true);
   });
 
   it('keeps the remote pid distinct from the exit code that follows it', () => {
