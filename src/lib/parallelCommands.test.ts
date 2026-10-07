@@ -219,7 +219,7 @@ describe('a run that is still going says so', () => {
 
   it('repeats which commands are still running, for a run with nothing to show yet', () => {
     const { stderr } = runSplit(
-      [{ label: 'wedged', argv: ['sh', '-c', 'sleep 3'] }],
+      [{ label: 'wedged', argv: ['sh', '-c', 'sleep 4'] }],
       { heartbeatSeconds: 1 },
     );
     expect(stderr).toMatch(/still running after \d+s: wedged/);
@@ -241,7 +241,9 @@ describe('a run that is still going says so', () => {
       { label: 'a', argv: ['true'] },
       { label: 'b', argv: ['true'] },
     ]);
-    // A fixed poll interval made two `echo`s take as long as the interval.
-    expect(Date.now() - started).toBeLessThan(2000);
+    // A fixed poll interval made two `echo`s take as long as the interval, which was five seconds.
+    // The budget is generous because this runs beside everything else in the suite and a tight one
+    // would flake under load -- the point is the five-second floor, not a performance target.
+    expect(Date.now() - started).toBeLessThan(4000);
   });
 });
