@@ -181,3 +181,67 @@ exit 0`,
     expect(() => buildParallelScript([])).toThrow(/at least one/);
   });
 });
+
+describe('a run that is still going says so', () => {
+  let dir = '';
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-par-progress-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function runSplit(
+    commands: { label: string; argv: string[] }[],
+    opts: { heartbeatSeconds?: number } = {},
+  ): { stdout: string; stderr: string } {
+    const r = spawnSync('sh', ['-c', buildParallelScript(commands, opts)], {
+      cwd: dir,
+      encoding: 'utf8',
+    });
+    return { stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  }
+
+  it('announces a command that finished while another is still running', () => {
+    // The failure this exists for: a three-command run sat silent for two hours and was reported as
+    // "no command ever started", because output is held back until the slowest finishes and there
+    // was no way to tell that from "two finished in a minute and the third is wedged".
+    const { stderr } = runSplit([
+      { label: 'quick', argv: ['sh', '-c', 'echo q'] },
+      { label: 'slow', argv: ['sh', '-c', 'sleep 2; echo s'] },
+    ]);
+    const quickAt = stderr.indexOf('quick finished');
+    const slowAt = stderr.indexOf('slow finished');
+    expect(quickAt).toBeGreaterThan(-1);
+    expect(slowAt).toBeGreaterThan(-1);
+    expect(quickAt).toBeLessThan(slowAt);
+  });
+
+  it('repeats which commands are still running, for a run with nothing to show yet', () => {
+    const { stderr } = runSplit(
+      [{ label: 'wedged', argv: ['sh', '-c', 'sleep 3'] }],
+      { heartbeatSeconds: 1 },
+    );
+    expect(stderr).toMatch(/still running after \d+s: wedged/);
+  });
+
+  it('keeps progress out of stdout, so a filtered report stays clean', () => {
+    const { stdout, stderr } = runSplit([
+      { label: 'one', argv: ['echo', 'payload'] },
+    ]);
+    expect(stdout).toContain('payload');
+    expect(stdout).toContain('exit codes:');
+    expect(stdout).not.toContain('finished (exit');
+    expect(stderr).toContain('finished (exit');
+  });
+
+  it('adds no measurable delay to a run whose commands are instant', () => {
+    const started = Date.now();
+    runSplit([
+      { label: 'a', argv: ['true'] },
+      { label: 'b', argv: ['true'] },
+    ]);
+    // A fixed poll interval made two `echo`s take as long as the interval.
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});

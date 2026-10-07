@@ -18,6 +18,23 @@ import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
  * - no quoting archaeology
  */
 
+/**
+ * How long the progress loop waits between looks, and how that grows.
+ *
+ * It starts short because most runs are short: a fixed interval would add its own length to every
+ * multi-command run, which a first version of this did -- two `echo`s took five seconds. It grows
+ * because a run that is still going after half a minute is not one where a fraction of a second of
+ * detection lag matters, and a tight loop over hours is just noise on the connection.
+ */
+const POLL_LADDER = [
+  { afterPolls: 0, seconds: '0.2' },
+  { afterPolls: 10, seconds: '1' },
+  { afterPolls: 30, seconds: '5' },
+];
+
+/** Seconds between "still running" lines, measured against the clock rather than the poll count. */
+const HEARTBEAT_SECONDS = 60;
+
 export interface ParallelCommand {
   /** Short name for the section header and the summary line. */
   label: string;
@@ -77,7 +94,11 @@ export function assignLabels(argvs: readonly string[][]): ParallelCommand[] {
  * Log files go in a temp directory that is removed afterwards, so nothing lands in the workspace where
  * the next sync would have to reason about it. Pure, for testability.
  */
-export function buildParallelScript(commands: readonly ParallelCommand[]): string {
+export function buildParallelScript(
+  commands: readonly ParallelCommand[],
+  options: { heartbeatSeconds?: number } = {},
+): string {
+  const heartbeatSeconds = options.heartbeatSeconds ?? HEARTBEAT_SECONDS;
   if (commands.length === 0) {
     throw new Error('buildParallelScript needs at least one command');
   }
@@ -88,23 +109,80 @@ export function buildParallelScript(commands: readonly ParallelCommand[]): strin
     '_bica_dir=$(mktemp -d "${TMPDIR:-/tmp}/bica-run.XXXXXX")',
     // Even on a hard failure the workspace is left as it was found.
     "trap 'rm -rf \"$_bica_dir\"' EXIT",
+    '_bica_t0=$(date +%s)',
   ];
 
+  // Each command writes its exit code to a file of its own when it finishes.
+  //
+  // That file, rather than `wait`, is what tells the loop below a command is done: a finished child
+  // that has not been reaped is a zombie, and `kill -0` on a zombie succeeds, so polling the process
+  // table would report every command as still running until the moment it was collected.
   commands.forEach((c, i) => {
     const v = `_bica_p${String(i)}`;
+    const body = c.argv.length === 0 ? 'true' : argvToPosixShCommand(c.argv);
     lines.push(
-      `${c.argv.length === 0 ? 'true' : argvToPosixShCommand(c.argv)} > "$_bica_dir/${c.label}.log" 2>&1 &`,
+      `( ${body} > "$_bica_dir/${c.label}.log" 2>&1; echo $? > "$_bica_dir/${c.label}.rc" ) &`,
       `${v}=$!`,
+      `_bica_ann${String(i)}=0`,
     );
   });
 
+  // Say what is happening while it happens.
+  //
+  // Output is captured and replayed in order, which is what makes three concurrent commands readable
+  // -- but it means a run says nothing at all until the slowest of them finishes. A three-command run
+  // once sat silent for two hours and was reported as "no command ever started", because there was no
+  // way to tell that from "two finished in a minute and the third is wedged". These lines go to
+  // stderr, so a caller filtering stdout still gets the clean report, and they keep an otherwise idle
+  // connection carrying traffic.
+  const labelList = commands.map((c) => c.label).join(', ');
+  lines.push(
+    // No apostrophe in the message: the whole `printf` format is a single-quoted shell word, and
+    // escaping one inside a template literal that is itself building shell quoting is how this line
+    // first went wrong.
+    `printf '[bica] running %s; output appears when all have finished\\n' ${shq(labelList)} >&2`,
+    '_bica_tick=0',
+    `_bica_nap=${POLL_LADDER[0].seconds}`,
+    `_bica_beat=${String(heartbeatSeconds)}`,
+    'while :; do',
+  );
+
   commands.forEach((c, i) => {
-    lines.push(`wait "$_bica_p${String(i)}"; _bica_rc${String(i)}=$?`);
+    lines.push(
+      `  if [ -f "$_bica_dir/${c.label}.rc" ] && [ "$_bica_ann${String(i)}" -eq 0 ]; then`,
+      `    _bica_ann${String(i)}=1`,
+      `    printf '[bica] %s finished (exit %s) after %ss\\n' ${shq(c.label)} "$(cat "$_bica_dir/${c.label}.rc")" "$(( $(date +%s) - _bica_t0 ))" >&2`,
+      '  fi',
+    );
   });
+
+  lines.push('  _bica_pending=0');
+  commands.forEach((c) => {
+    lines.push(`  [ -f "$_bica_dir/${c.label}.rc" ] || _bica_pending=1`);
+  });
+  lines.push(
+    '  [ "$_bica_pending" -eq 0 ] && break',
+    '  sleep "$_bica_nap"',
+    '  _bica_tick=$(( _bica_tick + 1 ))',
+    ...POLL_LADDER.slice(1).map(
+      (step) =>
+        `  [ "$_bica_tick" -ge ${String(step.afterPolls)} ] && _bica_nap=${step.seconds}`,
+    ),
+    '  _bica_el=$(( $(date +%s) - _bica_t0 ))',
+    '  if [ "$_bica_el" -ge "$_bica_beat" ]; then',
+    `    _bica_beat=$(( _bica_beat + ${String(heartbeatSeconds)} ))`,
+  );
+  commands.forEach((c) => {
+    lines.push(
+      `    [ -f "$_bica_dir/${c.label}.rc" ] || printf '[bica] still running after %ss: %s\\n' "$_bica_el" ${shq(c.label)} >&2`,
+    );
+  });
+  lines.push('  fi', 'done', 'wait');
 
   lines.push('_bica_failed=0');
   commands.forEach((c, i) => {
     lines.push(
+      `_bica_rc${String(i)}=$(cat "$_bica_dir/${c.label}.rc")`,
       `printf '\\n===== %s =====\\n' ${shq(c.label)}`,
       `cat "$_bica_dir/${c.label}.log"`,
       `[ "$_bica_rc${String(i)}" -ne 0 ] && _bica_failed=1`,
