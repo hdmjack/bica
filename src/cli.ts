@@ -9,17 +9,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import chalk from 'chalk';
 
 import { resolveBicaPluginConfig } from './bicaWorkspaceConfig';
 import { parseArgs } from './cliArgs';
 import { isProcessAlive } from './lib/fileLock';
-import {
-  formatReport,
-  hasProblem,
-  runChecks,
-} from './lib/doctor';
-import type { DoctorProbes } from './lib/doctor';
+import { hasProblem } from './lib/doctor';
+import { ownVersion } from './lib/ownVersion';
+import { checkThisMachine } from './lib/doctorRun';
 import { gitDependentHint } from './lib/gitDependentHint';
 import {
   DEFAULT_READY_TIMEOUT_SECONDS,
@@ -81,7 +77,6 @@ import {
 } from './lib/writeBack';
 import {
   openRemoteInteractiveSsh,
-  remoteLoginPreambleForRun,
   runRemoteScriptOverStdin,
   terminateLiveRemoteCommand,
 } from './lib/runRemote';
@@ -98,11 +93,7 @@ import {
   resolveActivePackageManagerPlugins,
   resolveActiveRemoteShellPlugins,
 } from './resolveActivePlugins';
-import {
-  bicaIsGitignored,
-  cmdInit,
-  ensureBicaWorkspaceOrInteractiveSetup,
-} from './setupWizard';
+import { cmdInit, ensureBicaWorkspaceOrInteractiveSetup } from './setupWizard';
 import {
   getRepoRoot,
   loadRemoteEnvConfig,
@@ -306,32 +297,6 @@ Examples
 `);
 }
 
-/**
- * bica's own version, read from the package it ships in.
- *
- * Worth having because bica keeps state on the remote that several people and several versions can
- * reach -- the workspace lease, the install record -- so "which bica is this?" is a question with
- * consequences, and until now there was no way to answer it.
- */
-function readOwnVersion(): string {
-  const dir = path.dirname(fileURLToPath(import.meta.url));
-  try {
-    const raw = fs.readFileSync(path.join(dir, '..', 'package.json'), 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      'version' in parsed &&
-      typeof (parsed as { version?: unknown }).version === 'string'
-    ) {
-      return (parsed as { version: string }).version;
-    }
-  } catch {
-    // Falls through: a version we cannot read is worth saying so about, not worth failing over.
-  }
-  return 'unknown';
-}
-
 function die(message: string): never {
   console.error(message);
   process.exit(1);
@@ -509,28 +474,6 @@ async function cmdSsh(): Promise<void> {
   process.exitCode = code;
 }
 
-/** The remote PATH preamble, or nothing when this repository has no bica config to resolve it from. */
-function toolingPreambleOrEmpty(repoRoot: string | undefined): string {
-  if (repoRoot === undefined) {
-    return '';
-  }
-  try {
-    return remoteLoginPreambleForRun(repoRoot);
-  } catch {
-    return '';
-  }
-}
-
-/** The enclosing git repository, or nothing — used where bica's own config may not exist yet. */
-function gitRootOrUndefined(): string | undefined {
-  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-    encoding: 'utf8',
-    shell: false,
-  });
-  const out = (r.stdout ?? '').trim();
-  return r.error == null && (r.status ?? 1) === 0 && out !== '' ? out : undefined;
-}
-
 /**
  * `bica doctor`: check everything bica needs and say what to do about what is missing.
  *
@@ -539,56 +482,7 @@ function gitRootOrUndefined(): string | undefined {
  * three minutes in. Each is a minute to fix and an afternoon to identify.
  */
 function cmdDoctor(): void {
-  let config: DoctorProbes['config'];
-  // The git root, not bica's idea of the repository root: the latter requires a bica.yml, and the
-  // doctor's whole job is to be useful before one exists.
-  let repoRoot: string | undefined = gitRootOrUndefined();
-  try {
-    repoRoot = getRepoRoot();
-    const resolved = loadRemoteEnvConfig(repoRoot);
-    config = {
-      ok: true,
-      sshHost: resolved.sshHost,
-      remoteWorkspacePath: resolved.remoteWorkspacePath,
-    };
-  } catch (e: unknown) {
-    config = { ok: false, reason: e instanceof Error ? e.message : String(e) };
-  }
-
-  const results = runChecks({
-    localCommand: (command, args) => {
-      const r = spawnSync(command, args, { encoding: 'utf8', shell: false });
-      return {
-        ok: r.error == null && (r.status ?? 1) === 0,
-        stdout: r.stdout ?? '',
-        stderr: r.stderr ?? '',
-      };
-    },
-    remoteScript: (script) =>
-      config.ok
-        ? runRemoteScriptOverStdin(config.sshHost, script)
-        : { status: 1, stdout: '', stderr: 'no ssh host configured' },
-    nodeVersion: process.version,
-    platform: process.platform,
-    config,
-    bicaIsGitignored:
-      repoRoot === undefined ? undefined : bicaIsGitignored(repoRoot),
-    loginShell: process.env.BICA_LOGIN_SHELL?.trim() || 'zsh',
-    // Guarded: resolving the preamble reads bica.yml, and a repository without one is exactly the
-    // situation the doctor exists for. Nothing it checks may be able to stop it running.
-    toolingPreamble: toolingPreambleOrEmpty(repoRoot),
-  });
-
-  console.log(`\nbica ${readOwnVersion()} on ${process.platform}\n`);
-  console.log(
-    formatReport(results, {
-      ok: (t) => chalk.green(t),
-      bad: (t) => chalk.red(t),
-      warn: (t) => chalk.yellow(t),
-      dim: (t) => dim(t),
-    }),
-  );
-  process.exitCode = hasProblem(results) ? 1 : 0;
+  process.exitCode = hasProblem(checkThisMachine()) ? 1 : 0;
 }
 
 /** Wait for a condition, briefly, without pinning the loop. */
@@ -1299,7 +1193,7 @@ async function main(): Promise<void> {
   }
 
   if (rest[0] === '--version' || rest[0] === '-v' || rest[0] === 'version') {
-    console.log(readOwnVersion());
+    console.log(ownVersion());
     process.exit(0);
   }
 

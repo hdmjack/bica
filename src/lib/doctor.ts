@@ -317,3 +317,90 @@ export function formatReport(
     '',
   ].join('\n');
 }
+
+/**
+ * Gather the probes from this machine, run the checks and print the report.
+ *
+ * Here rather than in the CLI so that `bica init` can finish with it. Setup that ends in a verdict --
+ * "Ready", or a list of what is left -- is the difference between knowing you are set up and finding
+ * out during your first real command.
+ */
+export function reportOnThisMachine(options: {
+  version: string;
+  repoRoot: string | undefined;
+  config: DoctorProbes['config'];
+  toolingPreamble: string;
+  runLocal: DoctorProbes['localCommand'];
+  runRemote: (sshHost: string, script: string) => {
+    status: number;
+    stdout: string;
+    stderr: string;
+  };
+  isGitignored: (repoRoot: string) => boolean;
+  write: (text: string) => void;
+  decorate: Parameters<typeof formatReport>[1];
+}): CheckResult[] {
+  const { config } = options;
+  const results = runChecks({
+    localCommand: options.runLocal,
+    remoteScript: (script) =>
+      config.ok
+        ? options.runRemote(config.sshHost, script)
+        : { status: 1, stdout: '', stderr: 'no ssh host configured' },
+    nodeVersion: process.version,
+    platform: process.platform,
+    config,
+    bicaIsGitignored:
+      options.repoRoot === undefined
+        ? undefined
+        : options.isGitignored(options.repoRoot),
+    loginShell: process.env.BICA_LOGIN_SHELL?.trim() ?? 'zsh',
+    toolingPreamble: options.toolingPreamble,
+  });
+  options.write(`\nbica ${options.version} on ${process.platform}\n\n`);
+  options.write(formatReport(results, options.decorate));
+  return results;
+}
+
+/**
+ * Where this invocation is, and what it can tell about it.
+ *
+ * Deliberately total: every failure here becomes a check result rather than an exception, because the
+ * situations it fails in — no bica.yml, no ssh host — are the ones the doctor exists to describe.
+ */
+export function doctorContextForThisRepo(options: {
+  gitRoot: () => string | undefined;
+  bicaRoot: () => string;
+  remoteConfig: (repoRoot: string) => {
+    sshHost: string;
+    remoteWorkspacePath: string;
+  };
+  preamble: (repoRoot: string) => string;
+}): {
+  repoRoot: string | undefined;
+  config: DoctorProbes['config'];
+  toolingPreamble: string;
+} {
+  let repoRoot = options.gitRoot();
+  let config: DoctorProbes['config'];
+  try {
+    repoRoot = options.bicaRoot();
+    const resolved = options.remoteConfig(repoRoot);
+    config = {
+      ok: true,
+      sshHost: resolved.sshHost,
+      remoteWorkspacePath: resolved.remoteWorkspacePath,
+    };
+  } catch (e: unknown) {
+    config = { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+  let toolingPreamble = '';
+  if (repoRoot !== undefined) {
+    try {
+      toolingPreamble = options.preamble(repoRoot);
+    } catch {
+      // Resolving it reads bica.yml, and a repository without one is the case this must survive.
+    }
+  }
+  return { repoRoot, config, toolingPreamble };
+}

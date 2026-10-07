@@ -3,7 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { ensureBicaIsGitignored, scaffoldForRepo } from './setupWizard';
+import { ensureBicaIsGitignored } from './lib/gitignore';
+import { scaffoldForRepo } from './setupWizard';
 
 describe('scaffoldForRepo', () => {
   let dir: string;

@@ -10,6 +10,8 @@ entries note where a change affects what another version sees.
   answers; the remote's login shell and toolchain, using the same PATH a run uses; and whether
   OpenSSH there is new enough for `bica tunnel`. Every check is independent, so a machine with three
   things wrong reports three. Exits non-zero when something would stop a run.
+- `bica init` now ends by running those checks, so setup finishes with a verdict rather than a
+  prompt.
 
 ### Changed
 - **A run of several commands at once is coordinated here, not by a script sent to the remote.** Each
