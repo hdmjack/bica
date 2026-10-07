@@ -5,6 +5,12 @@ entries note where a change affects what another version sees.
 
 ## 0.2.0 — 2026-10-07
 
+### Added
+- **`bica doctor`** — checks Node, ssh, rsync and Mutagen here; the configuration; whether the host
+  answers; the remote's login shell and toolchain, using the same PATH a run uses; and whether
+  OpenSSH there is new enough for `bica tunnel`. Every check is independent, so a machine with three
+  things wrong reports three. Exits non-zero when something would stop a run.
+
 ### Changed
 - **A run of several commands at once is coordinated here, not by a script sent to the remote.** Each
   command gets its own ssh connection into the one workspace, and its output is prefixed with the

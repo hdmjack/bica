@@ -92,6 +92,20 @@ sync:
       - dist
 ```
 
+## When something is wrong: `bica doctor`
+
+```bash
+bica doctor
+```
+
+It checks what bica needs at both ends — Node, ssh, rsync and Mutagen here; the configuration; whether
+the host answers; the login shell; the toolchain on the remote, using the same PATH a run uses; and
+whether OpenSSH there is new enough for `bica tunnel` — and prints a line for each with what to do
+about anything missing. Every check is independent, so a machine with three things wrong reports three
+things rather than the first one.
+
+It exits non-zero when something would stop a run, so it is also the thing to put in a setup script.
+
 ## Sharing a remote machine
 
 bica assumes **one remote workspace directory per person**. The default remote path includes your
@@ -141,8 +155,10 @@ Re-run it. Nothing here is a verdict on your code.
 from what that workspace last installed. If you suspect the record is wrong, `bica run pnpm install`
 forces it.
 
-**Reporting a problem:** include the exit code, the `[bica]` lines, and the output of
-`BICA_DEBUG=1 bica run <your command>`, which prints the script bica sent to the remote.
+**Before anything else, run `bica doctor`** — most first-run trouble is one of the things it checks.
+
+**Reporting a problem:** include `bica doctor` output, the exit code, the `[bica]` lines, and the
+output of `BICA_DEBUG=1 bica run <your command>`, which prints the script bica sent to the remote.
 
 ## Platform support
 

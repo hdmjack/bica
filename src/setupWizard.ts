@@ -135,6 +135,19 @@ const SKIP_HOST = '__bica_skip__';
 const SSH_HOST_TEXT_MESSAGE =
   'SSH target (Host alias from ~/.ssh/config or user@hostname; saved to .bica/local.yml)';
 
+/** Whether a repository already ignores `.bica/`, without changing anything. */
+export function bicaIsGitignored(repoRoot: string): boolean {
+  try {
+    return fs
+      .readFileSync(path.join(repoRoot, '.gitignore'), 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .some((line) => line === '.bica' || line === '.bica/' || line === '/.bica/');
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Make sure `.bica/` is ignored by the repository it was just written into.
  *

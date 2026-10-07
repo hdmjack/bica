@@ -533,7 +533,14 @@ function defaultRemoteToolingPreamble(): string {
   );
 }
 
-function remoteLoginPreambleForRun(repoRoot: string): string {
+/**
+ * The PATH setup bica puts in front of every command, exported so that a check of the remote's
+ * tooling asks the same question a run does.
+ *
+ * A bare login shell on the remote frequently has neither node nor pnpm: a version manager's shims
+ * are added here, not there. Checking without this reports tools missing that every run can find.
+ */
+export function remoteLoginPreambleForRun(repoRoot: string): string {
   const resolved = resolveBicaPluginConfig(repoRoot);
   const active: RemoteShellPlugin[] = resolveActiveRemoteShellPlugins(
     repoRoot,
