@@ -62,8 +62,10 @@ export interface GitDependentHintInput {
   argvs: readonly (readonly string[])[];
   /** The run's exit code. A run that succeeded had whatever it needed, so nothing is said. */
   exitCode: number;
-  /** Whether `git.sync` mirrored `.git` to the remote. When it did, this failure is not about git. */
+  /** Whether `git.sync` copied the repository to the remote. */
   syncGit: boolean;
+  /** Whether this checkout is a git worktree, which the copy has to flatten. */
+  fromWorktree?: boolean;
 }
 
 /**
@@ -75,12 +77,30 @@ export interface GitDependentHintInput {
 export function gitDependentHint(
   input: GitDependentHintInput,
 ): string | undefined {
-  if (input.exitCode === 0 || input.syncGit) {
+  if (input.exitCode === 0) {
     return undefined;
   }
   const culprit = input.argvs.find(readsGitHistory);
   if (culprit === undefined) {
     return undefined;
+  }
+  if (input.syncGit) {
+    // Something is still said when the setting is already on.
+    //
+    // The hint used to fall silent here, which left the person who had followed its advice with a
+    // bare `fatal: not a git repository` and nothing connecting the two. Saying what bica did is
+    // worth a line even when it cannot say what went wrong.
+    return (
+      `\`${culprit.join(' ')}\` reads git history, and \`git.sync\` is on, so bica copied this ` +
+      `checkout's repository to the remote before running it${
+        input.fromWorktree === true
+          ? ' — as one flattened repository, because this checkout is a git worktree and its `.git` is' +
+            ' a file naming a path the remote does not have'
+          : ''
+      }.\n` +
+      'If the command still cannot read history, the copy is the thing to look at: `BICA_DEBUG=1` ' +
+      'shows the rsync, and `bica run git rev-parse HEAD` says what the remote thinks it is on.'
+    );
   }
   return (
     `\`${culprit.join(' ')}\` reads git history, and this workspace has no \`.git\`: the sync leaves ` +

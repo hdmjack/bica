@@ -15,14 +15,27 @@ describe('gitDependentHint', () => {
     ).toBeUndefined();
   });
 
-  it('says nothing when git.sync already mirrored .git', () => {
-    expect(
-      gitDependentHint({
-        argvs: [['pnpm', 'test:run:changed']],
-        exitCode: 1,
-        syncGit: true,
-      }),
-    ).toBeUndefined();
+  it('still says something when git.sync is already on', () => {
+    // It used to fall silent here, which left whoever had followed the previous hint with a bare
+    // `fatal: not a git repository` and nothing connecting the two.
+    const hint = gitDependentHint({
+      argvs: [['pnpm', 'test:run:changed']],
+      exitCode: 1,
+      syncGit: true,
+    });
+    expect(hint).toContain('git.sync');
+    expect(hint).toContain('pnpm test:run:changed');
+    expect(hint).not.toContain('Turn it on');
+  });
+
+  it('names the worktree case, where the copy has to be flattened', () => {
+    const hint = gitDependentHint({
+      argvs: [['git', 'diff', 'main...HEAD']],
+      exitCode: 128,
+      syncGit: true,
+      fromWorktree: true,
+    });
+    expect(hint).toContain('worktree');
   });
 
   it('stays quiet for an ordinary failing test run', () => {

@@ -1,8 +1,17 @@
 import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 
+
 import { dim, warn } from '../terminalStyle';
 import type { PrepareResult } from '../syncProject';
+import {
+  resolveGitLayout,
+  WORKTREE_PRIVATE_ENTRIES,
+} from './gitLayout';
+import {
+  remotePathExprForCd,
+  runRemoteScriptOverStdin,
+} from './runRemote';
 
 /**
  * Trees return-flow must never walk, on top of whatever the user ignores. `.git` is mirrored
@@ -221,10 +230,71 @@ export function pushGitToRemote(prep: PrepareResult): PullResult {
     return { ran: false };
   }
 
-  const localSource = ensureTrailingSlash(path.join(prep.repoRoot, '.git'));
-  const remoteDest = `${ensureTrailingSlash(prep.remoteSyncUrl)}.git/`;
-  const args = ['-az', '--delete', localSource, remoteDest];
+  const layout = resolveGitLayout(prep.repoRoot);
+  if (layout.kind === 'none') {
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`${prep.repoRoot} is not a git repository, so there is nothing to sync.`)}\n`,
+    );
+    return { ran: false };
+  }
 
+  const remoteDest = `${ensureTrailingSlash(prep.remoteSyncUrl)}.git/`;
+
+  // A previous sync from a worktree may have left a one-line `.git` *file* there, and rsync cannot
+  // make a directory where a file is. Only ever a file: a `.git` directory is what this is building.
+  clearRemoteDotGitFile(prep);
+
+  if (layout.kind === 'plain') {
+    return rsyncGit(['-az', '--delete', ensureTrailingSlash(layout.gitDir), remoteDest]);
+  }
+
+  // A worktree becomes an ordinary repository on the remote.
+  //
+  // Everything shared goes first -- objects, refs, config -- then this worktree's own state on top of
+  // it, so HEAD and the index are this checkout's rather than the main clone's. The result is a plain
+  // repository at the same commit, which is all a history-reading command needs and far simpler than
+  // reproducing git's worktree layout against paths that do not exist on the remote.
+  process.stderr.write(
+    `${dim('[bica]')} ${dim('This is a git worktree; syncing the shared repository and this worktree\'s state as one.')}\n`,
+  );
+  const shared = rsyncGit([
+    '-az',
+    '--delete',
+    '--exclude',
+    'worktrees/',
+    ensureTrailingSlash(layout.commonDir),
+    remoteDest,
+  ]);
+  if (shared.exitCode !== 0) {
+    return shared;
+  }
+  return rsyncGit([
+    '-az',
+    // `--ignore-times`, because the overlay's whole job is to replace files the first pass just
+    // wrote. rsync's quick check skips a file whose size and mtime match, and the file that matters
+    // most here is `HEAD`: `ref: refs/heads/main` and `ref: refs/heads/side` are the same length, and
+    // a worktree created in the same second as its clone has the same timestamp. So the one file that
+    // decides which commit the remote is on was silently not copied, and the remote reported the main
+    // clone's HEAD with every appearance of success. The overlay is small -- HEAD, index, logs and
+    // this worktree's refs -- so forcing it costs nothing worth measuring.
+    '--ignore-times',
+    ...WORKTREE_PRIVATE_ENTRIES.flatMap((entry) => ['--exclude', entry]),
+    ensureTrailingSlash(layout.gitDir),
+    remoteDest,
+  ]);
+}
+
+/** Remove a `.git` that is a plain file on the remote, which only a worktree sync can have left. */
+function clearRemoteDotGitFile(prep: PrepareResult): void {
+  runRemoteScriptOverStdin(
+    prep.config.sshHost,
+    `cd ${remotePathExprForCd(prep.config.remoteWorkspacePath)} 2>/dev/null || exit 0\n` +
+      '[ -f .git ] && rm -f .git\n' +
+      'exit 0\n',
+  );
+}
+
+function rsyncGit(args: string[]): PullResult {
   const result = spawnSync('rsync', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],

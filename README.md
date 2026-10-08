@@ -407,7 +407,17 @@ git:
   sync: true
 ```
 
-When enabled, `bica run` does a one-shot `rsync -az --delete` of local `.git` → remote right before the command, mirroring history/HEAD/refs exactly. Keep `.git` in `sync.ignore.paths` (this is a one-shot rsync, not a continuous Mutagen watch — avoids `index.lock` churn). Toggle per-run with `BICA_GIT_SYNC=1`/`0`. Requires `rsync` on PATH; if missing, bica warns and skips.
+When enabled, `bica run` does a one-shot `rsync -az --delete` of local `.git` → remote right before the command, mirroring history/HEAD/refs exactly.
+
+**A `git worktree` works too, as one flattened repository.** In a worktree `.git` is a one-line file
+naming an absolute path inside the main clone, and the data is split between that clone's shared
+`.git` and a per-worktree directory under it. Copying "`.git`" from there copied a path the remote does
+not have, and every history command failed with `not a git repository` — with git sync switched on,
+reporting success. bica now copies the shared repository and then this worktree's own state over the
+top, so the remote holds an ordinary repository sitting on the worktree's commit. The second copy is
+forced rather than compared by size and timestamp, because `HEAD` is the file that decides which
+commit the remote is on and two branch names of equal length in a worktree created in the same second
+as its clone compare as identical. Keep `.git` in `sync.ignore.paths` (this is a one-shot rsync, not a continuous Mutagen watch — avoids `index.lock` churn). Toggle per-run with `BICA_GIT_SYNC=1`/`0`. Requires `rsync` on PATH; if missing, bica warns and skips.
 
 **When it is off, bica says so at the point it bites.** git's own error is "not a git repository", printed
 by the tool that shelled out to it and usually several lines into that tool's output — which reads as a

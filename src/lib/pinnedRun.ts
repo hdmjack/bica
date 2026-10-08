@@ -39,6 +39,7 @@ import {
   runRemoteCommandWithPmHooks,
 } from './runWithPackageManagerPlugins';
 import type { PrepareResult } from '../syncProject';
+import { dotGitIsAFile } from './gitLayout';
 
 /** How long a queued return-flow pull waits for another run's pull to finish. */
 const RETURN_FLOW_LOCK_TIMEOUT_MS = 120_000;
@@ -373,6 +374,7 @@ export async function runPinned(options: {
     argvs: options.matchArgvs ?? [options.remoteArgv],
     exitCode: code,
     syncGit,
+    fromWorktree: dotGitIsAFile(prep.repoRoot),
   });
   if (gitHint !== undefined) {
     process.stderr.write(`${warn('[bica]')} ${gitHint}\n`);

@@ -103,6 +103,7 @@ import {
 } from './syncProject';
 import type { ParsedGlobals } from './cliArgs';
 import type { PrepareResult } from './syncProject';
+import { dotGitIsAFile } from './lib/gitLayout';
 
 /** Commands that require bica.yml (or legacy bica-workspace.yml) at the Git root. */
 const COMMANDS_NEEDING_BICA_SPEC = new Set([
@@ -964,6 +965,7 @@ async function runWithLiveSession(options: {
       argvs: options.matchArgvs ?? [tail],
       exitCode: code,
       syncGit,
+      fromWorktree: dotGitIsAFile(repoRoot),
     });
     if (gitHint !== undefined) {
       process.stderr.write(`${warn('[bica]')} ${gitHint}\n`);

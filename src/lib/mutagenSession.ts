@@ -80,12 +80,22 @@ export function isLikelySyncReady(status: string | null): boolean {
   return s.includes('synchronized') || s.includes('watching for changes');
 }
 
+/**
+ * Forward Mutagen's own output, both streams to stderr.
+ *
+ * Mutagen narrates on stdout -- `Creating session...`, `Connecting to agent (POSIX)...`, without a
+ * newline -- and bica used to pass that through to its own stdout, where the remote command's output
+ * goes. So `$(bica run git rev-parse HEAD)` captured `Creating session...   Connecting to agent
+ * (POSIX)...   e354057…` and any caller reading a value got the narration with it. stdout belongs to
+ * the command and to the one summary line callers are told to read; everything bica says about its
+ * own progress goes to stderr.
+ */
 function writeMutagenStreams(
   stdout: string | null | undefined,
   stderr: string | null | undefined,
 ): void {
   if (stdout) {
-    process.stdout.write(stdout);
+    process.stderr.write(stdout);
   }
   if (stderr) {
     process.stderr.write(stderr);
@@ -118,7 +128,7 @@ export function mutagenProjectStart(
 
   // Idempotent start: backend exits non-zero when the project session already exists.
   if (/already\s+running/i.test(combined)) {
-    process.stdout.write(
+    process.stderr.write(
       'Remote sync is already running (nothing to start).\n',
     );
     return true;

@@ -3,6 +3,23 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.1 — 2026-10-08
+
+### Fixed
+- **`git.sync` did nothing in a `git worktree`.** There `.git` is a one-line file naming a path inside
+  the main clone, so the copy carried a path the remote does not have and every history-reading
+  command failed with `not a git repository` — while git sync reported success. bica now copies the
+  shared repository and the worktree's own state as one flattened repository on the remote.
+- With `git.sync` on, a failing history command said nothing at all, leaving whoever had followed the
+  previous hint with a bare `fatal: not a git repository`. It now says what bica copied.
+- **Mutagen's progress no longer lands on stdout.** `Creating session…` and `Connecting to agent…`
+  were passed through to bica's stdout, so `$(bica run git rev-parse HEAD)` captured the narration
+  along with the value. Everything bica says about its own progress is on stderr; stdout carries the
+  command and the exit-codes summary.
+- An ordinary clone was briefly misdetected as a worktree on macOS, where `/tmp` and `$HOME` reach
+  their contents through symlinks and git answers the two "where is the git dir" questions in
+  different spellings. Paths are compared canonically.
+
 ## 0.2.0 — 2026-10-07
 
 ### Added
