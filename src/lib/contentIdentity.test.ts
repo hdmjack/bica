@@ -34,6 +34,22 @@ afterEach(() => {
   fs.rmSync(repoRoot, { recursive: true, force: true });
 });
 
+/**
+ * Write a file and advance its timestamp, which is what an edit a moment later does anyway.
+ *
+ * `workingTreeOid` seeds a throwaway index from the repository's real one for speed, so `git add -A`
+ * uses git's quick check: size and mtime. A replacement of the same length, landing in the same second
+ * the index was written, is therefore read as unchanged and the tree OID does not move. Several tests
+ * here mean "this file changed" and say it with a same-length edit, which is the interesting case and
+ * also the one that races. Two of them failed intermittently before this existed -- one of them only
+ * ever when a second copy of the suite was running.
+ */
+function editFile(file: string, contents: string): void {
+  fs.writeFileSync(file, contents, 'utf8');
+  const later = new Date(Date.now() + 2000);
+  fs.utimesSync(file, later, later);
+}
+
 describe('workingTreeOid', () => {
   it('names a clean tree, matching the commit it was made from', () => {
     expect(workingTreeOid(repoRoot)).toBe(
@@ -50,17 +66,7 @@ describe('workingTreeOid', () => {
   it('changes when a tracked file is modified but not committed', () => {
     // The whole point: uncommitted work gets a name, so a run can say what it verified.
     const before = workingTreeOid(repoRoot);
-    const file = path.join(repoRoot, 'tracked.ts');
-    fs.writeFileSync(file, 'export const a = 2;\n', 'utf8');
-    // The timestamp is advanced deliberately, which is what an edit a moment later does anyway.
-    //
-    // This is seeded from the repository's real index for speed, so `git add -A` uses git's quick
-    // check: size and mtime. The replacement here is the same length as the original by design -- it
-    // is the interesting case -- so when the write lands in the same second as the index was written,
-    // the quick check can call the file unchanged and the OID does not move. That made this test fail
-    // about once in three full-suite runs, under load, and never on its own.
-    const later = new Date(Date.now() + 2000);
-    fs.utimesSync(file, later, later);
+    editFile(path.join(repoRoot, 'tracked.ts'), 'export const a = 2;\n');
     expect(workingTreeOid(repoRoot)).not.toBe(before);
   });
 
@@ -134,7 +140,7 @@ describe('resolveRunContent', () => {
   });
 
   it('names the working tree when no ref is given', () => {
-    fs.writeFileSync(path.join(repoRoot, 'tracked.ts'), 'export const a = 9;\n', 'utf8');
+    editFile(path.join(repoRoot, 'tracked.ts'), 'export const a = 9;\n');
     const content = resolveRunContent({ repoRoot, ref: undefined });
     expect(content?.source).toBe('working-tree');
     // Differs from HEAD precisely because the uncommitted edit is part of what would be verified.

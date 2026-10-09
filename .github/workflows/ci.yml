@@ -22,3 +22,29 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+
+  # The suite against itself.
+  #
+  # Two copies at once is how a fixture shared between processes gets found: the registry tests point
+  # $HOME at a directory and empty it before each case, and under a fixed name two runs deleted each
+  # other's files mid-test, with the failure appearing in whichever lost the race and describing a
+  # fault that did not exist. A single run can never catch that, and this costs seconds. The guard in
+  # `testFixtureIsolation.test.ts` names the offending line; this job proves the property.
+  concurrent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Two suites at once
+        run: |
+          pnpm test & first=$!
+          pnpm test & second=$!
+          wait $first; a=$?
+          wait $second; b=$?
+          echo "exit codes: first=$a second=$b"
+          [ "$a" -eq 0 ] && [ "$b" -eq 0 ]

@@ -5,6 +5,11 @@ entries note where a change affects what another version sees.
 
 ## 0.2.1 — 2026-10-08
 
+### Added
+- A guard test that fails if any test file names a directory under the system temp rather than asking
+  for a fresh one, and a CI job that runs the suite twice at once. Between them they catch fixtures
+  shared between processes — the guard names the line, the job proves the property.
+
 ### Fixed
 - **`git.sync` did nothing in a `git worktree`.** There `.git` is a one-line file naming a path inside
   the main clone, so the copy carried a path the remote does not have and every history-reading
