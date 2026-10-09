@@ -50,7 +50,17 @@ describe('workingTreeOid', () => {
   it('changes when a tracked file is modified but not committed', () => {
     // The whole point: uncommitted work gets a name, so a run can say what it verified.
     const before = workingTreeOid(repoRoot);
-    fs.writeFileSync(path.join(repoRoot, 'tracked.ts'), 'export const a = 2;\n', 'utf8');
+    const file = path.join(repoRoot, 'tracked.ts');
+    fs.writeFileSync(file, 'export const a = 2;\n', 'utf8');
+    // The timestamp is advanced deliberately, which is what an edit a moment later does anyway.
+    //
+    // This is seeded from the repository's real index for speed, so `git add -A` uses git's quick
+    // check: size and mtime. The replacement here is the same length as the original by design -- it
+    // is the interesting case -- so when the write lands in the same second as the index was written,
+    // the quick check can call the file unchanged and the OID does not move. That made this test fail
+    // about once in three full-suite runs, under load, and never on its own.
+    const later = new Date(Date.now() + 2000);
+    fs.utimesSync(file, later, later);
     expect(workingTreeOid(repoRoot)).not.toBe(before);
   });
 

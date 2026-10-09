@@ -16,6 +16,11 @@ entries note where a change affects what another version sees.
   were passed through to bica's stdout, so `$(bica run git rev-parse HEAD)` captured the narration
   along with the value. Everything bica says about its own progress is on stderr; stdout carries the
   command and the exit-codes summary.
+- A test that failed about once in three full-suite runs and never on its own: `workingTreeOid` seeds
+  a throwaway index from the real one for speed, so `git add -A` uses git's size-and-timestamp quick
+  check, and a same-length edit landing in the same second could be called unchanged. The test now
+  advances the timestamp deliberately. Nothing a user does depends on that window — whether a local
+  file moved while a run was out is decided by comparing content, not timestamps.
 - An ordinary clone was briefly misdetected as a worktree on macOS, where `/tmp` and `$HOME` reach
   their contents through symlinks and git answers the two "where is the git dir" questions in
   different spellings. Paths are compared canonically.

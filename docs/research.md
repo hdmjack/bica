@@ -313,3 +313,28 @@ damaging in the first place — it is the only way the remote ever learns its ca
   authority and leaves no mark saying it aged. When a tool's behaviour is in question, read
   it from disk.
 
+### git's quick check can miss an edit, and so can rsync's
+
+Both compare size and modification time before deciding a file is unchanged, and both were caught
+doing it within one week.
+
+`workingTreeOid` seeds a throwaway index from the repository's real one, for speed: `git add -A` then
+re-hashes only what the stat information says moved. The cost is that an edit landing in the same
+second the index was written, replacing content of the same length, can be called unchanged. It made
+one test fail about once in three full-suite runs and never on its own. The test now advances the
+file's timestamp deliberately, which is what an edit a moment later does anyway.
+
+The same trap, in rsync, cost rather more. Syncing a worktree's git state copies the shared repository
+first and then the worktree's own state over the top, and `HEAD` is the file that decides which commit
+the remote is on. `ref: refs/heads/main` and `ref: refs/heads/side` are the same length, and a worktree
+created in the same second as its clone shares a timestamp — so rsync skipped precisely the file that
+mattered, and the remote reported the main clone's HEAD while appearing to succeed. That copy is now
+forced with `--ignore-times`.
+
+**What follows from both:** a size-and-timestamp comparison is an optimisation, and it is wrong exactly
+when two versions of a file are the same length and written close together — which is the normal shape
+of a one-character edit, and of a branch name swap. Where the answer decides something (which commit
+was verified, which file lands on top), compare content or force the transfer. bica's write-back guard
+already does the stronger thing: whether a local file moved while a run was out is a blob comparison
+against the pushed tree, not a timestamp heuristic, which is why a missed stat never costs anyone their
+work.

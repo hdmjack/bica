@@ -18,7 +18,12 @@ import {
   writeTunnelRecord,
 } from './tunnelState';
 
-const HOME = path.join(os.tmpdir(), 'bica-tunnel-state-tests');
+// Unique per process, not a fixed name.
+//
+// These tests point $HOME at a directory and empty it before each one. With a fixed name, two copies
+// of the suite running at once -- a CI matrix, or a developer testing while an agent does -- emptied
+// each other's directory mid-test, and the failures read as faults in the code being tested.
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-tunnel-state-'));
 
 const record = (over: Partial<Parameters<typeof writeTunnelRecord>[0]> = {}) => ({
   localSocket: '/tmp/parser.sock',
