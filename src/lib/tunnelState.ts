@@ -24,6 +24,16 @@ export interface TunnelRecord {
   remoteArgv: string[];
   pid: number;
   startedAt: string;
+  /**
+   * When something first answered through this tunnel, if it has.
+   *
+   * Its absence means the tunnel is still starting: the socket is bound, because bica binds it before
+   * the remote command runs so that the path never disappears under a client, but nothing is behind
+   * it yet. `--detach` waits for this rather than for the record, which it used to -- and so returned
+   * in under a second, with the socket present and the server not yet started, leaving the very next
+   * client to fail.
+   */
+  readyAt?: string;
   /** Where a detached tunnel's output goes; absent when it runs in the foreground. */
   logPath?: string;
   restart: RestartMode;

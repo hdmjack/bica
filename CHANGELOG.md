@@ -3,6 +3,16 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.2 — 2026-10-09
+
+### Fixed
+- **`bica tunnel --detach` returned before the tunnel could serve anything.** It waited for the child
+  to write its record, which happens when the local socket is bound — before the remote command has
+  started. With a server that takes ten seconds to load, `--detach` returned in under a second with
+  the socket present and nothing behind it, and the next client failed. It now waits for the same
+  moment the foreground form calls `Tunnel up`, and gives up early if the child dies rather than
+  sitting out the whole budget.
+
 ## 0.2.1 — 2026-10-08
 
 ### Added

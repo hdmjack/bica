@@ -389,6 +389,16 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   let exitCode = 0;
   let failures = 0;
   let announcedLease = false;
+  // Set once the record exists; stamping readiness before that would write a record with no tunnel.
+  let recordReady: (() => void) | undefined;
+  let reportedReady = false;
+  const markReady = (): void => {
+    if (reportedReady) {
+      return;
+    }
+    reportedReady = true;
+    recordReady?.();
+  };
   let wakeFromBackoff = (): void => {};
   const stop = {
     promise: new Promise<void>((resolve) => {
@@ -654,6 +664,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     write(
       `${dim('[bica]')} ${dim(`Tunnel up: ${args.localSocket} → ${sshHost}:${remoteSocket}. Ctrl+C to stop.`)}\n`,
     );
+    markReady();
     if (!announcedLease) {
       write(
         `${dim('[bica]')} ${dim('Holding no workspace lease, so `bica run` still works while this is up.')}\n`,
@@ -815,7 +826,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       shutdown(1);
       return 1;
     }
-    writeTunnelRecord({
+    const record = {
       localSocket: args.localSocket,
       remoteSocket,
       sshHost,
@@ -823,7 +834,13 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       pid: process.pid,
       startedAt: new Date().toISOString(),
       restart: args.restart,
-    });
+    };
+    // Written before anything is serving, so `--list` and `--stop` can see a tunnel that is still
+    // starting. What says it is *usable* is the readiness stamp added below.
+    writeTunnelRecord(record);
+    recordReady = () => {
+      writeTunnelRecord({ ...record, readyAt: new Date().toISOString() });
+    };
     // Started eagerly even in on-demand mode: `--ready-timeout` is a promise that "tunnel up" means
     // ready, and the first client should not be the one that discovers the command was unrunnable.
     await ensureUp();

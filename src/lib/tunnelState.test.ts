@@ -233,3 +233,47 @@ describe('what the orphan sweep is allowed to kill', () => {
     }
   });
 });
+
+describe('a record says whether the tunnel is merely bound or actually serving', () => {
+  const realHome = process.env.HOME;
+
+  beforeEach(() => {
+    fs.rmSync(HOME, { force: true, recursive: true });
+    fs.mkdirSync(HOME, { recursive: true });
+    process.env.HOME = HOME;
+  });
+
+  afterEach(() => {
+    if (realHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = realHome;
+    }
+    fs.rmSync(HOME, { force: true, recursive: true });
+  });
+
+  it('has no readiness stamp while the tunnel is still starting', () => {
+    // bica binds the local socket before the remote command runs, so that the path never disappears
+    // under a client. A record alone therefore means "a tunnel exists", not "a tunnel works".
+    writeTunnelRecord(record());
+    expect(readTunnelRecord('/tmp/parser.sock')?.readyAt).toBeUndefined();
+  });
+
+  it('carries the stamp once something has answered', () => {
+    const when = new Date().toISOString();
+    writeTunnelRecord({ ...record(), readyAt: when });
+    expect(readTunnelRecord('/tmp/parser.sock')?.readyAt).toBe(when);
+  });
+
+  it('keeps the stamp through a rewrite that adds the log path', () => {
+    // `--detach` rewrites the record to add where the output went; losing readiness there would make
+    // the tunnel look unstarted to anything that asked afterwards.
+    const when = new Date().toISOString();
+    writeTunnelRecord({ ...record(), readyAt: when });
+    const existing = readTunnelRecord('/tmp/parser.sock');
+    writeTunnelRecord({ ...(existing as NonNullable<typeof existing>), logPath: '/tmp/x.log' });
+    const after = readTunnelRecord('/tmp/parser.sock');
+    expect(after?.readyAt).toBe(when);
+    expect(after?.logPath).toBe('/tmp/x.log');
+  });
+});

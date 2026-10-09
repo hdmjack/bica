@@ -650,24 +650,48 @@ async function detachTunnel(args: TunnelArgs): Promise<void> {
   child.unref();
   fs.closeSync(log);
 
-  const started = await pollFor(
-    () => readTunnelRecord(args.localSocket) !== null,
-    Math.min(args.readyTimeoutSeconds * 1000, 30_000),
-  );
-  if (!started) {
+  // Waits for the tunnel to be *serving*, not merely to exist.
+  //
+  // This used to return as soon as the child had written its record, which it does when it binds the
+  // local socket -- before the remote command has started. So `--detach` returned in under a second
+  // with the socket present and nothing behind it, and the next client to connect failed. The
+  // readiness stamp is written when something first answers, which is what `--ready-timeout` has
+  // always promised and what the foreground form prints as "Tunnel up".
+  //
+  // The budget is the caller's own, plus a margin for the start bica does before the command runs:
+  // clearing the remote socket, and the first connection to the host.
+  const deadlineMs = args.readyTimeoutSeconds * 1000 + 15_000;
+  // Stops early when the child is gone, rather than waiting out a budget nothing is using any more.
+  // A server that cannot start fails inside its own `--ready-timeout`, and the parent sitting out the
+  // remainder turns a five-second failure into a twenty-second one.
+  let childGone = false;
+  const ready = await pollFor(() => {
+    if (readTunnelRecord(args.localSocket)?.readyAt !== undefined) {
+      return true;
+    }
+    if (child.pid !== undefined && !isProcessAlive(child.pid)) {
+      childGone = true;
+      return true;
+    }
+    return false;
+  }, deadlineMs);
+  const record = readTunnelRecord(args.localSocket);
+  if (!ready || childGone) {
+    const stillStarting = !childGone && record !== null && isProcessAlive(record.pid);
     process.stderr.write(
-      `${warn('[bica]')} The detached tunnel did not record itself. Its output is in ${logPath}\n`,
+      stillStarting
+        ? `${warn('[bica]')} The detached tunnel has not served anything after ` +
+            `${String(Math.round(deadlineMs / 1000))}s and is still starting (pid ${String(record.pid)}).\n` +
+            `${warn('[bica]')} Its output is in ${logPath}. Raise --ready-timeout if the server is ` +
+            `simply slow, or stop it with \`bica tunnel --stop ${args.localSocket}\`.\n`
+        : `${warn('[bica]')} The detached tunnel did not start. Its output is in ${logPath}\n`,
     );
     process.exitCode = 1;
     return;
   }
-  const record = readTunnelRecord(args.localSocket);
-  writeTunnelRecord({
-    ...(record as TunnelRecord),
-    logPath,
-  });
+  writeTunnelRecord({ ...(record as TunnelRecord), logPath });
   process.stderr.write(
-    `${dim('[bica]')} ${dim(`Detached: pid ${String(record?.pid ?? child.pid ?? 0)}, serving ${args.localSocket}.`)}\n` +
+    `${dim('[bica]')} ${dim(`Detached and serving ${args.localSocket} (pid ${String(record?.pid ?? child.pid ?? 0)}).`)}\n` +
       `${dim('[bica]')} ${dim(`Output: ${logPath} — stop it with \`bica tunnel --stop ${args.localSocket}\`.`)}\n`,
   );
 }

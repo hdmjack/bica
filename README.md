@@ -633,8 +633,12 @@ bica tunnel --stop /tmp/parser.sock
 ```
 
 `--detach` re-executes bica itself in the background with the same arguments minus the flag, so the
-detached tunnel is the same code path and not a second one; its output goes to a log beside its record,
-and the parent waits for the child to record itself before reporting it as up. That matters where a
+detached tunnel is the same code path and not a second one; its output goes to a log beside its record.
+**It returns only once something has answered through the tunnel** — the same moment the foreground
+form prints `Tunnel up` — so a script may start a tunnel and use it on the next line. It used to return
+as soon as the child had recorded itself, which happens when the socket is bound and before the remote
+command has started, so a server that took ten seconds to load left the next client connecting to a
+path with nothing behind it. That matters where a
 shell or an agent harness kills its background jobs on a timer — a tunnel started this way is not one
 of them.
 
