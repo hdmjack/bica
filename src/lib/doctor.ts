@@ -12,6 +12,8 @@
  * is most of why setting a tool up feels long.
  */
 
+import { buildLoadScript, loadIsWorthMentioning, parseLoad } from './remoteLeftovers';
+
 export type CheckStatus = 'ok' | 'problem' | 'warning' | 'skipped';
 
 export interface CheckResult {
@@ -207,6 +209,28 @@ function checkRemote(probes: DoctorProbes): CheckResult[] {
           fix: `Install them on ${host}, or leave it if your commands do not need them. This is checked with the same PATH setup a run uses.`,
         },
   );
+
+  // How hard the remote is working, which is the question "why is my machine loud" in another form.
+  const load = parseLoad(probes.remoteScript(buildLoadScript()).stdout);
+  if (load === null) {
+    results.push({
+      name: 'Remote load',
+      status: 'skipped',
+      detail: 'could not be read',
+    });
+  } else {
+    const busy = loadIsWorthMentioning(load);
+    results.push({
+      name: 'Remote load',
+      status: busy ? 'warning' : 'ok',
+      detail: `${String(load.load)} on ${String(load.cores)} cores`,
+      fix: busy
+        ? `Something is working hard on ${host}. If it is not you, look for processes an earlier run ` +
+          'left behind: `bica ssh`, then `/bin/ps -Ao pcpu,etime,command -r | head`. A server with a ' +
+          'broken idle-exit once span for seven days before anyone noticed.'
+        : undefined,
+    });
+  }
 
   const ssh = probes.remoteScript('ssh -V 2>&1 | head -1\n');
   const version = /OpenSSH_(\d+)\.(\d+)/.exec(ssh.stdout);

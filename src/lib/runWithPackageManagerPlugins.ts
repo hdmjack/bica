@@ -6,6 +6,11 @@ import {
   resolveActivePackageManagerPlugins,
 } from '../resolveActivePlugins';
 import { assignLabels } from './parallelCommands';
+import {
+  describeRemoteState,
+  findRemoteLeftovers,
+  readRemoteLoad,
+} from './remoteLeftovers';
 import { dim } from '../terminalStyle';
 import {
   clearRemoteInstallRecord,
@@ -82,6 +87,35 @@ export async function ensureRemoteWorkspaceDirectory(
     return { code: mkdirCode, created: false };
   }
   return { code: 0, created: true };
+}
+
+/**
+ * Name what a run left behind, and say when the remote is labouring.
+ *
+ * Only for a leased run, because the lease is what records the process groups to ask about. Entirely
+ * best-effort: it costs one round trip and must never turn a successful run into a failed one, so any
+ * difficulty simply means nothing is said.
+ */
+function reportRemoteStateAfterRun(options: {
+  sshHost: string;
+  remoteWorkspacePath: string;
+  leased: boolean;
+}): void {
+  if (!options.leased) {
+    return;
+  }
+  try {
+    const message = describeRemoteState({
+      sshHost: options.sshHost,
+      leftovers: findRemoteLeftovers(options.sshHost, options.remoteWorkspacePath),
+      load: readRemoteLoad(options.sshHost),
+    });
+    if (message !== undefined) {
+      process.stderr.write(`${dim('[bica]')} ${dim(message)}\n`);
+    }
+  } catch {
+    // Nothing said is the right outcome for a report that cannot be made.
+  }
 }
 
 /**
@@ -328,6 +362,17 @@ export async function runRemoteCommandWithPmHooks(options: {
           repoRoot,
           { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
         );
+
+  // Said once, after the command, and only when there is something to say.
+  //
+  // A command may leave a server running deliberately; bica does not interfere with that. But nobody
+  // else is looking, and a server whose idle-exit is broken costs days rather than minutes when
+  // nothing reports it.
+  reportRemoteStateAfterRun({
+    sshHost: config.sshHost,
+    remoteWorkspacePath: config.remoteWorkspacePath,
+    leased: options.claimPathExpr !== undefined,
+  });
 
   if (plugin) {
     const wasInstall = candidates.some((argv) => plugin.isInstallArgv(argv));

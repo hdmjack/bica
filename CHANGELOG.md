@@ -5,6 +5,11 @@ entries note where a change affects what another version sees.
 
 ## 0.2.2 — 2026-10-09
 
+### Added
+- A run now says when it left processes running on the remote, and when the remote is labouring.
+  `bica doctor` reports the load any time. Reported, never acted on: a command may background a
+  server deliberately, and the gap was that nothing noticed when one misbehaved.
+
 ### Fixed
 - **`bica tunnel --detach` returned before the tunnel could serve anything.** It waited for the child
   to write its record, which happens when the local socket is bound — before the remote command has

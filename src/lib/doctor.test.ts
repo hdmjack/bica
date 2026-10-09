@@ -24,6 +24,9 @@ function healthy(over: Partial<DoctorProbes> = {}): DoctorProbes {
       if (script.includes('ssh -V')) {
         return { status: 0, stdout: 'OpenSSH_9.6p1\n', stderr: '' };
       }
+      if (script.includes('uptime')) {
+        return { status: 0, stdout: 'LOAD 1.20\nCORES 10\n', stderr: '' };
+      }
       return { status: 0, stdout: '', stderr: '' };
     },
     nodeVersion: 'v22.17.0',
@@ -135,6 +138,27 @@ describe('what the doctor reports', () => {
     const shell = find(results, 'Remote zsh');
     expect(shell.status).toBe('problem');
     expect(shell.fix).toContain('BICA_LOGIN_SHELL');
+  });
+
+  it('warns when the remote is labouring, and points at what to look for', () => {
+    // The question "why is my machine loud" in another form: three servers from earlier runs once
+    // span at full tilt for a week before anybody noticed.
+    const results = runChecks(
+      healthy({
+        remoteScript: (script) =>
+          script.includes('uptime')
+            ? { status: 0, stdout: 'LOAD 31.4\nCORES 10\n', stderr: '' }
+            : script.includes('for t in')
+              ? { status: 0, stdout: 'HAVE node\n', stderr: '' }
+              : { status: 0, stdout: 'BICA_OK\n', stderr: '' },
+      }),
+    );
+    const load = find(results, 'Remote load');
+    expect(load.status).toBe('warning');
+    expect(load.detail).toContain('31.4');
+    expect(load.fix).toContain('earlier run');
+    // Busy is not broken: nothing here stops a run.
+    expect(hasProblem(results)).toBe(false);
   });
 
   it('warns about an OpenSSH too old for tunnels, without failing the rest', () => {

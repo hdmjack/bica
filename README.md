@@ -471,6 +471,25 @@ effect was triplicating the sync, the disk and the build. Concurrency is bounded
 not by bica. One connection per command is a different matter from one workspace per command: the
 connections are cheap and are what keeps the three output streams apart.
 
+### What a run leaves behind
+
+After a leased run, bica asks whether anything is still running in the process groups that run owned,
+and names it if so:
+
+```
+[bica] This run left 1 process running on mini: 68622 python clauses.py --socket …
+```
+
+It reports and does nothing else. A command may background a server deliberately — a parser keeping a
+language model warm between runs is the case this was written against, and killing it would be the
+bug. What was missing was anyone noticing when such a server stops behaving: three of them once span
+at full CPU for seven days, found when the machine got loud enough to mention. Ten minutes of a broken
+idle-timeout is nothing; seven days of three cores is not.
+
+The same line mentions the remote's load when it is above one core's worth per core, and
+`bica doctor` reports it any time. There is no background watcher and nothing polls: the moment worth
+telling somebody their remote is labouring is when they are about to use it.
+
 ### Two runs at once
 
 The remote workspace is **leased** for the duration of a run. A second run refuses rather than syncing
