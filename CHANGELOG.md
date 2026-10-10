@@ -3,6 +3,16 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.4 — 2026-10-10
+
+### Added
+- **`bica tunnel --ready-when=<regex>`** — wait for the remote command to print a line matching the
+  pattern before calling the tunnel up. For anything that binds its socket before it can answer, a
+  model load being the usual reason: the kernel queues connections either way, so no probe can tell
+  that server apart from a working one, and the server's own announcement is the only exact answer.
+- Without that flag, bica says when a request goes twenty seconds without a reply, and names the flag.
+  It is the proxy, so it sees the bytes; what it could not do was infer this from outside.
+
 ## 0.2.3 — 2026-10-09
 
 ### Fixed

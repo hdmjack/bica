@@ -640,11 +640,24 @@ socket to exist and then asks the forward whether a connection is actually accep
 working server and for one that died leaving it behind, and bica used to announce `Tunnel up` for
 both — after which every request went unanswered while the log said the tunnel was fine.
 
-**What this cannot detect:** a server that binds and listens immediately and only begins *accepting*
-minutes later, while a model loads. A listening socket accepts connections in the kernel's backlog
-whether or not the application has got to them, so it is indistinguishable from a working server
-without speaking the server's own protocol. If your server does that, have it bind late or expect the
-first request after a start to wait.
+**For a server that binds before it can answer, tell bica what to wait for.** A model load between
+`listen` and the first `accept` is invisible from outside — the kernel queues connections either way,
+so no probe can tell that server apart from a working one. The server knows, though, and usually says
+so:
+
+```bash
+bica tunnel --local=… --remote=… --ready-when='ENTAILMENT READY' -- ./serve-entailment
+```
+
+bica then waits for that line instead of inferring anything. Measured against a server that binds in
+two seconds and accepts twenty-five seconds later: with the flag, `Tunnel up` lands at twenty-nine
+seconds and the first request is answered at once; without it, bica used to announce a tunnel at
+eight.
+
+**Without the flag, bica says when requests go unanswered.** It is the proxy, so it sees the bytes: a
+request with no reply for twenty seconds gets a line saying so, naming `--ready-when` as the fix.
+That does not make the tunnel work, but it replaces twenty minutes of silence against a healthy-looking
+log with a sentence about what is actually happening.
 
 **Readiness costs the server one empty connection.** The probe connects and hangs up without asking
 anything — the same thing the server sees when a client is interrupted — so a server that treats an

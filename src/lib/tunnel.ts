@@ -46,6 +46,9 @@ const FORWARD_REFUSAL_GRACE_MS = 400;
 /** How often readiness is re-probed through the forward. */
 const READY_PROBE_INTERVAL_MS = 500;
 
+/** How long a client may wait for a reply before bica says that it is waiting. */
+const UNANSWERED_REQUEST_MS = 20_000;
+
 /** What the forward supervisor reports back the first time it has something to say. */
 type FirstReady =
   | { kind: 'ready' }
@@ -62,11 +65,22 @@ export interface TunnelArgs {
   restart: RestartMode;
   /** Run in the background, surviving the shell that started it. */
   detach: boolean;
+  /**
+   * A pattern the remote command prints when it is ready to serve.
+   *
+   * The only exact answer available. A socket that accepts a connection proves the server called
+   * `listen`, which a server that has bound and not yet begun accepting also satisfies -- the kernel
+   * queues those connections either way, so no probe can tell them apart. A server that loads a model
+   * for a minute after binding therefore looks ready from outside and answers nothing, which is
+   * precisely the failure this exists for. What the server says about itself settles it.
+   */
+  readyWhen?: RegExp;
 }
 
 export const TUNNEL_USAGE =
   'usage: bica tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<seconds>]\n' +
-  '                   [--restart=never|on-exit|on-demand] [--detach] -- <command> [args...]\n' +
+  '                   [--ready-when=<regex>] [--restart=never|on-exit|on-demand] [--detach]\n' +
+  '                   -- <command> [args...]\n' +
   '       bica tunnel --list\n' +
   '       bica tunnel --stop <local-socket>';
 
@@ -106,6 +120,7 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
   let readyTimeoutSeconds = DEFAULT_READY_TIMEOUT_SECONDS;
   let restart: RestartMode = 'never';
   let detach = false;
+  let readyWhen: RegExp | undefined;
 
   for (const token of flags) {
     if (token.startsWith('--local=')) {
@@ -134,6 +149,15 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
       throw new Error(
         `--restart needs a value: ${RESTART_MODES.join(', ')}.\n${TUNNEL_USAGE}`,
       );
+    } else if (token.startsWith('--ready-when=')) {
+      const raw = requireValue('--ready-when', token);
+      try {
+        readyWhen = new RegExp(raw);
+      } catch {
+        throw new Error(
+          `--ready-when must be a regular expression (got ${JSON.stringify(raw)}).`,
+        );
+      }
     } else if (token === '--detach') {
       detach = true;
     } else {
@@ -156,6 +180,7 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
     remoteArgv,
     restart,
     detach,
+    readyWhen,
   };
 }
 
@@ -425,6 +450,8 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   let exitCode = 0;
   let failures = 0;
   let announcedLease = false;
+  /** Said once: the second and third unanswered requests are the same news. */
+  let saidNothingAnswers = false;
   // Set once the record exists; stamping readiness before that would write a record with no tunnel.
   let recordReady: (() => void) | undefined;
   let reportedReady = false;
@@ -475,10 +502,17 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   const awaitReady = async (
     commandDone: Promise<number>,
     timeoutSeconds: number,
+    saidReady?: Promise<void>,
   ): Promise<
     { kind: 'ready' } | { kind: 'timeout' } | { kind: 'command'; code: number }
   > => {
     let commandExit: number | undefined;
+    // When the server says when it is ready, believe it and ask nothing else. A probe can only
+    // establish that something is listening; only the server knows when it will answer.
+    let announcedItself = false;
+    void saidReady?.then(() => {
+      announcedItself = true;
+    });
     void commandDone.then((code) => {
       commandExit = code;
     });
@@ -493,6 +527,11 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     const outcome = await Promise.race([
       appeared.done.then((status) => ({ kind: 'file' as const, status })),
       commandDone.then((code) => ({ kind: 'command' as const, code })),
+      // A server that announces itself has necessarily bound its socket, so waiting for the file as
+      // well would only add the poll interval.
+      ...(saidReady === undefined
+        ? []
+        : [saidReady.then(() => ({ kind: 'file' as const, status: 0 }))]),
     ]);
     if (outcome.kind === 'command') {
       appeared.child.kill('SIGTERM');
@@ -509,7 +548,12 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       if (commandExit !== undefined) {
         return { kind: 'command', code: commandExit };
       }
-      if (await forwardAnswers()) {
+      if (saidReady !== undefined) {
+        // Its own word, and nothing else: a forward that answers would be the weaker claim here.
+        if (announcedItself) {
+          return { kind: 'ready' };
+        }
+      } else if (await forwardAnswers()) {
         return { kind: 'ready' };
       }
       await delay(READY_PROBE_INTERVAL_MS, stop);
@@ -617,6 +661,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   const superviseForward = async (
     own: Session,
     reportFirstReady: (result: FirstReady) => void,
+    saidReady?: Promise<void>,
   ): Promise<void> => {
     // Every forward this session ever has is spawned here, and nowhere else. Starting one in
     // `startSession` as well left two ssh processes alive per session: the second rebinds the path
@@ -650,6 +695,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
         const answers = await awaitReady(
           own.commandDone,
           first ? args.readyTimeoutSeconds : RECONNECT_PROBE_SECONDS,
+          saidReady,
         );
         if (answers.kind !== 'ready') {
           if (first) {
@@ -715,12 +761,28 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       `rm -f ${shellSingleQuoteRemotePathForSh(remoteSocket)}\n`,
     ).done;
     // No lease, and so no run id or claim: see the note on this function.
+    // When the command says when it is ready, that is what is waited for.
+    let announceSaidReady: () => void = () => {};
+    const saidReady = new Promise<void>((resolve) => {
+      announceSaidReady = resolve;
+    });
+    const pattern = args.readyWhen;
     const commandDone = runRemoteCommand(
       sshHost,
       options.remoteWorkspacePath,
       argvToPosixShCommand(args.remoteArgv),
       options.repoRoot,
-      { dieWithConnection: true },
+      {
+        dieWithConnection: true,
+        onOutput:
+          pattern === undefined
+            ? undefined
+            : (chunk) => {
+                if (pattern.test(chunk)) {
+                  announceSaidReady();
+                }
+              },
+      },
     );
     // The forward goes up first now, because readiness is measured through it. Nothing is exposed to
     // clients until it answers: bica's own listener is the only thing on the path they know about.
@@ -730,7 +792,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     const firstReady = new Promise<FirstReady>((resolve) => {
       reportFirstReady = resolve;
     });
-    void superviseForward(own, reportFirstReady);
+    void superviseForward(own, reportFirstReady, pattern === undefined ? undefined : saidReady);
     const ready = await firstReady;
 
     if (ready.kind !== 'ready') {
@@ -855,6 +917,56 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     return starting;
   };
 
+  /**
+   * Say so when a client asks something and nothing comes back.
+   *
+   * The one thing no probe can establish is whether the server will *answer*: a socket that accepts
+   * connections proves it called `listen`, and a server that binds and then loads a model for a
+   * minute satisfies that while replying to nobody. The kernel queues those connections either way,
+   * so from outside it is indistinguishable from a working server -- which is how a tunnel came to
+   * log "Tunnel up" and then answer nothing for twenty minutes, with every line of its log looking
+   * healthy.
+   *
+   * bica is the proxy, though, so it sees the bytes. A request that goes in with nothing coming back
+   * is exactly the symptom, and saying it converts a silent failure into a named one. Said once per
+   * tunnel, because the second and third are the same news.
+   */
+  const watchForSilence = (client: net.Socket, upstream: net.Socket): void => {
+    let asked = false;
+    let answered = false;
+    let timer: NodeJS.Timeout | undefined;
+    client.on('data', () => {
+      if (asked) {
+        return;
+      }
+      asked = true;
+      timer = setTimeout(() => {
+        if (!answered && !saidNothingAnswers) {
+          saidNothingAnswers = true;
+          write(
+            `${warn('[bica]')} A request has been waiting ${String(
+              Math.round(UNANSWERED_REQUEST_MS / 1000),
+            )}s with no reply. The remote may still be starting -- a server that binds its socket ` +
+              'before it is ready to answer looks identical to a working one from here. ' +
+              '`--ready-when=<pattern>` makes bica wait for the server to say it is ready.\n',
+          );
+        }
+      }, UNANSWERED_REQUEST_MS);
+      timer.unref();
+    });
+    upstream.on('data', () => {
+      answered = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    });
+    client.on('close', () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    });
+  };
+
   const listener = net.createServer((client) => {
     client.on('error', () => {
       client.destroy();
@@ -869,6 +981,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       }
       const upstream = net.connect(forwardPath);
       upstream.on('connect', () => {
+        watchForSilence(client, upstream);
         joinSockets(client, upstream);
       });
       upstream.on('error', () => {

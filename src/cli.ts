@@ -202,7 +202,7 @@ File sync
                               never disturbs one.
 
 Long-lived remote processes
-  tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>]
+  tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>] [--ready-when=<regex>]
          [--restart=never|on-exit|on-demand] [--detach] -- <command> [args...]
                               Start <command> on the remote (same workspace and login preamble as
                               'bica run'), wait for it to create <remote path>, then forward that
@@ -224,6 +224,11 @@ Long-lived remote processes
                               is nothing there.
                               --detach runs it in the background, surviving this shell, and prints
                               where its output goes.
+                              --ready-when is a pattern the server prints when it can answer. Use it
+                              for anything that binds its socket before it is ready -- a model load,
+                              a warm-up -- because no probe can tell that apart from a working
+                              server: the kernel queues connections either way. Without it, bica
+                              says so when a request goes unanswered for 20s.
   tunnel --list               Tunnels that have recorded themselves, live ones first. Also removes
                               the socket a killed tunnel left behind, so clients see no server
                               rather than a refused connection.

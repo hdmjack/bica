@@ -349,3 +349,36 @@ describe('reading ssh as the authority on whether anything is listening', () => 
     expect(sshRefusedTheRemoteSocket('')).toBe(false);
   });
 });
+
+describe('--ready-when, the only exact answer about readiness', () => {
+  const base = ['--local=/tmp/a.sock', '--remote=/srv/b.sock', '--', 'serve'];
+
+  it('is absent unless asked for', () => {
+    expect(parseTunnelArgs(base).readyWhen).toBeUndefined();
+  });
+
+  it('takes a pattern the server prints when it is ready', () => {
+    // No probe can distinguish a server that has bound from one that will answer: the kernel queues
+    // connections either way. What the server says about itself is the one statement that settles it.
+    const args = parseTunnelArgs(['--ready-when=ENTAILMENT READY', ...base]);
+    expect(args.readyWhen?.test('… ENTAILMENT READY on /tmp/x\n')).toBe(true);
+    expect(args.readyWhen?.test('loading model\n')).toBe(false);
+  });
+
+  it('accepts a real expression, not just a literal', () => {
+    const args = parseTunnelArgs(['--ready-when=^(listening|ready) on ', ...base]);
+    expect(args.readyWhen?.test('listening on /tmp/x')).toBe(true);
+    expect(args.readyWhen?.test('not listening on /tmp/x')).toBe(false);
+  });
+
+  it('refuses a pattern that is not a valid expression', () => {
+    expect(() => parseTunnelArgs(['--ready-when=[unclosed', ...base])).toThrow(
+      /regular expression/,
+    );
+  });
+
+  it("does not read the remote command's own --ready-when", () => {
+    const args = parseTunnelArgs([...base, '--ready-when=theirs']);
+    expect(args.readyWhen).toBeUndefined();
+  });
+});

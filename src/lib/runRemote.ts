@@ -735,12 +735,23 @@ export function remoteLoginShellExists(sshHost: string, shell: string): boolean 
  * the network put them. A trailing partial line is held until its newline arrives, and flushed when
  * the stream ends so nothing is swallowed.
  */
-function pipeLabelled(
+function forwardOutput(
   source: NodeJS.ReadableStream | null,
-  label: string,
+  label: string | undefined,
   sink: NodeJS.WritableStream,
+  tap?: (chunk: string) => void,
 ): void {
   if (source === null) {
+    return;
+  }
+  if (label === undefined) {
+    // Observed but not labelled: the output goes through exactly as written, which is what a single
+    // command's progress bars and colour depend on.
+    source.setEncoding('utf8');
+    source.on('data', (chunk: string) => {
+      tap?.(chunk);
+      sink.write(chunk);
+    });
     return;
   }
   const prefix = `${dim(`[${label}]`)} `;
@@ -748,6 +759,7 @@ function pipeLabelled(
   source.setEncoding('utf8');
   source.on('data', (chunk: string) => {
     pending += chunk;
+    tap?.(chunk);
     const lines = pending.split('\n');
     pending = lines.pop() ?? '';
     for (const line of lines) {
@@ -818,6 +830,15 @@ export async function runRemoteCommand(
      * wrote it -- including the carriage returns and colour a progress bar depends on.
      */
     label?: string;
+    /**
+     * Called with everything the command writes, as it writes it.
+     *
+     * The output still goes where it was going; this is a tap, not a diversion. A long-lived server
+     * usually says when it is ready to serve, and that line is the only trustworthy statement of
+     * readiness available -- a connection proves the socket is listening, which a server that has
+     * bound but not begun accepting also satisfies.
+     */
+    onOutput?: (chunk: string) => void;
     /**
      * Whether this command appends its exit code to the lease when it finishes.
      *
@@ -894,20 +915,21 @@ export async function runRemoteCommand(
   // minutes late. Handling a caller's timeout at all requires the loop to stay free. `stdio: 'inherit'`
   // keeps the output path identical to before: the child writes to bica's own descriptors.
   const label = options?.label;
+  const onOutput = options?.onOutput;
+  const observing = label !== undefined || onOutput !== undefined;
   const child = spawn('ssh', sshArgs, {
     // The pipe is the watchdog's lifeline: held open and never written, it closes only when this
     // process does, which is precisely when the remote command should stop.
-    stdio:
-      label === undefined
-        ? dieWithConnection
-          ? ['pipe', 'inherit', 'inherit']
-          : 'inherit'
-        : [dieWithConnection ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    stdio: !observing
+      ? dieWithConnection
+        ? ['pipe', 'inherit', 'inherit']
+        : 'inherit'
+      : [dieWithConnection ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     shell: false,
   });
-  if (label !== undefined) {
-    pipeLabelled(child.stdout, label, process.stdout);
-    pipeLabelled(child.stderr, label, process.stderr);
+  if (observing) {
+    forwardOutput(child.stdout, label, process.stdout, onOutput);
+    forwardOutput(child.stderr, label, process.stderr, onOutput);
   }
   liveRemotes.add(child);
   try {
