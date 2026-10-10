@@ -223,3 +223,32 @@ describe('the remote workspace path is guarded before anything deletes into it',
     }
   });
 });
+
+describe('what reaches the remote, by pattern rather than by exit code', () => {
+  /** The ignore list a scaffolded project gets, as it arrives in the sync spec. */
+  function ignorePathsFor(ignore: string[]): string[] {
+    const doc = {
+      sync: { mode: 'one-way-replica', ignore: { paths: ignore } },
+    };
+    const normalized = normalizeToSyncSpecYaml(doc, '/repo', 'bica.yml');
+    return (
+      (normalized.sync as Record<string, { ignore?: { paths?: string[] } }>)[
+        Object.keys(normalized.sync as object)[0]
+      ]?.ignore?.paths ?? []
+    );
+  }
+
+  it('carries a build-info glob through to the sync spec', () => {
+    // A regression here is silent: the run exits non-zero with plausible compiler output, blaming
+    // the code for a remote build state that came half from one machine and half from another. So
+    // the assertion is on the pattern reaching the sync, not on anything a run returns.
+    expect(ignorePathsFor(['node_modules', 'dist', '*.tsbuildinfo'])).toContain(
+      '*.tsbuildinfo',
+    );
+  });
+
+  it('keeps every pattern it was given, in order', () => {
+    const paths = ['node_modules', '.git', 'dist', '*.tsbuildinfo', 'coverage'];
+    expect(ignorePathsFor(paths)).toEqual(expect.arrayContaining(paths));
+  });
+});

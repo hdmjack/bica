@@ -39,6 +39,11 @@ const NODE_BICA_YML = `sync:
       # Build outputs (TS composite .d.ts, etc.): syncing dist from local can make
       # remote typecheck against stale declarations while src is up to date.
       - dist
+      # The record of what that build output contains, which must come from the same side as the
+      # output itself. Pushed while dist is not, it tells the remote compiler that packages are
+      # already built -- so it skips rebuilding them and typechecks against whatever dist happens to
+      # be there, reporting errors that exist on no machine.
+      - "*.tsbuildinfo"
 
 # returnFlow: rsync these patterns from remote→local after \`bica run\`. Default values cover
 # Jest/Vitest snapshots and log files so artifacts from a remote run land locally. Set paths: [] to

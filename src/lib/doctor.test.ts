@@ -33,6 +33,7 @@ function healthy(over: Partial<DoctorProbes> = {}): DoctorProbes {
     platform: 'darwin',
     config: { ok: true, sshHost: 'mini', remoteWorkspacePath: '~/code/me/repo' },
     bicaIsGitignored: true,
+    syncIgnorePaths: ['node_modules', '.git', 'dist', '*.tsbuildinfo'],
     loginShell: 'zsh',
     toolingPreamble: 'export PATH="/shims:$PATH"\n',
     ...over,
@@ -235,5 +236,33 @@ describe('the report', () => {
     );
     expect(withWarning).toContain('Ready.');
     expect(withWarning).toContain('1 thing worth knowing');
+  });
+});
+
+describe('config that would mislead the remote compiler', () => {
+  it('warns when build output is withheld but the record describing it is sent', () => {
+    // The failure this prevents: several dozen type errors in a consumer package, existing neither
+    // locally nor in CI, because the remote was told a package was already built and typechecked
+    // against whatever dist the last branch left there.
+    const results = runChecks(
+      healthy({ syncIgnorePaths: ['node_modules', '.git', 'dist'] }),
+    );
+    const check = find(results, 'Sync ignores');
+    expect(check.status).toBe('warning');
+    expect(check.fix).toContain('*.tsbuildinfo');
+    // Runs still work; they just answer about a state that exists nowhere. Not a blocker.
+    expect(hasProblem(results)).toBe(false);
+  });
+
+  it('is satisfied when both halves are kept off the remote', () => {
+    expect(find(runChecks(healthy()), 'Sync ignores').status).toBe('ok');
+  });
+
+  it('says nothing about ignoring the record alone, which is merely slower', () => {
+    // The remote rebuilds what it cannot prove is current: correct, and not worth a warning.
+    const results = runChecks(
+      healthy({ syncIgnorePaths: ['node_modules', '*.tsbuildinfo'] }),
+    );
+    expect(find(results, 'Sync ignores').status).toBe('ok');
   });
 });

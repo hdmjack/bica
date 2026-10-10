@@ -6,7 +6,11 @@ import type { CheckResult } from './doctor';
 import { bicaIsGitignored } from './gitignore';
 import { remoteLoginPreambleForRun, runRemoteScriptOverStdin } from './runRemote';
 import { dim } from '../terminalStyle';
-import { getRepoRoot, loadRemoteEnvConfig } from '../syncProject';
+import {
+  getRepoRoot,
+  loadRemoteEnvConfig,
+  prepareSyncProjectFile,
+} from '../syncProject';
 import { ownVersion } from './ownVersion';
 
 /**
@@ -35,6 +39,7 @@ export function checkThisMachine(): CheckResult[] {
     },
     runRemote: runRemoteScriptOverStdin,
     isGitignored: bicaIsGitignored,
+    syncIgnorePaths: ignorePathsOrEmpty(),
     write: (text) => process.stdout.write(text),
     decorate: {
       ok: (t) => chalk.green(t),
@@ -43,6 +48,20 @@ export function checkThisMachine(): CheckResult[] {
       dim: (t) => dim(t),
     },
   });
+}
+
+/**
+ * What this repository keeps off the remote, or nothing when there is no config to read.
+ *
+ * Total, like everything else the doctor gathers: a repository without a bica.yml is a case it has to
+ * describe rather than fail on.
+ */
+function ignorePathsOrEmpty(): readonly string[] {
+  try {
+    return prepareSyncProjectFile({ verbose: false }).syncIgnorePaths;
+  } catch {
+    return [];
+  }
 }
 
 /** The enclosing git repository, or nothing — used where bica's own config may not exist yet. */

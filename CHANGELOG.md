@@ -6,6 +6,10 @@ entries note where a change affects what another version sees.
 ## 0.2.2 — 2026-10-09
 
 ### Added
+- `bica init` now ignores `*.tsbuildinfo` alongside `dist`, and `bica doctor` warns when a config has
+  one without the other. A composite build's record of what it produced has to come from the same
+  side as the output itself; sent alone, it makes the remote skip rebuilds and typecheck against a
+  stale `dist`, producing errors that exist on no machine.
 - A run now says when it left processes running on the remote, and when the remote is labouring.
   `bica doctor` reports the load any time. Reported, never acted on: a command may background a
   server deliberately, and the gap was that nothing noticed when one misbehaved.

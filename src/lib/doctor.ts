@@ -13,6 +13,7 @@
  */
 
 import { buildLoadScript, loadIsWorthMentioning, parseLoad } from './remoteLeftovers';
+import { findSyncInconsistencies } from './syncConsistency';
 
 export type CheckStatus = 'ok' | 'problem' | 'warning' | 'skipped';
 
@@ -47,6 +48,8 @@ export interface DoctorProbes {
     | { ok: false; reason: string };
   /** Whether this repository ignores bica's local state directory. */
   bicaIsGitignored: boolean | undefined;
+  /** What this repository keeps off the remote, for the companion-file check. */
+  syncIgnorePaths: readonly string[];
   /** The login shell bica will ask the remote for. */
   loginShell: string;
   /**
@@ -109,6 +112,29 @@ function checkConfig(probes: DoctorProbes): CheckResult {
     name: 'Configuration',
     status: 'ok',
     detail: `${probes.config.sshHost}:${probes.config.remoteWorkspacePath}`,
+  };
+}
+
+/**
+ * Config that sends one half of a matched pair and withholds the other.
+ *
+ * A warning rather than a problem: runs work, they simply produce answers about a state that exists
+ * on no machine, which is worse than a failure and is why it is worth saying before it happens.
+ */
+function checkSyncConsistency(probes: DoctorProbes): CheckResult {
+  const found = findSyncInconsistencies(probes.syncIgnorePaths ?? []);
+  if (found.length === 0) {
+    return {
+      name: 'Sync ignores',
+      status: 'ok',
+      detail: 'build output and the records describing it come from the same side',
+    };
+  }
+  return {
+    name: 'Sync ignores',
+    status: 'warning',
+    detail: found.map((f) => `${f.rule.output} is ignored, ${f.rule.record} is not`).join('; '),
+    fix: found.map((f) => f.message).join(' '),
   };
 }
 
@@ -282,6 +308,7 @@ export function runChecks(probes: DoctorProbes): CheckResult[] {
       required: true,
     }),
     checkConfig(probes),
+    checkSyncConsistency(probes),
     checkGitignore(probes),
     ...checkRemote(probes),
   ];
@@ -361,6 +388,8 @@ export function reportOnThisMachine(options: {
     stderr: string;
   };
   isGitignored: (repoRoot: string) => boolean;
+  /** What this repository keeps off the remote; absent when there is no config to read. */
+  syncIgnorePaths?: readonly string[];
   write: (text: string) => void;
   decorate: Parameters<typeof formatReport>[1];
 }): CheckResult[] {
@@ -380,6 +409,7 @@ export function reportOnThisMachine(options: {
         : options.isGitignored(options.repoRoot),
     loginShell: process.env.BICA_LOGIN_SHELL?.trim() ?? 'zsh',
     toolingPreamble: options.toolingPreamble,
+    syncIgnorePaths: options.syncIgnorePaths ?? [],
   });
   options.write(`\nbica ${options.version} on ${process.platform}\n\n`);
   options.write(formatReport(results, options.decorate));

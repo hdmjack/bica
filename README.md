@@ -176,6 +176,13 @@ output of `BICA_DEBUG=1 bica run <your command>`, which prints the script bica s
 
 For **composite** / project-reference monorepos, dependents often typecheck against **`dist/*.d.ts`** from workspace packages. If Mutagen **syncs `dist/`** from your laptop while **`src/`** changes without a matching local rebuild, the remote can see **stale declarations** next to fresh source (missing exports, wrong property names, etc.). **`pnpm install` does not fix that.**
 
+**Also ignore `*.tsbuildinfo`.** A composite build writes `dist` and a record of what is in it, and
+`tsc --build` reads that record to decide which packages are already current. Ignoring `dist` alone
+sends the record while withholding what it describes, so the remote skips rebuilding packages it has
+been told are current and typechecks consumers against whatever `dist` the last branch left there —
+several dozen type errors in a package that compiles cleanly locally and in CI, sticky until a forced
+rebuild. `bica doctor` warns when a config has one half of that pair without the other.
+
 **Recommendation:** add **`dist`** to `sync.ignore.paths` (Mutagen treats it like gitignore: any directory named `dist` under the repo root). The **remote** **`pnpm typecheck`** / **`tsc --build`** then rebuilds `dist` from the synced source. **Tradeoff:** the remote no longer receives prebuilt emit from **local** via sync; anything that needs emit must **build on the remote** (normal for typecheck/CI-style commands).
 
 After changing `ignore.paths`, **restart the sync session** (`bica stop` then `bica start`, or terminate/recreate the Mutagen project) so the new rules apply. If the **remote** already has bad `dist/` trees, remove them once there (or let the next full build overwrite them once `dist` is no longer synced from a stale **local** tree).
