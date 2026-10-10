@@ -3,6 +3,21 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.3 — 2026-10-09
+
+### Fixed
+- **A tunnel announced `Tunnel up` over a socket nothing was listening on.** Readiness was "the remote
+  socket file exists", which is equally true of a server that died leaving the file behind — so after
+  an on-demand restart bica reported a healthy tunnel and every request went unanswered. It now also
+  asks the forward whether a connection is accepted, reading ssh's own `open failed` as the answer.
+  A server that binds and then takes minutes to *accept* is still indistinguishable from a working
+  one -- a listening socket queues connections in the kernel whether or not the application has got
+  to them -- so that case has to be fixed in the server.
+
+### Added
+- Every `[bica]` line in a tunnel log carries the time. A report of the above had to say "the log has
+  no timestamps, so I can't tell how long the restart took".
+
 ## 0.2.2 — 2026-10-09
 
 ### Added

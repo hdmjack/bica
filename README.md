@@ -634,6 +634,18 @@ fit in one buffer were unaffected, which is how it stayed hidden until a 22 KB o
 | `on-exit` | It is started again at once, with backoff if it keeps failing. |
 | `on-demand` | The socket stays bound and the command is started again when the next client connects. |
 
+**Readiness means something answered, not that a socket file appeared.** bica waits for the remote
+socket to exist and then asks the forward whether a connection is actually accepted, using ssh's own
+`channel N: open failed` as the negative answer. The file alone is not enough: it is there both for a
+working server and for one that died leaving it behind, and bica used to announce `Tunnel up` for
+both — after which every request went unanswered while the log said the tunnel was fine.
+
+**What this cannot detect:** a server that binds and listens immediately and only begins *accepting*
+minutes later, while a model loads. A listening socket accepts connections in the kernel's backlog
+whether or not the application has got to them, so it is indistinguishable from a working server
+without speaking the server's own protocol. If your server does that, have it bind late or expect the
+first request after a start to wait.
+
 **Readiness costs the server one empty connection.** The probe connects and hangs up without asking
 anything — the same thing the server sees when a client is interrupted — so a server that treats an
 empty request as fatal will be killed by its own readiness check. Servers that read a request and move

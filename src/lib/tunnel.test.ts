@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildForwardSshArgs,
+  sshRefusedTheRemoteSocket,
   buildSocketReadyScript,
   joinSockets,
   localSocketObstruction,
@@ -317,5 +318,34 @@ describe('buildSocketReadyScript', () => {
 
   it('rounds a fractional timeout up, since shell arithmetic is integer', () => {
     expect(buildSocketReadyScript('/srv/b.sock', 1.2)).toContain('+ 2 ))');
+  });
+});
+
+describe('reading ssh as the authority on whether anything is listening', () => {
+  it('recognises the refusal ssh prints for a forward it cannot complete', () => {
+    // The signal that distinguishes "the socket file exists" from "something is behind it". Without
+    // it, bica announced `Tunnel up` over a path nothing was listening on, and every request after
+    // that went unanswered while the log said the tunnel was fine.
+    expect(
+      sshRefusedTheRemoteSocket(
+        'channel 1: open failed: connect failed: open failed\n',
+      ),
+    ).toBe(true);
+    expect(
+      sshRefusedTheRemoteSocket(
+        'channel 3: open failed: connect failed: No such file or directory\n',
+      ),
+    ).toBe(true);
+    expect(
+      sshRefusedTheRemoteSocket(
+        'channel 2: open failed: connect failed: Connection refused\n',
+      ),
+    ).toBe(true);
+  });
+
+  it('is not fooled by ordinary ssh chatter', () => {
+    expect(sshRefusedTheRemoteSocket('Warning: Permanently added …\n')).toBe(false);
+    expect(sshRefusedTheRemoteSocket('debug1: Authentication succeeded\n')).toBe(false);
+    expect(sshRefusedTheRemoteSocket('')).toBe(false);
   });
 });

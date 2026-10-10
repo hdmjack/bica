@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import * as path from 'node:path';
 
 
 import { dim, warn } from '../terminalStyle';

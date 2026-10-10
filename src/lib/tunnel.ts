@@ -37,6 +37,15 @@ export const DEFAULT_READY_TIMEOUT_SECONDS = 60;
 /** How often the remote readiness loop looks for the socket. */
 const READY_POLL_SECONDS = '0.2';
 
+/** How long a probe connection must stay open before ssh is asked whether it refused. */
+const FORWARD_PROBE_SETTLE_MS = 100;
+
+/** How long to wait for ssh to report a refusal it has not got round to printing yet. */
+const FORWARD_REFUSAL_GRACE_MS = 400;
+
+/** How often readiness is re-probed through the forward. */
+const READY_PROBE_INTERVAL_MS = 500;
+
 /** What the forward supervisor reports back the first time it has something to say. */
 type FirstReady =
   | { kind: 'ready' }
@@ -203,6 +212,21 @@ export function buildSocketReadyScript(
 }
 
 /**
+ * Whether a line of ssh's stderr says it could not reach the remote socket.
+ *
+ * ssh's wording for a stream-local forward it cannot complete: `channel 3: open failed: connect
+ * failed: …`. Matched on `open failed` alone, which is the stable half across versions and across the
+ * reasons the far end gives -- refused, no such file, permission -- all of which mean the same thing
+ * here: nothing is listening over there yet.
+ *
+ * Exported so the match itself can be tested. It is the one piece of this that depends on another
+ * program's choice of words, which is exactly the kind of thing that changes without telling you.
+ */
+export function sshRefusedTheRemoteSocket(chunk: string): boolean {
+  return /open failed/.test(chunk);
+}
+
+/**
  * Why the local path cannot be used for the forward, or `undefined` when it can.
  *
  * ssh would unlink a socket here itself, and that is wanted -- a stale one is the usual leftover. A
@@ -350,8 +374,20 @@ function pathExists(p: string): boolean {
  */
 export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   const { sshHost, args } = options;
+  /**
+   * Everything bica says about this tunnel, stamped with the time.
+   *
+   * A tunnel's log is read hours later, by somebody working out whether a restart took thirty seconds
+   * or never finished. Without a time on each line that cannot be answered at all: a report of this
+   * exact failure had to say "the log has no timestamps, so I can't tell how long the restart took or
+   * whether the remote command is still loading". Only bica's own lines are stamped; the remote
+   * command's output is passed through as it was written.
+   */
   const write = (text: string): void => {
-    process.stderr.write(text);
+    const at = new Date().toTimeString().slice(0, 8);
+    process.stderr.write(
+      text.replace(/^(\[bica\]|\u001b\[[0-9;]*m\[bica\])/, `${dim(at)} $1`),
+    );
   };
 
   const obstruction = localSocketObstruction(args.localSocket);
@@ -417,19 +453,24 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   };
 
   /**
-   * Wait for the remote socket to exist, in POSIX shell, or for the command to give up first.
+   * How many times ssh has reported that it could not reach the remote socket.
    *
-   * No interpreter on the remote: no POSIX utility speaks Unix sockets, so the previous version of
-   * this reached for python3 and silently fell back to this same file check where it was missing --
-   * which is worse than doing the file check openly, because nothing said which one had run.
+   * ssh says so itself, on stderr, once per attempted connection: `channel 3: open failed: connect
+   * failed: …`. That is the authoritative answer to "is anything listening over there", and the only
+   * one available without an interpreter on the remote. Counted rather than read, so a probe can ask
+   * whether the number moved while it was connecting.
+   */
+  let refusals = 0;
+
+  /**
+   * Wait until something answers through the forward, or the command gives up first.
    *
-   * The file check is trustworthy here only because of what happens just before it: this session
-   * deletes the remote socket before starting the command that binds it, so the path cannot be a
-   * leftover from a predecessor. What it does not cover is a server that creates its socket and then
-   * takes a long time to accept on it; bind and listen are adjacent in every server this is used
-   * with, and the alternative -- probing from this side through the forward -- was measured to report
-   * ready four seconds before a server that binds late was listening, because ssh reports a failed
-   * channel more slowly than any settle window worth waiting.
+   * Two questions, cheapest first. The remote socket existing is asked in POSIX shell, costs one
+   * connection for the whole wait, and rules out the common case without an interpreter on the far
+   * side. That it exists is not enough, though -- it was all this used to ask, and it announced
+   * "Tunnel up" for a server that had created its socket and not yet begun accepting, and for one
+   * that had died leaving the file behind. So once the file is there, every poll asks the forward
+   * itself whether a connection is answered.
    */
   const awaitReady = async (
     commandDone: Promise<number>,
@@ -437,34 +478,120 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   ): Promise<
     { kind: 'ready' } | { kind: 'timeout' } | { kind: 'command'; code: number }
   > => {
-    const ready = runRemoteScriptAsync(
+    let commandExit: number | undefined;
+    void commandDone.then((code) => {
+      commandExit = code;
+    });
+
+    // The file first. Raced against the command on purpose: a server that dies on startup -- a
+    // missing dependency, an address already in use -- would otherwise be reported only when the
+    // deadline passed, long after its own error had scrolled past.
+    const appeared = runRemoteScriptAsync(
       sshHost,
       buildSocketReadyScript(remoteSocket, timeoutSeconds),
     );
-    // Raced against the command on purpose. A server that dies on startup -- a missing dependency, an
-    // address already in use -- would otherwise be reported only when the readiness deadline passed,
-    // long after its own error had already scrolled past.
     const outcome = await Promise.race([
-      ready.done.then((status) => ({ kind: 'ready' as const, status })),
+      appeared.done.then((status) => ({ kind: 'file' as const, status })),
       commandDone.then((code) => ({ kind: 'command' as const, code })),
     ]);
     if (outcome.kind === 'command') {
-      ready.child.kill('SIGTERM');
+      appeared.child.kill('SIGTERM');
       return outcome;
     }
-    return outcome.status === 0 ? { kind: 'ready' } : { kind: 'timeout' };
+    if (outcome.status !== 0) {
+      return { kind: 'timeout' };
+    }
+
+    // Then the answer. A server may bind its socket and spend a minute loading a model before it
+    // accepts; this is the part that waits for that rather than announcing a tunnel over it.
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    while (Date.now() < deadline) {
+      if (commandExit !== undefined) {
+        return { kind: 'command', code: commandExit };
+      }
+      if (await forwardAnswers()) {
+        return { kind: 'ready' };
+      }
+      await delay(READY_PROBE_INTERVAL_MS, stop);
+      if (stopping) {
+        return { kind: 'timeout' };
+      }
+    }
+    return commandExit === undefined
+      ? { kind: 'timeout' }
+      : { kind: 'command', code: commandExit };
   };
 
-  const spawnForward = (): ChildProcess =>
-    spawn(
+  const spawnForward = (): ChildProcess => {
+    const child = spawn(
       'ssh',
       buildForwardSshArgs({
         sshHost,
         localSocket: forwardPath,
         remoteSocket,
       }),
-      { stdio: ['ignore', 'inherit', 'inherit'], shell: false },
+      { stdio: ['ignore', 'inherit', 'pipe'], shell: false },
     );
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      if (sshRefusedTheRemoteSocket(chunk)) {
+        refusals += 1;
+      }
+      // Passed through: ssh's own words about the connection are worth seeing, and swallowing them
+      // to count them would hide the one explanation a reader has.
+      process.stderr.write(chunk);
+    });
+    return child;
+  };
+
+  /**
+   * Whether anything actually answers through the forward.
+   *
+   * The file check this replaces could not see the case that matters here: a server that creates its
+   * socket and then spends a minute loading a model before it accepts, or one that died leaving the
+   * socket file behind. Both look identical to `test -S`, and bica announced "Tunnel up" for both --
+   * after which every request went unanswered, with the log saying the tunnel was fine.
+   *
+   * A connection alone proves nothing, because ssh accepts locally before it knows whether the far
+   * end exists. What settles it is ssh's own refusal on stderr: connect, wait briefly, and treat a new
+   * `open failed` as the answer. An earlier attempt waited a fixed moment for the connection to stay
+   * open and called that readiness, which reported ready four seconds before a server that binds late
+   * was listening -- because ssh reports the failure more slowly than any settle window worth having.
+   */
+  const forwardAnswers = async (): Promise<boolean> => {
+    if (!pathExists(forwardPath)) {
+      return false;
+    }
+    const before = refusals;
+    const connected = await new Promise<boolean>((resolve) => {
+      const probe = net.connect(forwardPath);
+      let settled = false;
+      const settle = (ok: boolean): void => {
+        if (!settled) {
+          settled = true;
+          probe.destroy();
+          resolve(ok);
+        }
+      };
+      probe.on('error', () => {
+        settle(false);
+      });
+      probe.on('close', () => {
+        settle(false);
+      });
+      probe.on('connect', () => {
+        setTimeout(() => {
+          settle(true);
+        }, FORWARD_PROBE_SETTLE_MS);
+      });
+    });
+    if (!connected) {
+      return false;
+    }
+    // Give ssh a moment to say it could not reach the far end, which it does after accepting here.
+    await delay(FORWARD_REFUSAL_GRACE_MS, stop);
+    return refusals === before;
+  };
 
   const awaitForwardBound = async (): Promise<boolean> => {
     const deadline = Date.now() + FORWARD_BIND_TIMEOUT_MS;

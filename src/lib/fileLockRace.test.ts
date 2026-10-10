@@ -21,6 +21,15 @@ const REPO_ROOT = path.join(HERE, '..', '..');
 const WORKER = path.join(HERE, 'lockRaceWorker.ts');
 const RACERS = 8;
 
+/**
+ * What a race costs in wall-clock, which is not what a unit test costs.
+ *
+ * Each of these starts eight node processes and waits for them to meet at a barrier. Several were
+ * left on the suite's default budget -- set for tests that compute something -- and failed on a
+ * loaded machine while testing nothing about the lock.
+ */
+const RACE_TIMEOUT_MS = 120_000;
+
 let dir = '';
 
 beforeEach(() => {
@@ -121,7 +130,7 @@ describe('tryAcquireLock under real concurrency', () => {
 });
 
 describe('reclaiming a dead lock under real concurrency', () => {
-  it('lets exactly one of many simultaneous processes reclaim it', () => {
+  it('lets exactly one of many simultaneous processes reclaim it', { timeout: RACE_TIMEOUT_MS }, () => {
     // The reason unlink-then-create needed a grace period: several processes could each remove the
     // dead file and each create their own. `rename` makes reclaiming atomic, so this needs no waiting.
     const lockPath = path.join(dir, 'locks', 'dead.lock');
@@ -138,7 +147,7 @@ describe('reclaiming a dead lock under real concurrency', () => {
     ).toBe(1);
   });
 
-  it('lets exactly one of many simultaneous processes reclaim foreign debris', () => {
+  it('lets exactly one of many simultaneous processes reclaim foreign debris', { timeout: RACE_TIMEOUT_MS }, () => {
     const lockPath = path.join(dir, 'locks', 'debris.lock');
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, 'not a lock at all', 'utf8');
@@ -151,7 +160,7 @@ describe('reclaiming a dead lock under real concurrency', () => {
 });
 
 describe('a lock file caught mid-write', () => {
-  it('cannot be produced by bica, so is reclaimed on sight rather than waited out', () => {
+  it('cannot be produced by bica, so is reclaimed on sight rather than waited out', { timeout: RACE_TIMEOUT_MS }, () => {
     // The window that broke lane allocation was a lock file existing with no pid in it. It can no
     // longer occur, which is what lets this case be decided structurally instead of by elapsed time.
     const lockPath = path.join(dir, 'locks', 'midwrite.lock');
@@ -162,7 +171,7 @@ describe('a lock file caught mid-write', () => {
     lock?.release();
   });
 
-  it('is reclaimed when its content is truncated JSON', () => {
+  it('is reclaimed when its content is truncated JSON', { timeout: RACE_TIMEOUT_MS }, () => {
     const lockPath = path.join(dir, 'locks', 'truncated.lock');
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, '{"pid":12', 'utf8');
@@ -171,7 +180,7 @@ describe('a lock file caught mid-write', () => {
     lock?.release();
   });
 
-  it('leaves no staging files behind', () => {
+  it('leaves no staging files behind', { timeout: RACE_TIMEOUT_MS }, () => {
     // The staging file is an implementation detail; leaking it would confuse lock enumeration.
     const lockPath = path.join(dir, 'locks', 'clean.lock');
     const lock = tryAcquireLock(lockPath);
