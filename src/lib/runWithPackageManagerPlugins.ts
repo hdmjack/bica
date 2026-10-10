@@ -1,4 +1,5 @@
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
+import { CONNECTION_LOST_EXIT } from './connectionLoss';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
 import { remoteMissingGeneratedPaths } from './generatedPaths';
 import {
@@ -177,9 +178,14 @@ async function runConcurrently(options: {
  * One exit code for a run of several commands.
  *
  * Ordered by what the caller has to do about it: a discarded result (97) outranks a workspace that
- * could not be entered (96), which outranks an ordinary failure -- because the first two say nothing
- * about the code under test and the third does. Any other failure collapses to 1, as it always has:
- * which command failed is in the summary line.
+ * could not be entered (96), which outranks a connection that dropped (95), which outranks an
+ * ordinary failure -- because the first three say nothing about the code under test and the last
+ * does. Any other failure collapses to 1, as it always has: which command failed is in the summary
+ * line.
+ *
+ * A drop ranks below the other two because they are definite statements about the workspace and it
+ * is not: 97 and 96 each name something to fix or re-run deliberately, where 95 means only that
+ * nobody knows how that command ended.
  */
 export function aggregateExitCode(codes: readonly number[]): number {
   if (codes.includes(REMOTE_CONTENT_MISMATCH_EXIT)) {
@@ -187,6 +193,9 @@ export function aggregateExitCode(codes: readonly number[]): number {
   }
   if (codes.includes(REMOTE_CD_FAILED_EXIT)) {
     return REMOTE_CD_FAILED_EXIT;
+  }
+  if (codes.includes(CONNECTION_LOST_EXIT)) {
+    return CONNECTION_LOST_EXIT;
   }
   return codes.some((c) => c !== 0) ? 1 : 0;
 }

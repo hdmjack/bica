@@ -151,6 +151,12 @@ with `bica cancel`. If you share a remote path with someone else, stop: give eac
 took the workspace part-way through, so the result describes a mixture of two trees and is discarded.
 Re-run it. Nothing here is a verdict on your code.
 
+**`the connection to <host> dropped part-way through` (exit 95).** ssh lost the session while your
+command was running, so nobody knows how it ended — bica says so rather than reporting ssh's own
+255 as the command's result. Re-run it. If a run left something going on the remote, the line below
+names it. Frequent drops on a long run usually mean the link sleeps: `ServerAliveInterval` is
+already set, and `BICA_SSH_OPTS` can raise `ServerAliveCountMax` further.
+
 **A command cannot find a module it should have.** The remote installs when your lockfile differs
 from what that workspace last installed. If you suspect the record is wrong, `bica run pnpm install`
 forces it.
@@ -538,6 +544,7 @@ None of these are verdicts on your code:
 | **98** | refused to start; the workspace is in use. Nothing ran. Wait, use another checkout, or `bica cancel`. |
 | **97** | ran, but the workspace was taken part-way through, so the result was discarded. Re-run. |
 | **96** | the remote workspace could not be entered. |
+| **95** | the connection dropped part-way through. The command may have passed, failed, or still be running. Re-run. |
 
 ### What the run tells you
 

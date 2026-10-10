@@ -10,7 +10,11 @@ import {
   runRemoteCommand,
 } from './runRemote';
 import { installRecordPathExpr } from './remoteInstallState';
-import { runRemoteCommandWithPmHooks } from './runWithPackageManagerPlugins';
+import { CONNECTION_LOST_EXIT } from './connectionLoss';
+import {
+  aggregateExitCode,
+  runRemoteCommandWithPmHooks,
+} from './runWithPackageManagerPlugins';
 import type { PrepareResult } from '../syncProject';
 
 /**
@@ -22,6 +26,10 @@ import type { PrepareResult } from '../syncProject';
 const remoteFiles = vi.hoisted(() => new Map<string, string>());
 
 vi.mock('./runRemote', () => ({
+  // The real values, because `aggregateExitCode` compares against them and a mock that invented its
+  // own numbers would agree with itself while disagreeing with every run.
+  REMOTE_CD_FAILED_EXIT: 96,
+  REMOTE_CONTENT_MISMATCH_EXIT: 97,
   runRemoteCommand: vi.fn(() => Promise.resolve(0)),
   remoteWorkspaceDirExists: vi.fn(() => true),
   remoteMkdirWorkspace: vi.fn(() => 0),
@@ -445,5 +453,29 @@ describe('two checkouts sharing one remote workspace', () => {
     // Two workspaces are two `node_modules`, so each needs its own install and its own record.
     expect(installCommands()).toHaveLength(2);
     expect(remoteRecord('/remote/other')).toBe(remoteRecord('/remote/repo'));
+  });
+});
+
+describe('one exit code for several commands', () => {
+  it('reports a dropped connection ahead of the failure it looks like', () => {
+    // The reported run: `pnpm-test-run=95 pnpm-typecheck=0`. Collapsing that to 1 would say the
+    // tests failed, which is exactly the claim nobody is in a position to make.
+    expect(aggregateExitCode([CONNECTION_LOST_EXIT, 0])).toBe(
+      CONNECTION_LOST_EXIT,
+    );
+    expect(aggregateExitCode([CONNECTION_LOST_EXIT, 1])).toBe(
+      CONNECTION_LOST_EXIT,
+    );
+  });
+
+  it('keeps the two definite verdicts about the workspace above it', () => {
+    // 97 and 96 each name something to do; a drop names only an unknown.
+    expect(aggregateExitCode([CONNECTION_LOST_EXIT, 97])).toBe(97);
+    expect(aggregateExitCode([CONNECTION_LOST_EXIT, 96])).toBe(96);
+  });
+
+  it('is unchanged for runs where nothing dropped', () => {
+    expect(aggregateExitCode([0, 0])).toBe(0);
+    expect(aggregateExitCode([0, 1])).toBe(1);
   });
 });

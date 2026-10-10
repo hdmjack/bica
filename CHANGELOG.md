@@ -3,6 +3,26 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.5 — 2026-10-10
+
+### Fixed
+- **A dropped connection is no longer reported as a failing command.** ssh exits 255 both when the
+  remote command does and when ssh gives up on the link, and it wrote its explanation into the same
+  stream the command was using -- so a run that lost its connection mid-suite reported
+  `pnpm-test-run=255` beside `pnpm-typecheck=0`, which reads as a test suite that failed oddly. bica
+  now gives ssh its own verbose log (`ssh -v -E`), so ssh's account is separable from the command's,
+  and reports a drop as **exit 95** with a line saying the result is unknown. 95 joins 96/97/98:
+  none of them is a verdict on your code.
+- The answer rests on two lines in that log rather than on the wording of the error, which turned
+  out not to separate the cases: `Authenticated to …` means a session existed, and `Exit status N`
+  means the command's own code came back. A drop is the first without the second. Matching ssh's
+  error text was tried first and failed against a real severed link, whose message
+  (`Connection closed by UNKNOWN port 65535`) is also what a refused handshake prints.
+- A connection that was never established is still reported as 96, because the answer differs: fix
+  your ssh, rather than re-run.
+- Anything else ssh says on a failed run is now printed rather than lost to the new log file --
+  except when the command reported its own exit code, where ssh has nothing to add.
+
 ## 0.2.4 — 2026-10-10
 
 ### Added

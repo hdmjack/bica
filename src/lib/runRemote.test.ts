@@ -51,6 +51,32 @@ describe('buildRunRemoteSshArgs', () => {
     expect(argv).not.toContain('-t');
   });
 
+  it('sends ssh\'s own diagnostics to a file, keeping them out of the command\'s stream', () => {
+    // What makes a lost connection recognisable: the log holds ssh speaking and nothing else, so
+    // `Connection reset by peer` found there is a fact about the link rather than a line of output.
+    const argv = buildRunRemoteSshArgs({
+      ...base,
+      interactive: false,
+      diagnosticsLogPath: '/tmp/bica-ssh-x/ssh.log',
+    });
+    expect(argv.slice(argv.indexOf('-E'), argv.indexOf('-E') + 2)).toEqual([
+      '-E',
+      '/tmp/bica-ssh-x/ssh.log',
+    ]);
+    // Verbose, because the wording of ssh's errors turned out not to separate a drop from a refused
+    // handshake and `debug1: Authenticated to …` does. Only ever alongside the log file.
+    expect(argv).toContain('-v');
+    // Before the host, or ssh reads it as part of the remote command.
+    expect(argv.indexOf('-E')).toBeLessThan(argv.indexOf('mini'));
+  });
+
+  it('asks for neither a log file nor verbosity when none is wanted', () => {
+    // Verbosity without the log file would put the whole handshake on the user's terminal.
+    const argv = buildRunRemoteSshArgs({ ...base, interactive: false });
+    expect(argv).not.toContain('-E');
+    expect(argv).not.toContain('-v');
+  });
+
   it('preserves host, shell, flags, and remote script order after the PTY flag', () => {
     const argv = buildRunRemoteSshArgs({ ...base, interactive: false });
     const ptyIdx = argv.indexOf('-T');

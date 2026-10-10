@@ -4,6 +4,14 @@ import * as path from 'node:path';
 import chalk from 'chalk';
 
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
+import {
+  CONNECTION_LOST_EXIT,
+  classifySshFailure,
+  describeConnectionLoss,
+  openSshDiagnosticsLog,
+  remoteReportedItsExit,
+  sshDiagnosticSummary,
+} from './connectionLoss';
 import { resolveActiveRemoteShellPlugins } from '../resolveActivePlugins';
 import { dim } from '../terminalStyle';
 import type { RemoteShellPlugin } from '../plugins/types';
@@ -567,9 +575,22 @@ export function buildRunRemoteSshArgs(opts: {
   shell: string;
   flags: string[];
   remoteScript: string;
+  /**
+   * Where ssh is to write its own diagnostics, instead of onto the stream the command is using.
+   *
+   * The whole point of the separation: what lands in this file is ssh speaking and never the
+   * command, which is what makes `Connection reset by peer` a statement bica can act on rather than
+   * a line of output it would have to guess about. See `connectionLoss.ts`.
+   */
+  diagnosticsLogPath?: string;
 }): string[] {
   return [
     ...sshKeepaliveOpts(),
+    // `-v` goes with `-E` and never without it: the verbose trace is what makes a lost connection
+    // recognisable, and the log file is what keeps it off the user's terminal.
+    ...(opts.diagnosticsLogPath === undefined
+      ? []
+      : ['-v', '-E', opts.diagnosticsLogPath]),
     opts.interactive ? '-t' : '-T',
     opts.sshHost,
     opts.shell,
@@ -897,12 +918,14 @@ export async function runRemoteCommand(
   // the signal it waits for would be a keystroke instead of the connection ending.
   const interactive =
     !dieWithConnection && Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const diagnostics = openSshDiagnosticsLog();
   const sshArgs = buildRunRemoteSshArgs({
     interactive,
     sshHost,
     shell,
     flags,
     remoteScript,
+    diagnosticsLogPath: diagnostics.path,
   });
   if (isBicaDebug()) {
     process.stderr.write(
@@ -933,17 +956,73 @@ export async function runRemoteCommand(
   }
   liveRemotes.add(child);
   try {
-    return await new Promise<number>((resolve) => {
+    const code = await new Promise<number>((resolve) => {
       // `error` fires instead of `close` when ssh could not be spawned at all; 1 matches what
       // `spawnSync` returned for that case.
       child.on('error', () => resolve(1));
-      child.on('close', (code) => {
-        resolve(code ?? 1);
+      child.on('close', (closed) => {
+        resolve(closed ?? 1);
       });
     });
+    return reportSshFailure({ code, sshHost, label, diagnostics: diagnostics.read() });
   } finally {
     liveRemotes.delete(child);
+    diagnostics.remove();
   }
+}
+
+/**
+ * Turn ssh's own account of a failure into something the caller can act on.
+ *
+ * Two jobs. A dropped connection gets its own exit code, so it stops arriving as a plausible-looking
+ * verdict from the command. And anything else ssh wrote gets printed, because `-E` took it off the
+ * terminal -- a host-key warning that used to be visible must not become invisible in exchange for
+ * this.
+ *
+ * A successful run's diagnostics are dropped on purpose. They are the "Permanently added … to the
+ * list of known hosts" class of message, and nobody needs them in the middle of their test output.
+ */
+function reportSshFailure(options: {
+  code: number;
+  sshHost: string;
+  label: string | undefined;
+  diagnostics: string;
+}): number {
+  const { code, diagnostics } = options;
+  if (code === 0) {
+    return 0;
+  }
+  if (isBicaDebug()) {
+    process.stderr.write(`[bica-debug] ssh log:\n${diagnostics}---\n`);
+  }
+  const failure = classifySshFailure({ status: code, diagnostics });
+  if (failure === 'connection-lost') {
+    const message = describeConnectionLoss({
+      sshHost: options.sshHost,
+      label: options.label,
+      diagnostics,
+    });
+    for (const line of message.split('\n')) {
+      process.stderr.write(`${chalk.bold.yellow('[bica]')} ${line}\n`);
+    }
+    return CONNECTION_LOST_EXIT;
+  }
+  if (failure === 'could-not-connect') {
+    process.stderr.write(
+      `${chalk.bold.yellow('[bica]')} Could not reach ${options.sshHost} over ssh, so nothing ran. ` +
+        `ssh said: ${sshDiagnosticSummary(diagnostics) ?? '(nothing)'}\n`,
+    );
+    return REMOTE_CD_FAILED_EXIT;
+  }
+  // The command answered for itself, so ssh has nothing to add and the exit code is the whole story.
+  if (remoteReportedItsExit(diagnostics)) {
+    return code;
+  }
+  const said = sshDiagnosticSummary(diagnostics);
+  if (said !== undefined) {
+    process.stderr.write(`${dim('[bica]')} ${dim(`ssh: ${said}`)}\n`);
+  }
+  return code;
 }
 
 /**
