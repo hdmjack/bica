@@ -198,6 +198,8 @@ export function buildForwardSshArgs(opts: {
   sshHost: string;
   localSocket: string;
   remoteSocket: string;
+  /** Seconds of unanswered keepalives before ssh gives up. Defaults to `tunnelDeadAfterSeconds()`. */
+  deadAfterSeconds?: number;
 }): string[] {
   return [
     '-N',
@@ -205,13 +207,62 @@ export function buildForwardSshArgs(opts: {
     'ExitOnForwardFailure=yes',
     '-o',
     'StreamLocalBindUnlink=yes',
-    '-o',
-    'ServerAliveInterval=30',
-    '-o',
-    'ServerAliveCountMax=20',
+    ...forwardKeepaliveOptions(opts.deadAfterSeconds ?? tunnelDeadAfterSeconds()),
     '-L',
     `${opts.localSocket}:${opts.remoteSocket}`,
     opts.sshHost,
+  ];
+}
+
+/** How often ssh asks the far end whether it is still there. */
+const ALIVE_INTERVAL_SECONDS = 15;
+
+/**
+ * How long a forward may go unanswered before ssh declares it dead. One minute.
+ *
+ * A `bica run` tolerates ten, and deliberately: a quiet stretch in the middle of a compile is
+ * ordinary, and tearing the run down for it would cost whatever work was in flight. A forward is the
+ * opposite case. It carries requests somebody is waiting on, the server behind it survives a
+ * re-established forward, and re-establishing costs about a second -- so the cheap mistake is to give
+ * up too early and the expensive one is to wait.
+ *
+ * Ten minutes was the inherited setting and it was measured: a link died with a request in flight and
+ * the client sat in silence for 10m32s, which is exactly `ServerAliveInterval=30` times
+ * `ServerAliveCountMax=20`. Nothing was wrong with the server; nothing was wrong with the client.
+ */
+const DEAD_AFTER_SECONDS = 60;
+
+/**
+ * That figure, or `BICA_TUNNEL_DEAD_AFTER` when someone on a slower link needs more rope.
+ *
+ * Never below one interval, since a count of zero means ssh never gives up at all -- the opposite of
+ * what anyone setting this would be asking for.
+ */
+export function tunnelDeadAfterSeconds(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.BICA_TUNNEL_DEAD_AFTER?.trim();
+  if (raw === undefined || raw.length === 0) {
+    return DEAD_AFTER_SECONDS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEAD_AFTER_SECONDS;
+  }
+  return Math.max(ALIVE_INTERVAL_SECONDS, Math.round(parsed));
+}
+
+/** The `-o` pair ssh needs to give up after roughly `deadAfterSeconds` of silence. */
+export function forwardKeepaliveOptions(deadAfterSeconds: number): string[] {
+  const count = Math.max(
+    1,
+    Math.round(deadAfterSeconds / ALIVE_INTERVAL_SECONDS),
+  );
+  return [
+    '-o',
+    `ServerAliveInterval=${String(ALIVE_INTERVAL_SECONDS)}`,
+    '-o',
+    `ServerAliveCountMax=${String(count)}`,
   ];
 }
 
@@ -341,6 +392,27 @@ function delay(ms: number, stop: { promise: Promise<void> }): Promise<void> {
  * is destroyed outright rather than left reading a reply nobody will receive; the reverse is the case
  * this function exists to protect.
  */
+export interface ProxiedRequest {
+  client: net.Socket;
+  upstream: net.Socket;
+}
+
+/**
+ * End every request the forward was carrying, because it can no longer carry them.
+ *
+ * `destroy` rather than `end`: there is no reply coming, and a half-closed socket would leave the
+ * client waiting exactly as it was. What the client sees is its connection closing, which is an
+ * error it can report -- the alternative, and the reported failure, is silence for as long as ssh
+ * takes to notice, which was ten and a half minutes.
+ */
+export function endRequestsInFlight(requests: Set<ProxiedRequest>): void {
+  for (const request of requests) {
+    request.upstream.destroy();
+    request.client.destroy();
+  }
+  requests.clear();
+}
+
 export function joinSockets(client: net.Socket, upstream: net.Socket): void {
   const destroyBoth = (): void => {
     client.destroy();
@@ -566,6 +638,17 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       : { kind: 'command', code: commandExit };
   };
 
+  /**
+   * Everything currently proxied through the forward.
+   *
+   * Tracked so that a forward which dies can be made to end the requests it was carrying. Without
+   * this, a client waits on a socket whose other end is gone and learns nothing: in the reported
+   * incident the wait was ten and a half minutes, of which the last fraction of a second was bica
+   * noticing. Ending the connection gives the client an error it can report, which is the difference
+   * between a failure and a hang.
+   */
+  const inFlight = new Set<{ client: net.Socket; upstream: net.Socket }>();
+
   const spawnForward = (): ChildProcess => {
     const child = spawn(
       'ssh',
@@ -715,6 +798,9 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
         first = false;
         const code = await closed;
         own.forward = null;
+        // Before anything else: whoever was mid-request is waiting on a connection that cannot now
+        // be answered, and the re-establish below does nothing for them.
+        endRequestsInFlight(inFlight);
         unlinkIfSocket(forwardPath);
         if (stopping || !own.alive) {
           return;
@@ -928,8 +1014,12 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
    * healthy.
    *
    * bica is the proxy, though, so it sees the bytes. A request that goes in with nothing coming back
-   * is exactly the symptom, and saying it converts a silent failure into a named one. Said once per
-   * tunnel, because the second and third are the same news.
+   * is exactly the symptom, and saying it converts a silent failure into a named one.
+   *
+   * Said once per silent spell rather than once per tunnel: the flag is cleared as soon as something
+   * answers again, so a repeat of the same news is suppressed while a fresh episode hours later is
+   * not. A detached tunnel runs for days, and under the old rule one warning on its first morning
+   * bought silence for every incident after it.
    */
   const watchForSilence = (client: net.Socket, upstream: net.Socket): void => {
     let asked = false;
@@ -946,9 +1036,10 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
           write(
             `${warn('[bica]')} A request has been waiting ${String(
               Math.round(UNANSWERED_REQUEST_MS / 1000),
-            )}s with no reply. The remote may still be starting -- a server that binds its socket ` +
-              'before it is ready to answer looks identical to a working one from here. ' +
-              '`--ready-when=<pattern>` makes bica wait for the server to say it is ready.\n',
+            )}s with no reply. Either the remote is still starting -- a server that binds its ` +
+              'socket before it can answer looks identical to a working one from here, and ' +
+              '`--ready-when=<pattern>` makes bica wait for it to say otherwise -- or the link is ' +
+              `gone, which ssh reports after ${String(tunnelDeadAfterSeconds())}s of silence.\n`,
           );
         }
       }, UNANSWERED_REQUEST_MS);
@@ -956,6 +1047,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     });
     upstream.on('data', () => {
       answered = true;
+      saidNothingAnswers = false;
       if (timer !== undefined) {
         clearTimeout(timer);
       }
@@ -981,6 +1073,13 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       }
       const upstream = net.connect(forwardPath);
       upstream.on('connect', () => {
+        const pair = { client, upstream };
+        inFlight.add(pair);
+        const forget = (): void => {
+          inFlight.delete(pair);
+        };
+        client.on('close', forget);
+        upstream.on('close', forget);
         watchForSilence(client, upstream);
         joinSockets(client, upstream);
       });

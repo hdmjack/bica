@@ -157,6 +157,11 @@ command was running, so nobody knows how it ended — bica says so rather than r
 names it. Frequent drops on a long run usually mean the link sleeps: `ServerAliveInterval` is
 already set, and `BICA_SSH_OPTS` can raise `ServerAliveCountMax` further.
 
+**A tunnel goes quiet and then recovers.** A forward gives up after about a minute of unanswered
+keepalives, logs the drop, and re-establishes itself; requests that were in flight are ended so the
+client gets an error rather than waiting on a socket whose other end is gone. If your link stalls
+for longer than that legitimately, raise `BICA_TUNNEL_DEAD_AFTER`.
+
 **A command cannot find a module it should have.** The remote installs when your lockfile differs
 from what that workspace last installed. If you suspect the record is wrong, `bica run pnpm install`
 forces it.
@@ -729,6 +734,7 @@ taken over, with a line saying so, because otherwise every hard kill would need 
 | `BICA_LOGIN_SHELL` | Remote shell for non-interactive commands (default `zsh`) |
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
+| `BICA_TUNNEL_DEAD_AFTER` | Seconds a tunnel's forward may go unanswered before ssh gives up (default `60`). Raise it on a link that stalls legitimately |
 | `BICA_SYNC_FLUSH` | `1` = before `bica run`, run `mutagen sync flush` on the primary session so the **remote** finishes catching up to **local** (slower; use if you hit brief sync lag) |
 | `BICA_RETURN_FLOW` | `0` = disable the post-`bica run` rsync that pulls whitelisted artifacts (snapshots, etc.) **remote → local** (see "Return-flow" above) |
 | `BICA_GIT_SYNC` | `1`/`0` = enable/disable the pre-`bica run` rsync of `.git` **local → remote** (overrides `git.sync` in `bica.yml`; see "Git-dependent commands" above) |

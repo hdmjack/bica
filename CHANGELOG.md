@@ -3,6 +3,22 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.6 — 2026-10-10
+
+### Fixed
+- **A tunnel whose link dies no longer leaves its clients in silence.** A dropped forward took ten
+  and a half minutes to notice, during which a request in flight got neither an answer nor an error.
+  Two changes: a forward now gives up after about a minute of unanswered keepalives rather than ten
+  (`BICA_TUNNEL_DEAD_AFTER` raises it for a slower link), and when a forward dies bica ends the
+  requests it was carrying, so a waiting client sees its connection close — an error it can report —
+  instead of waiting on an socket whose other end is gone.
+- The ten-minute figure was inherited from `bica run`, where it is right: a quiet stretch in the
+  middle of a compile is ordinary. A forward carries requests someone is waiting on, and
+  re-establishing one costs about a second, so the cheap mistake there is giving up too early.
+- The unanswered-request warning is now said once per silent spell rather than once per tunnel. A
+  detached tunnel runs for days, and one warning on its first morning used to buy silence for every
+  incident after it. It also names both causes now, since a dead link is one of them.
+
 ## 0.2.5 — 2026-10-10
 
 ### Fixed

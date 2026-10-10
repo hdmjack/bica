@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   buildForwardSshArgs,
+  forwardKeepaliveOptions,
+  tunnelDeadAfterSeconds,
   sshRefusedTheRemoteSocket,
   buildSocketReadyScript,
   joinSockets,
@@ -95,6 +97,52 @@ describe('parseTunnelArgs', () => {
         'serve',
       ]),
     ).toThrow(/Unknown option/);
+  });
+});
+
+describe('how long a dead forward goes unnoticed', () => {
+  it('gives up after about a minute, not ten', () => {
+    // Ten minutes was the inherited setting, and it was not a figure anyone chose for a tunnel: a
+    // link died with a request in flight and the client sat in silence for 10m32s, which is
+    // `ServerAliveInterval=30` times `ServerAliveCountMax=20` to the second.
+    const args = buildForwardSshArgs({
+      sshHost: 'mini',
+      localSocket: '/tmp/a.sock',
+      remoteSocket: '/srv/b.sock',
+    });
+    const interval = Number(
+      /ServerAliveInterval=(\d+)/.exec(args.join(' '))?.[1],
+    );
+    const count = Number(/ServerAliveCountMax=(\d+)/.exec(args.join(' '))?.[1]);
+    expect(interval * count).toBeLessThanOrEqual(60);
+    expect(interval * count).toBeGreaterThanOrEqual(30);
+  });
+
+  it('asks often enough that the wait is a wait and not a timeout', () => {
+    // One probe inside the window would make the whole budget hang on a single lost packet.
+    expect(forwardKeepaliveOptions(60)).toEqual([
+      '-o',
+      'ServerAliveInterval=15',
+      '-o',
+      'ServerAliveCountMax=4',
+    ]);
+  });
+
+  it('lets a slower link ask for more rope', () => {
+    expect(tunnelDeadAfterSeconds({ BICA_TUNNEL_DEAD_AFTER: '300' })).toBe(300);
+    expect(forwardKeepaliveOptions(300)).toContain('ServerAliveCountMax=20');
+  });
+
+  it('never lets that setting mean "never give up"', () => {
+    // A count of zero is ssh for "keep waiting forever", which is the opposite of what anyone
+    // lowering this number is asking for.
+    for (const value of ['0', '-5', 'soon', '', '1']) {
+      const seconds = tunnelDeadAfterSeconds({ BICA_TUNNEL_DEAD_AFTER: value });
+      expect(seconds).toBeGreaterThanOrEqual(15);
+      expect(forwardKeepaliveOptions(seconds)).not.toContain(
+        'ServerAliveCountMax=0',
+      );
+    }
   });
 });
 
