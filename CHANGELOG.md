@@ -3,6 +3,24 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.7 — 2026-10-13
+
+### Fixed
+- **A `.git` left behind on the remote is no longer trusted in silence.** The sync ignores `.git`
+  rather than deleting it, so one run with `git.sync` on leaves a repository in the remote workspace
+  for good; later runs copy files in around it and leave its refs where that run left them. `git.sync`
+  off was meant to mean "no repository there", and the existing hint is written for that — the command
+  fails with git's own "not a repository" and bica says which switch to flip. A stale repository
+  resolves every ref instead, so nothing fails: one run diffed a branch against an `origin/master` four
+  days old, reported `Linting 405 changed file(s)` for a branch that changes 15, and exhausted node's
+  heap on the rest, which read as the remote machine being short of memory. Its sibling
+  `test:run:changed` would have reported a pass over the wrong tests.
+- bica now asks the remote whether it has a repository when `git.sync` is off and the command resolves
+  refs, and warns **before** the command runs — naming the branch that repository is on and its newest
+  remote-tracking ref with that ref's date. Before the command, because the damaging case is the one
+  that succeeds, and a warning printed after a run that passed is a warning nobody reads. The probe is
+  one ssh round-trip and only happens on those runs.
+
 ## 0.2.6 — 2026-10-10
 
 ### Fixed

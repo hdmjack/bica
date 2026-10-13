@@ -47,7 +47,7 @@ function tokenReadsHistory(token: string): boolean {
 }
 
 /** A command reads history if it *is* git, or if any of its arguments resolves a ref. */
-function readsGitHistory(argv: readonly string[]): boolean {
+export function readsGitHistory(argv: readonly string[]): boolean {
   if (argv.length === 0) {
     return false;
   }

@@ -17,6 +17,7 @@ import { hasProblem } from './lib/doctor';
 import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
 import { gitDependentHint } from './lib/gitDependentHint';
+import { warnAboutStaleRemoteGit } from './lib/staleRemoteGit';
 import {
   DEFAULT_READY_TIMEOUT_SECONDS,
   formatTunnelList,
@@ -945,6 +946,19 @@ async function runWithLiveSession(options: {
     if (gitPush.ran && gitPush.exitCode === 0) {
       chrome(`${dim('[bica]')} ${dim('.git sync done.')}\n`);
     }
+  }
+
+  // Before the command, not after it: a command that believes a stale repository succeeds, and a
+  // warning under a successful run is the only place it can be read.
+  const staleGit = warnAboutStaleRemoteGit({
+    argvs: options.matchArgvs ?? [tail],
+    syncGit,
+    sshHost: prep.config.sshHost,
+    remoteWorkspacePath: prep.config.remoteWorkspacePath,
+    repoRoot,
+  });
+  if (staleGit !== undefined) {
+    process.stderr.write(`${warn('[bica]')} ${staleGit}\n`);
   }
 
   // Return-flow artifacts (snapshots, logs) are Mutagen-ignored, so the forward sync never

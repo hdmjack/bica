@@ -23,6 +23,7 @@ import {
   remoteReadRecordedExit,
 } from './runRemote';
 import { gitDependentHint } from './gitDependentHint';
+import { warnAboutStaleRemoteGit } from './staleRemoteGit';
 import { pushPinnedWorkingTree } from './pinnedSync';
 import { remoteTrustMiseWorkspace } from './runRemote';
 import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
@@ -337,6 +338,19 @@ export async function runPinned(options: {
   if (syncGit) {
     chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     pushGitToRemote(prep);
+  }
+
+  // Before the command, not after it: a command that believes a stale repository succeeds, and a
+  // warning under a successful run is the only place it can be read.
+  const staleGit = warnAboutStaleRemoteGit({
+    argvs: options.matchArgvs ?? [options.remoteArgv],
+    syncGit,
+    sshHost: prep.config.sshHost,
+    remoteWorkspacePath: prep.config.remoteWorkspacePath,
+    repoRoot: prep.repoRoot,
+  });
+  if (staleGit !== undefined) {
+    process.stderr.write(`${warn('[bica]')} ${staleGit}\n`);
   }
 
   if (returnFlow && prep.returnFlowPaths.length > 0) {

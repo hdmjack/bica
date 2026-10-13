@@ -445,6 +445,19 @@ command was one that resolves refs (`git …`, `--changed`, `--since`, `--change
 setting. It stays quiet otherwise: a note about repository metadata under every failing test run would
 train you to skip the whole channel.
 
+**A `.git` left behind by an earlier synced run is warned about before the command starts.** The sync
+ignores `.git` rather than deleting it, so one run with `git.sync` on leaves a repository in the remote
+workspace permanently; later runs copy new files in around it and leave its refs where that run left
+them. That is worse than having none. With no repository the command fails and the failure is read;
+with a stale one every ref still resolves, so `--changed` diffs against whatever `origin/master` was
+days ago and the command reports a confident answer about a selection nobody asked for — one such run
+reported `Linting 405 changed file(s) against origin/master` for a branch that changes 15, then
+exhausted node's heap on the other 390, which read as a memory problem on the remote machine. So when
+`git.sync` is off and the command resolves refs, bica asks the remote whether it has a repository and,
+if it does, names the branch it is on and its newest remote-tracking ref with that ref's date before
+running anything. Turn `git.sync` on, or delete the remote `.git` to get the loud failure back. The
+probe costs an ssh round-trip and only happens for those runs.
+
 ## Running several commands at once
 
 Separate commands with `--`. They run concurrently in one remote workspace, against one copy of the
