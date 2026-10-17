@@ -162,6 +162,15 @@ keepalives, logs the drop, and re-establishes itself; requests that were in flig
 client gets an error rather than waiting on a socket whose other end is gone. If your link stalls
 for longer than that legitimately, raise `BICA_TUNNEL_DEAD_AFTER`.
 
+**The first sync of an empty workspace is seeded in one transfer.** Mutagen is a good incremental
+mirror and a slow first copy — it stages a 180,000-file tree a file at a time, each with its own
+round trip. When the remote workspace is empty, bica fills it with one `rsync` first and lets Mutagen
+take over from there. Only when it is *empty*: a workspace with files in it raises questions about
+which side is newer that are Mutagen's to answer, and an empty one cannot lose anything. The seed
+honours `sync.ignore.paths`, so it never pushes a local `node_modules` over the remote's or invents a
+`build/` the remote owns. A seed that fails is not fatal — the run goes on, more slowly, as it did
+before.
+
 **A first sync of a large repository takes a long time.** That is expected, and bica now waits for
 it rather than giving up on a clock. It reports where it has got to every ten seconds
 (`Copying to the remote: 41,200/180,633 files`), and the wait ends only when the sync stops making
@@ -477,6 +486,39 @@ exhausted node's heap on the other 390, which read as a memory problem on the re
 if it does, names the branch it is on and its newest remote-tracking ref with that ref's date before
 running anything. Turn `git.sync` on, or delete the remote `.git` to get the loud failure back. The
 probe costs an ssh round-trip and only happens for those runs.
+
+## Outputs from a tree the remote owns
+
+A build directory has to live on the remote and survive every run: it is gigabytes, it is what makes
+the next build incremental, and the local side has no copy, so a mirror with `--delete` removes it as
+fast as the build writes it. The way to keep it is `sync.ignore.paths`, and that is also what puts it
+out of return-flow's reach — return-flow folds those paths into its own excludes precisely because
+they name trees each side owns alone. So the binaries worth having end up in the one place
+return-flow is forbidden to look.
+
+`artifacts:` is the explicit exception: a short list of named outputs copied remote → local after the
+run, with no mirroring and no `--delete` in either direction.
+
+```yaml
+sync:
+  ignore:
+    paths: [build]
+artifacts:
+  - build/bin/llc
+  - build/bin/clang    # a symlink to clang-23; the local copy is the real binary
+  - build/host/stage1/ # a trailing slash means a tree
+```
+
+Named one at a time on purpose — a whitelist of specific outputs cannot wander into a 20GB build tree
+the way a glob can. Symlinks are followed, so what lands locally is the file and not a link to a path
+this machine has not got. Only what changed is transferred, so a run that rebuilt nothing moves
+nothing and says so. Each pull is reported the way `--write-back` reports what it wrote, a single
+binary by name and a tree by file count. This happens on pinned runs too, without `--return-flow`:
+that flag guards a pattern-matched pull into the working tree, and someone who wrote `build/bin/llc`
+wants `build/bin/llc`.
+
+An artifact that is not under something the sync leaves alone is named before the run, because the
+mirror would delete it and the pull afterwards would find nothing and say nothing.
 
 ## Running several commands at once
 

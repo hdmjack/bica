@@ -3,6 +3,37 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.3.0 — 2026-10-17
+
+Large compiled projects: the first two items of the LLVM/rustc feature request.
+
+### Added
+- **`artifacts:`** — named outputs copied home from a tree the sync leaves alone. A build directory
+  must be in `sync.ignore.paths` to survive, and that is exactly what puts it out of return-flow's
+  reach, so the binaries worth having were in the one place return-flow may not look. Each entry is a
+  path rather than a pattern, symlinks are followed (so `build/bin/clang` arrives as the binary, not
+  as a link to a path this machine has not got), only what changed is transferred, and a trailing
+  slash takes a whole tree for rustc's `build/host/stage1/`. Reported like `--write-back`, and pulled
+  on pinned runs without `--return-flow`. An artifact the mirror would delete is named before the run
+  rather than silently arriving as nothing. Replaces a wrapper that `cp -L`'d binaries into a
+  whitelisted directory so return-flow would carry them.
+- **A bulk `rsync` seed for an empty remote workspace**, before Mutagen starts. Mutagen stages a
+  180,000-file tree one file at a time; rsync does it in one pass. Only when the workspace is empty,
+  which is the whole safety argument — nothing can be lost where there is nothing — and always
+  honouring `sync.ignore.paths`, so it cannot push a local `node_modules` over the remote's or create
+  a `build/` the remote owns. A failed seed is not fatal.
+
+### Fixed
+- Both features were written against GNU rsync and corrected against the one macOS actually ships.
+  openrsync rejects `--info=`, answering with its usage text, which made the seed fail with a
+  truncated "source ... directory"; it ignores the `/./` marker that `--relative` uses, so artifacts
+  landed under a recreated copy of the remote's absolute path; and its `--itemize-changes` writes
+  nine flag characters where GNU writes eleven, so reading the name at a fixed column took three
+  characters off the front of every one. All three were found by running it, not by the tests.
+- The workspace-emptiness probe quoted a `~/code/…` path whole, which made `~` a literal directory
+  name, so every run thought the workspace was empty and re-seeded it. The `~`-aware shell quoting
+  now lives in `runRemote.ts` and is shared with the stale-`.git` probe, which had the same bug.
+
 ## 0.2.9 — 2026-10-17
 
 ### Fixed

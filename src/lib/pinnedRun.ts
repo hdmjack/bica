@@ -27,6 +27,7 @@ import { warnAboutStaleRemoteGit } from './staleRemoteGit';
 import { pushPinnedWorkingTree } from './pinnedSync';
 import { remoteTrustMiseWorkspace } from './runRemote';
 import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
+import { reportArtifactPull } from './reportArtifacts';
 import {
   collectWriteBack,
   placeWriteBackMarker,
@@ -466,6 +467,11 @@ export async function runPinned(options: {
       `${dim('[bica]')} ${dim('Return-flow is off for pinned runs; pass --return-flow to pull artifacts back.')}\n`,
     );
   }
+
+  // Not behind `--return-flow`. That flag guards a pattern-matched pull into the working tree, which
+  // is why it is opt-in here; `artifacts:` is a short list of named outputs from a tree the sync does
+  // not touch, and somebody who listed `build/bin/llc` wants `build/bin/llc`.
+  reportArtifactPull(prep);
 
   return code;
 }

@@ -17,6 +17,8 @@ import { hasProblem } from './lib/doctor';
 import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
 import { gitDependentHint } from './lib/gitDependentHint';
+import { reportArtifactPull } from './lib/reportArtifacts';
+import { seedRemoteWorkspace } from './lib/seedWorkspace';
 import {
   SYNC_NOT_READY_EXIT,
   SYNC_STALL_SECONDS,
@@ -905,6 +907,22 @@ async function runWithLiveSession(options: {
   chrome(
     `${dim('Starting one-way sync to')} ${syncRemoteTarget(remoteSyncUrl)}\n`,
   );
+  // Seeded before Mutagen is started, not after: once the session exists it begins staging, and the
+  // point of the seed is that Mutagen's first scan finds the files already there.
+  const seed = seedRemoteWorkspace({
+    sshHost: prep.config.sshHost,
+    remoteWorkspacePath: prep.config.remoteWorkspacePath,
+    remoteSyncUrl,
+    repoRoot,
+    ignorePaths: prep.syncIgnorePaths,
+  });
+  if (seed.ran) {
+    process.stderr.write(
+      seed.ok
+        ? `${dim('[bica]')} ${dim('Seeded the empty remote workspace in one transfer; the sync takes over from here.')}\n`
+        : `${warn('[bica]')} ${dim(`Could not seed the remote workspace (${seed.error ?? 'rsync failed'}); the sync will copy it instead, which is slower.`)}\n`,
+    );
+  }
   if (!mutagenProjectStart(repoRoot, projectFilePath)) {
     process.exit(1);
   }
@@ -1060,6 +1078,7 @@ async function runWithLiveSession(options: {
     if (pull.ran && pull.exitCode === 0) {
       chrome(`${dim('[bica]')} ${dim('Return-flow pull done.')}\n`);
     }
+    reportArtifactPull(prep);
   } finally {
     process.removeListener('SIGINT', onSigint);
     chrome(`${dim('[bica]')} ${dim('Stopping sync session…')}\n`);

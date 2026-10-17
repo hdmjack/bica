@@ -100,6 +100,27 @@ export function shellSingleQuoteRemotePathForSh(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * The workspace path as one `sh` word, with a leading `~` left for the shell to expand.
+ *
+ * Quoting the whole path is what every other probe does, because every other probe is handed a path
+ * that has already been resolved. This one is called with `bica.yml`'s own spelling, which is usually
+ * `~/code/<repo>`: quoted whole, `~` is a literal directory name, the test for `.git` fails, and the
+ * warning falls silent on exactly the workspaces it is for. Only the `~` or `~user` segment is left
+ * bare; the rest is quoted, so a path with a space in it is still one word.
+ */
+export function remoteWorkspaceWordForSh(remoteWorkspacePath: string): string {
+  const p = remoteWorkspacePath.trim();
+  if (!p.startsWith('~')) {
+    return shellSingleQuoteRemotePathForSh(p);
+  }
+  const slash = p.indexOf('/');
+  if (slash === -1) {
+    return p;
+  }
+  return p.slice(0, slash + 1) + shellSingleQuoteRemotePathForSh(p.slice(slash + 1));
+}
+
 /** Strip CR/LF from ssh stdout / config so mkdir never sees a hidden newline in the path. */
 export function sanitizeRemotePosixAbsolutePath(p: string): string {
   return p.replaceAll(/\r|\n/g, '').trim();

@@ -39,6 +39,11 @@ export interface SyncSpecYaml {
   returnFlow?: { paths: string[] };
   generated?: { paths: string[]; command?: string };
   /**
+   * Named outputs to copy remote to local after a run, from trees the sync leaves alone. Unlike
+   * return-flow these are not patterns and are not mirrored; see `artifacts.ts`.
+   */
+  artifacts?: string[];
+  /**
    * The user's configured `sync.ignore.paths`, *before* the return-flow patterns are merged in.
    * These name trees each side owns independently (node_modules, dist, …); return-flow must not
    * mirror artifacts across them in either direction.
@@ -183,6 +188,7 @@ export function normalizeToSyncSpecYaml(
 
   const returnFlow = parseReturnFlow(doc.returnFlow, sourceLabel);
   const generated = parseGenerated(doc.generated, sourceLabel);
+  const artifacts = parseArtifacts(doc.artifacts, sourceLabel);
 
   if (!looksLikeFlatSync && allValuesArePlainObjects) {
     if (keys.length !== 1) {
@@ -201,6 +207,7 @@ export function normalizeToSyncSpecYaml(
       },
       returnFlow,
       generated,
+      artifacts,
       syncIgnorePaths: [
         ...new Set([...(session.ignore?.paths ?? []), ...generated.paths]),
       ],
@@ -235,6 +242,7 @@ export function normalizeToSyncSpecYaml(
     },
     returnFlow,
     generated,
+    artifacts,
     syncIgnorePaths: [...new Set([...(ignore?.paths ?? []), ...generated.paths])],
   };
 }
@@ -262,6 +270,42 @@ function parseReturnFlow(
   }
   const paths = pathsUnknown.filter((x): x is string => typeof x === 'string');
   return { paths };
+}
+
+/**
+ * Parse `artifacts:` from bica.yml root -- a plain list of paths, absent meaning the feature is off.
+ *
+ * Deliberately not merged into `sync.ignore.paths` the way return-flow and `generated` are. Those
+ * merges exist so the mirror cannot delete what they describe; an artifact lives inside a tree the
+ * user has already excluded, and quietly excluding its parent here would change what the sync
+ * carries on the strength of a list about copying things home.
+ */
+function parseArtifacts(raw: unknown, sourceLabel: string): string[] {
+  if (raw === undefined) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error(`${sourceLabel}: artifacts: must be a list of paths.`);
+  }
+  const paths: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') {
+      throw new Error(`${sourceLabel}: artifacts: must be a list of paths.`);
+    }
+    const trimmed = entry.trim();
+    if (trimmed === '') {
+      continue;
+    }
+    if (trimmed.startsWith('/') || trimmed.includes('..')) {
+      // An artifact is a path inside the workspace. An absolute path or one that climbs out of it
+      // would have rsync write somewhere nobody asked for.
+      throw new Error(
+        `${sourceLabel}: artifacts: ${entry} must be a path inside the repository.`,
+      );
+    }
+    paths.push(trimmed);
+  }
+  return paths;
 }
 
 /**
@@ -477,6 +521,8 @@ export interface PrepareResult {
    * side owns on its own — return-flow excludes them so it never mirrors artifacts across them.
    */
   syncIgnorePaths: string[];
+  /** Named outputs copied home after a run; see artifacts.ts. Empty list = feature off. */
+  artifacts: string[];
   config: RemoteEnvConfig;
 }
 
@@ -547,6 +593,7 @@ export function prepareSyncProjectFile(options: {
     generatedPaths: doc.generated?.paths ?? [],
     generatedCommand: doc.generated?.command,
     syncIgnorePaths: doc.syncIgnorePaths,
+    artifacts: doc.artifacts ?? [],
     config,
   };
 }
