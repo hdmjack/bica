@@ -162,6 +162,13 @@ keepalives, logs the drop, and re-establishes itself; requests that were in flig
 client gets an error rather than waiting on a socket whose other end is gone. If your link stalls
 for longer than that legitimately, raise `BICA_TUNNEL_DEAD_AFTER`.
 
+**A first sync of a large repository takes a long time.** That is expected, and bica now waits for
+it rather than giving up on a clock. It reports where it has got to every ten seconds
+(`Copying to the remote: 41,200/180,633 files`), and the wait ends only when the sync stops making
+any progress at all for a minute — at which point it says so and exits **94** without running the
+command, because a command run against a half-copied tree reports its own exit code as if it had
+seen the files. bica used to wait sixty seconds and then run anyway.
+
 **Every request to a tunnel is refused, and its log says nothing.** A unix socket is a path, and a
 path is not owned: anything may unlink it and bind its own there. When that happens the tunnel keeps
 its socket and its descriptor but no longer has the name, so clients get `ECONNREFUSED` while
@@ -575,6 +582,7 @@ None of these are verdicts on your code:
 | **98** | refused to start; the workspace is in use. Nothing ran. Wait, use another checkout, or `bica cancel`. |
 | **97** | ran, but the workspace was taken part-way through, so the result was discarded. Re-run. |
 | **96** | the remote workspace could not be entered. |
+| **94** | the files never got to the remote: the sync stopped making progress, so nothing ran |
 | **95** | the connection dropped part-way through. The command may have passed, failed, or still be running. Re-run. |
 
 ### What the run tells you

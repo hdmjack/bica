@@ -17,6 +17,11 @@ import { hasProblem } from './lib/doctor';
 import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
 import { gitDependentHint } from './lib/gitDependentHint';
+import {
+  SYNC_NOT_READY_EXIT,
+  SYNC_STALL_SECONDS,
+  describeSyncStall,
+} from './lib/syncProgress';
 import { warnAboutStaleRemoteGit } from './lib/staleRemoteGit';
 import {
   DEFAULT_READY_TIMEOUT_SECONDS,
@@ -926,15 +931,30 @@ async function runWithLiveSession(options: {
   };
   process.on('SIGINT', onSigint);
 
-  const ready = waitForSyncReady(sessionName, { timeoutMs: 60_000 });
+  const ready = waitForSyncReady(sessionName, {
+    // Not via `chrome`: that hides itself when stdout is captured, and a first sync of a large
+    // repository can run for an hour. Silence for an hour in a log is the thing the old sixty-second
+    // give-up was reaching for. It is stderr and one line every ten seconds, so nothing that reads
+    // bica's stdout is affected.
+    onProgress: (line) => {
+      process.stderr.write(`${dim('[bica]')} ${dim(line)}\n`);
+    },
+  });
   if (!ready.ready) {
-    process.stderr.write(
-      `${warn('[bica]')} ${dim(`Sync did not reach a ready state within 60s (last status: ${ready.lastStatus ?? 'unknown'}); continuing anyway.`)}\n`,
-    );
-  } else {
-    // Force one flush so any pending alpha→beta changes finish before the remote command runs.
-    mutagenSyncFlush(repoRoot, sessionName);
+    // Refused rather than run. This used to say "continuing anyway" and hand the command a directory
+    // that was still empty, so the command's own exit code -- 1 from `ls`, 127 from a script that was
+    // not there yet -- was reported as the result of a run that never saw a single file.
+    for (const line of describeSyncStall({
+      lastStatus: ready.lastStatus,
+      progress: ready.progress,
+      stallSeconds: SYNC_STALL_SECONDS,
+    }).split('\n')) {
+      process.stderr.write(`${warn('[bica]')} ${line}\n`);
+    }
+    return SYNC_NOT_READY_EXIT;
   }
+  // Force one flush so any pending alpha→beta changes finish before the remote command runs.
+  mutagenSyncFlush(repoRoot, sessionName);
 
   // When git.sync is enabled, mirror local .git to the remote so git-dependent commands
   // (e.g. `vitest --changed`, `jest --changed`) resolve the same history/HEAD/refs as local.

@@ -1,5 +1,16 @@
 import { spawnSync } from 'node:child_process';
 
+import {
+  SYNC_STALL_SECONDS,
+  describeSyncProgress,
+  progressFingerprint,
+  readSyncProgress,
+} from './syncProgress';
+import type { ReadProgress, SyncProgress } from './syncProgress';
+
+/** How often to say where a long first sync has got to. */
+const PROGRESS_EVERY_MS = 10_000;
+
 /**
  * Throws a clear error with install instructions if `mutagen` is not on PATH.
  * Call this before any mutagen operation so the user sees a useful message instead
@@ -49,24 +60,73 @@ export function getSessionListParse(sessionName: string): SessionListParse {
 }
 
 /**
- * Block until the session reaches a sync-ready state (or timeoutMs elapses). Polls every 500ms.
- * Returns the last observed status string (null when the session never appeared).
+ * Block until the session is ready, or until it stops getting anywhere.
+ *
+ * This waited a fixed sixty seconds and then let the caller run the command regardless. On a tree
+ * whose first transfer takes longer than that the command ran against an empty directory and its
+ * exit code was reported as if it had seen the files -- see the note in `syncProgress.ts`. There is
+ * no fixed number that is right here, because the budget scales with the tree and the link, so what
+ * is measured instead is whether Mutagen is still making progress. Staged files and bytes climb
+ * continuously while it works; a sync that has not moved at all for `stallSeconds` has stopped.
  */
 export function waitForSyncReady(
   sessionName: string,
-  options: { timeoutMs: number },
-): { ready: boolean; lastStatus: string | null } {
-  const deadline = Date.now() + options.timeoutMs;
+  options: {
+    /** Seconds with no change of any kind before the sync is called stalled. */
+    stallSeconds?: number;
+    /** Said every so often while waiting, so a long first sync does not look like a hang. */
+    onProgress?: (line: string) => void;
+    /** Injectable for tests. */
+    readProgress?: ReadProgress;
+    /** Injectable for tests; the real one shells out to Mutagen once per poll. */
+    readStatus?: (sessionName: string) => SessionListParse;
+    /** Injectable for tests; returns milliseconds. */
+    now?: () => number;
+    /** Injectable for tests; the real one blocks. */
+    sleep?: () => void;
+  } = {},
+): { ready: boolean; lastStatus: string | null; progress: SyncProgress | null } {
+  const stallSeconds = options.stallSeconds ?? SYNC_STALL_SECONDS;
+  const readProgress = options.readProgress ?? readSyncProgress;
+  const readStatus = options.readStatus ?? getSessionListParse;
+  const now = options.now ?? Date.now;
+  const sleep =
+    options.sleep ??
+    ((): void => {
+      spawnSync('sleep', ['0.5']);
+    });
+
   let lastStatus: string | null = null;
-  while (Date.now() < deadline) {
-    const info = getSessionListParse(sessionName);
+  let progress: SyncProgress | null = null;
+  let fingerprint = '';
+  let movedAt = now();
+  let saidAt = 0;
+
+  for (;;) {
+    const info = readStatus(sessionName);
     lastStatus = info.status;
     if (info.exists && isLikelySyncReady(info.status)) {
-      return { ready: true, lastStatus };
+      return { ready: true, lastStatus, progress };
     }
-    spawnSync('sleep', ['0.5']);
+    progress = readProgress(sessionName);
+    const current = progressFingerprint(progress);
+    if (current !== fingerprint) {
+      fingerprint = current;
+      movedAt = now();
+    }
+    const stalledFor = now() - movedAt;
+    if (stalledFor >= stallSeconds * 1_000) {
+      return { ready: false, lastStatus, progress };
+    }
+    if (options.onProgress !== undefined && now() - saidAt >= PROGRESS_EVERY_MS) {
+      saidAt = now();
+      const line = describeSyncProgress(progress);
+      if (line !== undefined) {
+        options.onProgress(line);
+      }
+    }
+    sleep();
   }
-  return { ready: false, lastStatus };
 }
 
 export function isLikelySyncReady(status: string | null): boolean {

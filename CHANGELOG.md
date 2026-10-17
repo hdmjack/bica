@@ -3,6 +3,29 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.9 — 2026-10-17
+
+### Fixed
+- **A run no longer starts against a tree that is still being copied.** bica waited sixty seconds for
+  the first sync, said "continuing anyway", and ran the command regardless. On a repository whose
+  first transfer takes longer than that — a shallow llvm-project, 180,633 files and 2.8GB — the
+  command ran in a directory that was still empty: `ls` exited 1, a script exited 127, and both read
+  as the command failing rather than as nothing having been copied. The session was then torn down,
+  so the next attempt began again, hit the same minute, and failed the same way; no single-command
+  run could ever succeed on that repository.
+- No fixed budget is right here, because it scales with the tree and the link, so the wait is now
+  about whether the sync is *moving*. Mutagen publishes how many files and bytes it has staged, and
+  bica waits as long as that climbs, giving up only after a minute in which nothing changed at all —
+  the stall the old timeout was reaching for, measured rather than guessed. Scanning counts as
+  progress too: a very large tree scans for minutes before sending a byte.
+- **A stalled sync exits 94 and runs nothing.** With 95, 96, 97 and 98: not a verdict on the code.
+  The message says how far the copy got and that a second attempt sends only what is missing.
+
+### Added
+- **Progress while the first sync runs** (`Copying to the remote: 41,200/180,633 files (3.1GB)`),
+  every ten seconds, on stderr and not suppressed when stdout is captured. An hour of silence is
+  indistinguishable from a hang, which is what the sixty-second give-up was really about.
+
 ## 0.2.8 — 2026-10-17
 
 ### Fixed
