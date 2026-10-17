@@ -17,6 +17,7 @@ import { hasProblem } from './lib/doctor';
 import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
 import { gitDependentHint } from './lib/gitDependentHint';
+import { cmdLogs, cmdRuns, cmdWait } from './lib/detachedCommands';
 import { reportArtifactPull } from './lib/reportArtifacts';
 import { seedRemoteWorkspace } from './lib/seedWorkspace';
 import {
@@ -137,6 +138,15 @@ Remote execution
                               every token after it becomes argv on the remote (POSIX-quoted, no
                               shell injection). Do not pass local-only options after "run" unless you
                               intend the remote to see them. Example: bica run pnpm test:run
+  run --detach <command>      Start it on the remote and return once it is running, printing a run
+                              id. For work that outlasts the caller: an agent's tool call times out
+                              after ten minutes and a 50-minute build cannot be started from one at
+                              all otherwise. The command survives the connection closing, and the
+                              workspace stays leased until you wait for it, so a second run gets 98.
+  runs                        The detached runs started from this machine, and where each has got to.
+  logs <run-id> [--follow]    A detached run's output. Closing this window does not stop the run.
+  wait <run-id>               Block until it finishes; exits with the command's own exit code, brings
+                              its artifacts home and gives the workspace back.
   ssh                         Interactive ssh, cd to BICA_REMOTE_PATH, then a login shell.
   cancel [--force]            End the run holding this workspace and drop its lease. For the case a
                               run's client was killed (a CI step or an agent tool hitting its command
@@ -1132,6 +1142,8 @@ async function cmdRun(options: {
   returnFlow: boolean;
   /** `--write-back`: copy home what the command wrote. Forces a pinned run; see runPinned. */
   writeBack: boolean;
+  /** `--detach`: start it and return the run id. Forces a pinned run; see detachedRun.ts. */
+  detach: boolean;
   /** Several commands to run concurrently in one workspace, or one command. */
   commands: string[][];
 }): Promise<void> {
@@ -1150,7 +1162,17 @@ async function cmdRun(options: {
   // makes the remote an exact copy of local, so it reverts the remote-side writes that would be
   // copied home, and the pinned push is also what supplies the content name the local-edit guard
   // compares against. Pinning is the mechanism, not a preference, so the flag selects it.
-  const pinned = parallel || options.writeBack;
+  // `--detach` pins for a different reason: the tree must stop moving. A live session goes on
+  // mirroring local edits into a workspace that is being compiled for the next hour, and nobody is
+  // watching to notice.
+  const pinned = parallel || options.writeBack || options.detach;
+
+  if (options.detach && parallel) {
+    die(
+      'bica run --detach takes one command. Several commands at once need somebody watching their\n' +
+        'output, which is the thing --detach gives up.',
+    );
+  }
 
   let acquired;
   try {
@@ -1222,8 +1244,34 @@ async function cmdRun(options: {
 
   const prep = prepareSyncProjectFile({ verbose: false });
   let code: number;
+  /** A detached run keeps the workspace while it builds; `bica wait` is what gives it back. */
+  let keepLease = false;
   try {
-    if (pinned) {
+    if (options.detach) {
+      code = await runPinned({
+        prep,
+        remoteArgv,
+        matchArgvs: options.commands,
+        concurrentCommands: undefined,
+        pmOverride: pm,
+        returnFlowOptIn: false,
+        detachRunId: owner.runId,
+        owner,
+        chrome,
+      });
+      if (code === 0) {
+        // The lease is deliberately left held: the build is still going, and a second `bica run`
+        // must meet 98 rather than rsync over a compile. `bica wait` gives it back.
+        keepLease = true;
+        process.removeListener('exit', release);
+        process.removeListener('SIGTERM', onSigterm);
+        process.removeListener('SIGHUP', onSighup);
+        process.stdout.write(`${owner.runId}\n`);
+        process.stderr.write(
+          `${dim('[bica]')} ${dim(`Started detached. \`bica logs ${owner.runId} --follow\` to watch, \`bica wait ${owner.runId}\` for its exit code and artifacts.`)}\n`,
+        );
+      }
+    } else if (pinned) {
       code = await runPinned({
         prep,
         remoteArgv,
@@ -1249,7 +1297,9 @@ async function cmdRun(options: {
       });
     }
   } finally {
-    release();
+    if (!keepLease) {
+      release();
+    }
     process.removeListener('exit', release);
     process.removeListener('SIGTERM', onSigterm);
     process.removeListener('SIGHUP', onSighup);
@@ -1348,9 +1398,33 @@ async function main(): Promise<void> {
           pm,
           returnFlow: globals.returnFlow,
           writeBack: globals.writeBack,
+          detach: globals.detach,
           commands: splitOnDoubleDash(tail),
         });
         break;
+      case 'runs':
+        if (tail.length > 0) {
+          die('usage: bica runs');
+        }
+        process.exitCode = cmdRuns();
+        break;
+      case 'logs': {
+        const follow = tail.includes('--follow') || tail.includes('-f');
+        const id = tail.find((t) => !t.startsWith('-'));
+        if (id === undefined) {
+          die('usage: bica logs <run-id> [--follow]');
+        }
+        process.exitCode = await cmdLogs(id, { follow });
+        break;
+      }
+      case 'wait': {
+        const id = tail.find((t) => !t.startsWith('-'));
+        if (id === undefined) {
+          die('usage: bica wait <run-id>');
+        }
+        process.exitCode = await cmdWait(id);
+        break;
+      }
       case 'build':
         if (tail.length > 0) {
           die('usage: bica build');

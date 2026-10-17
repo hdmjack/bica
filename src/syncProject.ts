@@ -527,6 +527,30 @@ export interface PrepareResult {
 }
 
 /**
+ * The parts of a workspace spec that describe what to copy home, without touching the environment.
+ *
+ * `prepareSyncProjectFile` also resolves the remote host from env vars and writes a sync project
+ * file, neither of which `bica wait` has any business doing: it is running in a different shell from
+ * the one that launched the build, often minutes later, and it already knows the host from the run's
+ * own record. Reading the spec alone is all it needs.
+ */
+export function readArtifactSpec(repoRoot: string): {
+  artifacts: string[];
+  syncIgnorePaths: string[];
+  generatedPaths: string[];
+} {
+  const { absolutePath, displayName } = resolveSyncSpecPath(repoRoot);
+  const raw = fs.readFileSync(absolutePath, 'utf8');
+  const docUnknown: unknown = YAML.parse(raw);
+  const doc = normalizeToSyncSpecYaml(docUnknown, repoRoot, displayName);
+  return {
+    artifacts: doc.artifacts ?? [],
+    syncIgnorePaths: doc.syncIgnorePaths,
+    generatedPaths: doc.generated?.paths ?? [],
+  };
+}
+
+/**
  * Writes the sync project file with local root and remote target.
  *
  */

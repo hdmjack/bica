@@ -487,6 +487,30 @@ if it does, names the branch it is on and its newest remote-tracking ref with th
 running anything. Turn `git.sync` on, or delete the remote `.git` to get the loud failure back. The
 probe costs an ssh round-trip and only happens for those runs.
 
+## Runs that outlast the caller
+
+An agent's tool call times out after ten minutes, a CI step often sooner, and bica ends a remote
+command when its connection goes — which is right for an ordinary run and makes a 50-minute build
+impossible to start from such a caller at all.
+
+```bash
+bica run --detach ninja -C build clang   # prints a run id and returns
+bica runs                                # what is going, and for how long
+bica logs <run-id> --follow              # output as it arrives; closing this does not stop the run
+bica wait <run-id>                       # blocks, exits with the command's code, brings artifacts home
+```
+
+The command runs on the remote under `nohup`, with its output going to a file there, so nothing local
+is holding it up — a dropped link no longer costs an hour of compilation. The tree is pushed once and
+then left alone, because a live session would go on mirroring your edits into a workspace that is
+being compiled.
+
+The workspace stays leased for the whole run, so a second `bica run` meets 98 rather than syncing over
+a build. `bica wait` is what gives it back, along with the exit code and the artifacts; run it before
+starting anything else in that workspace, since a later run will break a lease whose command has
+finished and that takes the recorded exit code with it. If that happens, `bica wait` says so rather
+than reporting somebody else's result.
+
 ## Outputs from a tree the remote owns
 
 A build directory has to live on the remote and survive every run: it is gigabytes, it is what makes

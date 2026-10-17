@@ -28,12 +28,24 @@ export type RsyncRunner = (args: readonly string[]) => {
   stderr: string;
 };
 
+/**
+ * rsync's way of saying the source is not there.
+ *
+ * Not an error worth reporting: an artifact names what a build *will* produce, and before it has --
+ * or when the build failed before reaching it -- the honest report is that there is nothing to bring
+ * home, not that the copy went wrong. openrsync words it differently from GNU rsync, so both.
+ */
+const SOURCE_NOT_THERE =
+  /No such file or directory|empty file list|link_stat .* failed|change_dir .* failed/;
+
 export interface ArtifactOutcome {
   /** The configured path, as written in `bica.yml`. */
   path: string;
   /** Files that actually changed. Empty when the remote's copy already matched. */
   changed: string[];
-  /** Set when rsync failed; the run is not failed for it, but it is said. */
+  /** The remote has not got it: a build that has not produced it yet, or did not get that far. */
+  missing?: boolean;
+  /** Set when rsync failed for some other reason; the run is not failed for it, but it is said. */
   error?: string;
 }
 
@@ -154,13 +166,16 @@ export function pullArtifacts(options: {
       }),
     );
     if (result.status !== 0) {
+      const said = result.stderr.trim();
+      if (SOURCE_NOT_THERE.test(said)) {
+        return { path: artifactPath, changed: [], missing: true };
+      }
       // Not fatal. The command's own result is the run's result, and an artifact that could not be
-      // fetched -- a build that failed before producing it, most often -- must not turn a reported
-      // failure into a different one.
+      // fetched must not turn a reported failure into a different one.
       return {
         path: artifactPath,
         changed: [],
-        error: result.stderr.trim().split('\n').at(-1) ?? `rsync exited ${String(result.status)}`,
+        error: said.split('\n').at(-1) ?? `rsync exited ${String(result.status)}`,
       };
     }
     return { path: artifactPath, changed: parseItemizedChanges(result.stdout) };
@@ -192,6 +207,10 @@ export function describeArtifactPull(
     if (outcome.error !== undefined) {
       lines.push(`Could not bring home ${outcome.path}: ${outcome.error}`);
     }
+  }
+  const missing = outcomes.filter((o) => o.missing === true);
+  if (lines.length === 0 && missing.length === outcomes.length) {
+    return `Nothing to bring home yet (${missing.map((o) => o.path).join(', ')} not on the remote).`;
   }
   if (lines.length === 0) {
     // Said rather than left silent: "nothing changed" and "the pull never ran" look identical

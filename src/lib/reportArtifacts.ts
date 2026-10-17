@@ -1,6 +1,6 @@
 import { artifactsNotProtected, describeArtifactPull, pullArtifacts } from './artifacts';
 import { dim, warn } from '../terminalStyle';
-import type { PrepareResult } from '../syncProject';
+
 
 /**
  * Bring the named outputs home and say what came, for both run paths.
@@ -11,7 +11,15 @@ import type { PrepareResult } from '../syncProject';
  * not be fetched is reported and nothing else -- because the command's exit code is the answer and
  * a copy afterwards must not overwrite it.
  */
-export function reportArtifactPull(prep: PrepareResult): void {
+export interface ArtifactPullInput {
+  artifacts: readonly string[];
+  syncIgnorePaths: readonly string[];
+  generatedPaths: readonly string[];
+  remoteSyncUrl: string;
+  repoRoot: string;
+}
+
+export function reportArtifactPull(prep: ArtifactPullInput): void {
   if (prep.artifacts.length === 0) {
     return;
   }

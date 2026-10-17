@@ -264,6 +264,13 @@ export async function runPinned(options: {
    * it is the same probe, so it is not something to opt into.
    */
   writeBackOptIn?: boolean;
+  /**
+   * Start the command detached under this run id rather than waiting for it.
+   *
+   * Everything a pinned run does before the command still happens here and happens attached: the
+   * push, the install preflight, the generated-path repair. Only the command is let go of.
+   */
+  detachRunId?: string;
   /** Lease taken before anything was synced; this run already owns the workspace. */
   owner: ClaimOwner;
   chrome: (text: string) => void;
@@ -383,7 +390,15 @@ export async function runPinned(options: {
     pmOverride: options.pmOverride,
     assertRunId: runId,
     claimPathExpr: claimExpr,
+    detachRunId: options.detachRunId,
   });
+
+  if (options.detachRunId !== undefined) {
+    // Everything below this point is about a command that has finished: what it wrote, what it left
+    // running, whether its 255 was ssh's or its own, and the artifacts it produced. None of that is
+    // knowable yet. `bica wait` does it when there is something to say.
+    return code;
+  }
 
   const gitHint = gitDependentHint({
     argvs: options.matchArgvs ?? [options.remoteArgv],

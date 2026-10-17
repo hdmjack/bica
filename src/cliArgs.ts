@@ -18,6 +18,13 @@ export interface ParsedGlobals {
    * reverts the very writes this would be copying back; pinning is what holds them still.
    */
   writeBack: boolean;
+  /**
+   * `--detach`: start the command on the remote and return once it is running.
+   *
+   * Implies a pinned run. The tree is pushed once and then left alone, which is what a 50-minute
+   * build wants: a live session would go on mirroring local edits into a tree being compiled.
+   */
+  detach: boolean;
   rest: string[];
 }
 
@@ -38,6 +45,7 @@ export function parseArgs(argv: string[]): ParsedGlobals {
   let pm: string | undefined;
   let returnFlow = false;
   let writeBack = false;
+  let detach = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--yes' || a === '-y') {
@@ -46,6 +54,8 @@ export function parseArgs(argv: string[]): ParsedGlobals {
       returnFlow = true;
     } else if (a === '--write-back') {
       writeBack = true;
+    } else if (a === '--detach') {
+      detach = true;
     } else if (a === '--pm') {
       pm = requireValue(argv, i, '--pm', 'a package-manager plugin id (e.g. pnpm)');
       i += 1;
@@ -53,5 +63,5 @@ export function parseArgs(argv: string[]): ParsedGlobals {
       rest.push(a);
     }
   }
-  return { autoYes, pm, returnFlow, writeBack, rest };
+  return { autoYes, pm, returnFlow, writeBack, detach, rest };
 }

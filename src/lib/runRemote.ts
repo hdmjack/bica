@@ -16,7 +16,7 @@ import { resolveActiveRemoteShellPlugins } from '../resolveActivePlugins';
 import { dim } from '../terminalStyle';
 import type { RemoteShellPlugin } from '../plugins/types';
 
-function loginShellFromEnv(): string {
+export function loginShellFromEnv(): string {
   const shell = process.env.BICA_LOGIN_SHELL?.trim();
   return shell !== undefined && shell.length > 0 ? shell : 'zsh';
 }
@@ -848,6 +848,52 @@ export function terminateLiveRemoteCommand(
   return signalled;
 }
 
+/**
+ * The script a run executes on the remote: tooling preamble, `cd`, the command, claim bookkeeping.
+ *
+ * Extracted so a detached run executes the *same* script an attached one does. The alternative was a
+ * second assembly of the preamble beside this one, which is how two ways of running a command drift
+ * apart -- one of them picking up a PATH fix or a lease check that the other does not.
+ */
+export function buildRemoteCommandScript(options: {
+  remoteWorkspacePath: string;
+  command: string;
+  repoRoot: string;
+  dieWithConnection?: boolean;
+  assertRunId?: string;
+  claimPathExpr?: string;
+  recordExitCode?: boolean;
+}): string {
+  const { remoteWorkspacePath, command, repoRoot } = options;
+  const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
+
+  const toolingPreamble = remoteLoginPreambleForRun(repoRoot);
+  // Fallbacks for non-mise setups (nvm, npm global). Only runs if the mise globs above
+  // left node/pnpm unfound, so mise users pay no cost.
+  const nonMiseFallbacks = shBlock(
+    '# nvm: source it if node is still missing',
+    'if ! command -v node >/dev/null 2>&1 && [ -s "$HOME/.nvm/nvm.sh" ]; then',
+    '  . "$HOME/.nvm/nvm.sh" 2>/dev/null',
+    'fi',
+    '# npm global bin: add it if pnpm is still missing (covers `npm install -g pnpm`)',
+    'if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then',
+    '  _npm_bin="$(npm config get prefix 2>/dev/null)/bin"',
+    '  [ -d "$_npm_bin" ] && PATH="$_npm_bin:$PATH" && export PATH="$PATH"',
+    'fi',
+  );
+  return buildRemoteRunScript({
+    preamble: `${toolingPreamble}${nonMiseFallbacks}`,
+    cdExpr: cd,
+    command:
+      options.dieWithConnection === true
+        ? wrapCommandToDieWithConnection(command)
+        : command,
+    runId: options.assertRunId,
+    claimPathExpr: options.claimPathExpr,
+    recordExitCode: options.recordExitCode ?? true,
+  });
+}
+
 export async function runRemoteCommand(
   sshHost: string,
   remoteWorkspacePath: string,
@@ -891,36 +937,16 @@ export async function runRemoteCommand(
     recordExitCode?: boolean;
   },
 ): Promise<number> {
-  const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
-
-  const toolingPreamble = remoteLoginPreambleForRun(repoRoot);
-
-  // Fallbacks for non-mise setups (nvm, npm global). Only runs if the mise globs above
-  // left node/pnpm unfound, so mise users pay no cost.
-  const nonMiseFallbacks = shBlock(
-    '# nvm: source it if node is still missing',
-    'if ! command -v node >/dev/null 2>&1 && [ -s "$HOME/.nvm/nvm.sh" ]; then',
-    '  . "$HOME/.nvm/nvm.sh" 2>/dev/null',
-    'fi',
-    '# npm global bin: add it if pnpm is still missing (covers `npm install -g pnpm`)',
-    'if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then',
-    '  _npm_bin="$(npm config get prefix 2>/dev/null)/bin"',
-    '  [ -d "$_npm_bin" ] && PATH="$_npm_bin:$PATH" && export PATH="$PATH"',
-    'fi',
-  );
-
   const dieWithConnection = options?.dieWithConnection === true;
-  const remoteScript = buildRemoteRunScript({
-    preamble: `${toolingPreamble}${nonMiseFallbacks}`,
-    cdExpr: cd,
-    command: dieWithConnection
-      ? wrapCommandToDieWithConnection(command)
-      : command,
-    runId: options?.assertRunId,
+  const remoteScript = buildRemoteCommandScript({
+    remoteWorkspacePath,
+    command,
+    repoRoot,
+    dieWithConnection,
+    assertRunId: options?.assertRunId,
     claimPathExpr: options?.claimPathExpr,
-    recordExitCode: options?.recordExitCode ?? true,
+    recordExitCode: options?.recordExitCode,
   });
-
   const shell = loginShellFromEnv();
   const flags = loginFlagsFromEnv();
   if (!remoteLoginShellExists(sshHost, shell)) {

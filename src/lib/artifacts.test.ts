@@ -132,9 +132,11 @@ describe('pullArtifacts', () => {
     expect(outcomes[0].changed).toEqual(['build/bin/llc']);
   });
 
-  it('reports a failed fetch without claiming anything came back', () => {
-    // A build that failed before producing the binary is the common case, and it must not turn the
-    // command's own failure into a different one.
+  it('calls a source the build has not produced missing, not an error', () => {
+    // The common case, and not a failure: an artifact names what a build *will* make, and before it
+    // has -- or when the build stopped short of it -- the honest report is that there is nothing to
+    // bring home. Reporting it as an rsync error put `rsync(350): warning: receiver has empty file
+    // list: exiting` under an ordinary run.
     const outcomes = pullArtifacts({
       artifacts: ['build/bin/llc'],
       remoteSyncUrl: 'mini:/r',
@@ -145,8 +147,23 @@ describe('pullArtifacts', () => {
         stderr: 'rsync: link_stat "/r/build/bin/llc" failed: No such file or directory (2)\n',
       }),
     });
-    expect(outcomes[0].changed).toEqual([]);
-    expect(outcomes[0].error).toContain('No such file');
+    expect(outcomes[0]).toMatchObject({ changed: [], missing: true });
+    expect(outcomes[0].error).toBeUndefined();
+  });
+
+  it('still reports a fetch that failed for a real reason', () => {
+    const outcomes = pullArtifacts({
+      artifacts: ['build/bin/llc'],
+      remoteSyncUrl: 'mini:/r',
+      repoRoot: '/l',
+      run: () => ({
+        status: 12,
+        stdout: '',
+        stderr: 'rsync: connection unexpectedly closed\n',
+      }),
+    });
+    expect(outcomes[0].error).toContain('connection unexpectedly closed');
+    expect(outcomes[0].missing).toBeUndefined();
   });
 });
 
@@ -166,6 +183,12 @@ describe('describeArtifactPull', () => {
       },
     ]);
     expect(said).toContain('412 files');
+  });
+
+  it('says nothing is there yet when the build has not produced it', () => {
+    expect(
+      describeArtifactPull([{ path: 'build/bin/llc', changed: [], missing: true }]),
+    ).toContain('Nothing to bring home yet');
   });
 
   it('says so when nothing changed, which is not the same as not having looked', () => {

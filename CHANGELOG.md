@@ -3,6 +3,38 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.4.0 — 2026-10-17
+
+Request 3 of the large-compiled-projects set: runs that outlast the caller.
+
+### Added
+- **`bica run --detach`**, with `bica runs`, `bica logs <id> [--follow]` and `bica wait <id>`. An
+  agent's tool call times out after ten minutes and bica ends a remote command when its connection
+  goes, so a 50-minute `ninja` could not be started from one at all. A detached run executes on the
+  remote under `nohup` with its output in a file there, and the launcher returns as soon as the
+  command is confirmed running — which also means a dropped link no longer costs an hour of
+  compilation. `wait` blocks, exits with the command's own code, brings artifacts home and gives the
+  workspace back. The tree is pushed once and left alone: a live session would go on mirroring local
+  edits into a workspace being compiled.
+- The lease is held for the whole detached run, so a second `bica run` meets 98 rather than syncing
+  over a build. `wait` releases it. Start another run in that workspace first and it will break the
+  finished run's lease, taking the recorded exit code with it; `wait` then says so rather than
+  reporting a stranger's result.
+
+### Fixed
+- An artifact the build has not produced is reported as nothing to bring home yet, rather than as an
+  rsync error. `rsync(350): warning: receiver has empty file list: exiting` appeared under ordinary
+  runs whose build simply had not got that far.
+
+### Notes
+- The detached shell is started with job control on. This is load-bearing rather than hygiene: the
+  lease's liveness oracle asks whether the recorded pid is a *process group*, which is right for an
+  attached run because ssh makes the remote shell a group leader. A backgrounded job in a
+  non-interactive shell does not get its own group and macOS has no `setsid`, so without it the
+  detached shell stayed in the launching ssh's group — which dies with the launcher. The next run
+  then read the lease as stale, broke it, and synced over a live build. Measured on the remote: pgid
+  96707 for a job whose own pid was 96708, against pgid 96712 == pid 96712 with job control on.
+
 ## 0.3.0 — 2026-10-17
 
 Large compiled projects: the first two items of the LLVM/rustc feature request.

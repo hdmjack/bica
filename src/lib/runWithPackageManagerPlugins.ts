@@ -1,5 +1,7 @@
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { CONNECTION_LOST_EXIT } from './connectionLoss';
+import { launchDetachedRun } from './detachedRun';
+import { claimPathExpr } from './remoteClaim';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
 import { remoteMissingGeneratedPaths } from './generatedPaths';
 import {
@@ -12,7 +14,7 @@ import {
   findRemoteLeftovers,
   readRemoteLoad,
 } from './remoteLeftovers';
-import { dim } from '../terminalStyle';
+import { dim, warn } from '../terminalStyle';
 import {
   clearRemoteInstallRecord,
   readRemoteInstallRecord,
@@ -21,6 +23,7 @@ import {
 import {
   REMOTE_CD_FAILED_EXIT,
   REMOTE_CONTENT_MISMATCH_EXIT,
+  loginShellFromEnv,
   remoteMkdirWorkspace,
   remoteWorkspaceDirExists,
   runRemoteCommand,
@@ -225,6 +228,8 @@ export async function runRemoteCommandWithPmHooks(options: {
   assertRunId?: string;
   /** Shell expression for that lease's file on the remote. */
   claimPathExpr?: string;
+  /** Start the command detached under this run id instead of waiting for it. See detachedRun.ts. */
+  detachRunId?: string;
   /**
    * The user's commands, when there is more than one and they are to run at the same time.
    *
@@ -351,6 +356,31 @@ export async function runRemoteCommandWithPmHooks(options: {
         );
       }
     }
+  }
+
+  if (options.detachRunId !== undefined) {
+    // Everything above has already happened attached: the workspace is there, the install preflight
+    // has run, generated paths have been repaired. Only the command itself is let go of, which is the
+    // part that takes the hour.
+    const outcome = launchDetachedRun({
+      sshHost: config.sshHost,
+      remoteWorkspacePath: config.remoteWorkspacePath,
+      repoRoot,
+      command: cmdStr,
+      argv: options.remoteArgv,
+      runId: options.detachRunId,
+      claimPathExpr: options.claimPathExpr ?? claimPathExpr(config.remoteWorkspacePath),
+      loginShell: loginShellFromEnv(),
+    });
+    if (!outcome.started) {
+      process.stderr.write(
+        outcome.exitedEarly
+          ? `${warn('[bica]')} The command exited within a second of starting. \`bica logs ${options.detachRunId}\` has its output.\n`
+          : `${warn('[bica]')} Could not start a detached run on ${config.sshHost}.\n`,
+      );
+      return 1;
+    }
+    return 0;
   }
 
   const concurrent = options.concurrentCommands ?? [];
