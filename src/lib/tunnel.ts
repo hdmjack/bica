@@ -20,6 +20,13 @@ import {
   writeTunnelRecord,
 } from './tunnelState';
 import type { RestartMode } from './tunnelState';
+import {
+  ForwardStderr,
+  LOCAL_SOCKET_CHECK_MS,
+  checkLocalSocket,
+  describeBindFailure,
+  inodeAt,
+} from './tunnelSocketWatch';
 
 /**
  * A long-lived remote process whose Unix socket is forwarded back to a local path.
@@ -342,6 +349,9 @@ function runRemoteScriptAsync(
 }
 
 /** Backoff between reconnection attempts: doubles from the first to the cap. */
+/** How long to wait for the old listener to close before re-binding its path anyway. */
+const LISTENER_CLOSE_GRACE_MS = 2_000;
+
 const RECONNECT_FIRST_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 
@@ -649,6 +659,8 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
    */
   const inFlight = new Set<{ client: net.Socket; upstream: net.Socket }>();
 
+  const forwardStderr = new ForwardStderr();
+
   const spawnForward = (): ChildProcess => {
     const child = spawn(
       'ssh',
@@ -661,6 +673,9 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     );
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => {
+      // Kept as well as passed through: when the forward fails to bind, this is the only account of
+      // why, and bica used to replace it with a guess about OpenSSH versions.
+      forwardStderr.add(chunk);
       if (sshRefusedTheRemoteSocket(chunk)) {
         refusals += 1;
       }
@@ -761,6 +776,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     try {
       let first = true;
       while (!stopping && own.alive) {
+        forwardStderr.clear();
         const child = spawnForward();
         own.forward = child;
         const closed = new Promise<number>((resolve) => {
@@ -893,8 +909,11 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
       }
       if (ready.kind === 'bind-failed') {
         write(
-          `${warn('[bica]')} ssh did not bind ${forwardPath}. Stream-local forwarding needs ` +
-            'OpenSSH 6.7 or later on both ends.\n',
+          `${warn('[bica]')} ${describeBindFailure({
+            forwardPath,
+            sshHost,
+            stderr: forwardStderr.last,
+          })}\n`,
         );
       } else {
         write(
@@ -1090,6 +1109,17 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     })();
   });
 
+  /**
+   * The inode behind `args.localSocket` at the moment this tunnel bound it.
+   *
+   * A unix socket is a path, and a path is not owned. Anything may unlink it and bind its own, after
+   * which this listener still has its socket and its descriptor but no longer has the path, so every
+   * client gets `ECONNREFUSED` while the tunnel looks healthy from the inside. Comparing inodes is
+   * how a listener can tell that the name it answers to has been given to somebody else.
+   */
+  let ourSocketInode: number | undefined;
+  let stopSocketWatch: () => void = () => {};
+
   let resolveFinished: (code: number) => void = () => {};
   const finished = new Promise<number>((resolve) => {
     resolveFinished = resolve;
@@ -1101,6 +1131,7 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     }
     stopping = true;
     wakeFromBackoff();
+    stopSocketWatch();
     listener.close();
     if (session !== null) {
       endSession(session);
@@ -1146,7 +1177,20 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
   process.on('exit', onExit);
 
   try {
-    try {
+    const bindLocalSocket = async (): Promise<void> => {
+      // A `net.Server` refuses a second `listen`, so taking the path back means closing first. Bounded
+      // rather than awaited outright: `close` waits for every open connection, and a tunnel whose path
+      // was stolen may still be holding one that will never end on its own.
+      if (listener.listening) {
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            listener.close(() => {
+              resolve();
+            });
+          }),
+          delay(LISTENER_CLOSE_GRACE_MS, stop),
+        ]);
+      }
       unlinkIfSocket(args.localSocket);
       await new Promise<void>((resolve, reject) => {
         listener.once('error', reject);
@@ -1155,6 +1199,10 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
           resolve();
         });
       });
+      ourSocketInode = inodeAt(args.localSocket);
+    };
+    try {
+      await bindLocalSocket();
     } catch (e: unknown) {
       // Scoped to the bind alone. It used to wrap the whole run, so any later failure -- a bug in the
       // supervisor, a rejected start -- was reported as "could not listen", which is a sentence about
@@ -1177,6 +1225,56 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     // Written before anything is serving, so `--list` and `--stop` can see a tunnel that is still
     // starting. What says it is *usable* is the readiness stamp added below.
     writeTunnelRecord(record);
+
+    /**
+     * Notice when the path this tunnel answers to stops leading to it.
+     *
+     * Nothing else can notice. The listener has no event for its name being taken, clients cannot
+     * report what they are seeing because they never reach bica, and the log's last line stays
+     * whatever it was -- which is how one tunnel spent two days refusing every request while
+     * `--list` showed it up and its own log showed a network outage from the day before. Checked on
+     * a timer rather than per request, because the symptom is precisely that no request arrives.
+     */
+    const socketWatch = setInterval(() => {
+      if (stopping) {
+        return;
+      }
+      void (async () => {
+        const state = await checkLocalSocket(args.localSocket, ourSocketInode);
+        if (state === 'ours') {
+          return;
+        }
+        if (state === 'taken') {
+          // Taking it back would break whatever is serving there now, which may be a newer tunnel
+          // for the same socket. Standing down is the only move that cannot make things worse.
+          write(
+            `${warn('[bica]')} ${args.localSocket} now leads to something else, which is serving ` +
+              'it. This tunnel cannot be reached any more, so it is stopping rather than fighting ' +
+              'over the path.\n',
+          );
+          shutdown(1);
+          return;
+        }
+        write(
+          `${warn('[bica]')} ${args.localSocket} was replaced by a socket nothing is serving, so ` +
+            'every client has been refused since. Taking the path back.\n',
+        );
+        try {
+          await bindLocalSocket();
+          write(`${dim('[bica]')} ${dim('Listening again.')}\n`);
+        } catch (e: unknown) {
+          write(
+            `${warn('[bica]')} Could not take ${args.localSocket} back: ` +
+              `${e instanceof Error ? e.message : String(e)}\n`,
+          );
+          shutdown(1);
+        }
+      })();
+    }, LOCAL_SOCKET_CHECK_MS);
+    socketWatch.unref();
+    stopSocketWatch = () => {
+      clearInterval(socketWatch);
+    };
     recordReady = () => {
       writeTunnelRecord({ ...record, readyAt: new Date().toISOString() });
     };

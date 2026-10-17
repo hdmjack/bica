@@ -3,6 +3,24 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.2.8 — 2026-10-17
+
+### Fixed
+- **A tunnel notices when its socket path stops leading to it.** A unix socket is a path, and a path
+  is not owned: anything may unlink it and bind its own. When that happened the listener kept its
+  socket and its descriptor and went on believing it was serving, while every client got
+  `ECONNREFUSED` and `--list` still showed the tunnel up. One tunnel sat like that for two days — the
+  process healthy, the last log line from an unrelated outage the day before, and the symptom
+  reported, reasonably, as "it never retried after the host came back". It never retried because no
+  request ever reached it. A tunnel now checks every thirty seconds that the path still names its own
+  listener: a path replaced by a socket nothing serves is taken back, and a path something else is
+  genuinely serving is left alone, with the tunnel standing down rather than fighting for it.
+- **A forward that could not bind no longer blames the OpenSSH version.** bica printed "Stream-local
+  forwarding needs OpenSSH 6.7 or later on both ends" whatever the cause — one line below ssh's own
+  `connect to host 192.168.0.120 port 22: Operation timed out`, for two machines that had been
+  forwarding that socket for two days. The message now quotes ssh and names the version only when ssh
+  actually reported that unix-socket forwarding is unsupported, or when it said nothing at all.
+
 ## 0.2.7 — 2026-10-13
 
 ### Fixed

@@ -162,6 +162,19 @@ keepalives, logs the drop, and re-establishes itself; requests that were in flig
 client gets an error rather than waiting on a socket whose other end is gone. If your link stalls
 for longer than that legitimately, raise `BICA_TUNNEL_DEAD_AFTER`.
 
+**Every request to a tunnel is refused, and its log says nothing.** A unix socket is a path, and a
+path is not owned: anything may unlink it and bind its own there. When that happens the tunnel keeps
+its socket and its descriptor but no longer has the name, so clients get `ECONNREFUSED` while
+`--list` still shows the tunnel up and its log stays on whatever it last said. A tunnel now checks
+every thirty seconds that its path still leads to it. If the path was replaced by a socket nothing
+is serving, it says so and takes the name back; if something else is genuinely serving there, it
+says so and stops rather than fighting over the path.
+
+**A tunnel says it could not bind the forward.** The message quotes ssh. A connect timeout or a
+refused connection means the host was unreachable and nothing was forwarded — the next client tries
+again. Only when ssh reports that unix-socket forwarding is unsupported does the OpenSSH version
+matter; that needs 6.7 or later on both ends.
+
 **A command cannot find a module it should have.** The remote installs when your lockfile differs
 from what that workspace last installed. If you suspect the record is wrong, `bica run pnpm install`
 forces it.
