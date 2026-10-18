@@ -16,6 +16,7 @@ import {
   remotePathExprForCd,
   runRemoteScriptOverStdin,
 } from './runRemote';
+import { SUBPROCESS_MAX_BUFFER } from './subprocessOutput';
 
 /**
  * Trees return-flow must never walk, on top of whatever the user ignores. `.git` is mirrored
@@ -154,6 +155,7 @@ export function pullReturnFlow(prep: PrepareResult): PullResult {
   const result = spawnSync('rsync', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
     shell: false,
   });
   const code = result.status ?? 1;
@@ -205,6 +207,7 @@ export function pushReturnFlowToRemote(prep: PrepareResult): PullResult {
   const result = spawnSync('rsync', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
     shell: false,
   });
   const code = result.status ?? 1;
@@ -336,6 +339,7 @@ function rsyncGit(args: string[]): PullResult {
   const result = spawnSync('rsync', args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
     shell: false,
   });
   const code = result.status ?? 1;

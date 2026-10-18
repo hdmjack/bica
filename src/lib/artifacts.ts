@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import { SUBPROCESS_MAX_BUFFER } from './subprocessOutput';
 
 /**
  * Named outputs copied home from a tree the remote owns.
@@ -132,6 +133,7 @@ function defaultRunner(args: readonly string[]): {
 } {
   const result = spawnSync('rsync', [...args], {
     encoding: 'utf8',
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
     shell: false,
   });
   return {

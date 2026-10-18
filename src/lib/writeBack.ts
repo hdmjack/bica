@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import { dim, warn } from '../terminalStyle';
 import { remotePathExprForCd } from './runRemote';
+import { SUBPROCESS_MAX_BUFFER } from './subprocessOutput';
 
 /**
  * Noticing when a run wrote files, and bringing those files home.
@@ -188,6 +189,7 @@ export function dropIgnoredPaths(
     input: paths.join('\n'),
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'ignore'],
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
   });
   // 0 = some paths are ignored, 1 = none are, anything else = git could not answer.
   if (check.status !== 0 && check.status !== 1) {

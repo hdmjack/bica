@@ -1,6 +1,10 @@
 import { spawnSync } from 'node:child_process';
 
 import { workingTreeOid } from './contentIdentity';
+import {
+  SUBPROCESS_MAX_BUFFER,
+  describeSpawnFailure,
+} from './subprocessOutput';
 import { parseTransferredPaths } from './syncedMtimes';
 import { dim, warn } from '../terminalStyle';
 
@@ -184,12 +188,14 @@ export function pushPinnedWorkingTree(options: {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,
+    // The itemised listing is one line per file considered, so a mirror of a large tree whose
+    // timestamps differ runs to megabytes. Node's 1 MiB default kills the child at that point and
+    // sets ENOBUFS, which rsync reports as exit 20 -- a transfer failure that never happened.
+    maxBuffer: SUBPROCESS_MAX_BUFFER,
   });
-  const code = result.status ?? 1;
-  if (code !== 0) {
-    const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+  if (result.error !== undefined || (result.status ?? 1) !== 0) {
     process.stderr.write(
-      `${warn('[bica]')} ${dim(`pinned sync rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
+      `${warn('[bica]')} ${dim(describeSpawnFailure(result, 'The pinned sync'))}\n`,
     );
     return {
       ok: false,
