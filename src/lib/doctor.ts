@@ -191,7 +191,10 @@ function checkGitignore(probes: DoctorProbes): CheckResult {
     name: 'Local settings are private',
     status: 'warning',
     detail: '.bica/ is not gitignored, so your ssh host and local paths can be committed',
-    fix: 'Add `.bica/` to this repository\'s .gitignore (`bica init` does this for you).',
+    fix:
+      'Add `.bica/` to this repository\'s .gitignore (`bica init` does this for you). ' +
+      'In a clone of a project you do not own, `printf \'.bica/\\n\' >> .git/info/exclude` keeps ' +
+      'the rule to your machine and counts here just the same.',
   };
 }
 
