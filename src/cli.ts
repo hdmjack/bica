@@ -16,7 +16,7 @@ import { isProcessAlive } from './lib/fileLock';
 import { hasProblem } from './lib/doctor';
 import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
-import { gitDependentHint } from './lib/gitDependentHint';
+import { reportGitDependentHint } from './lib/reportGitHint';
 import { cmdLogs, cmdRuns, cmdWait } from './lib/detachedCommands';
 import { reportArtifactPull } from './lib/reportArtifacts';
 import { seedRemoteWorkspace } from './lib/seedWorkspace';
@@ -1052,15 +1052,18 @@ async function runWithLiveSession(options: {
       assertRunId: options.owner.runId,
       claimPathExpr: claimPathExpr(prep.config.remoteWorkspacePath),
     });
-    const gitHint = gitDependentHint({
-      argvs: options.matchArgvs ?? [tail],
-      exitCode: code,
-      syncGit,
-      fromWorktree: dotGitIsAFile(repoRoot),
-    });
-    if (gitHint !== undefined) {
-      process.stderr.write(`${warn('[bica]')} ${gitHint}\n`);
-    }
+    reportGitDependentHint(
+      {
+        argvs: options.matchArgvs ?? [tail],
+        exitCode: code,
+        syncGit,
+        fromWorktree: dotGitIsAFile(repoRoot),
+      },
+      {
+        sshHost: prep.config.sshHost,
+        remoteWorkspacePath: prep.config.remoteWorkspacePath,
+      },
+    );
     if (watchingWrites) {
       reportWriteBack(
         collectWriteBack({

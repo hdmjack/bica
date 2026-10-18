@@ -1,8 +1,8 @@
 {
   "name": "bica",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
-  "description": "Remote workspace CLI \u2014 file sync, SSH, and argv-safe remote commands",
+  "description": "Remote workspace CLI — file sync, SSH, and argv-safe remote commands",
   "license": "MIT",
   "author": "Haakon Jack",
   "engines": {

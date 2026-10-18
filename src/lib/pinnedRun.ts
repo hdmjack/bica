@@ -22,7 +22,7 @@ import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
 } from './runRemote';
-import { gitDependentHint } from './gitDependentHint';
+import { reportGitDependentHint } from './reportGitHint';
 import { warnAboutStaleRemoteGit } from './staleRemoteGit';
 import { pushPinnedWorkingTree } from './pinnedSync';
 import { remoteTrustMiseWorkspace } from './runRemote';
@@ -400,15 +400,18 @@ export async function runPinned(options: {
     return code;
   }
 
-  const gitHint = gitDependentHint({
-    argvs: options.matchArgvs ?? [options.remoteArgv],
-    exitCode: code,
-    syncGit,
-    fromWorktree: dotGitIsAFile(prep.repoRoot),
-  });
-  if (gitHint !== undefined) {
-    process.stderr.write(`${warn('[bica]')} ${gitHint}\n`);
-  }
+  reportGitDependentHint(
+    {
+      argvs: options.matchArgvs ?? [options.remoteArgv],
+      exitCode: code,
+      syncGit,
+      fromWorktree: dotGitIsAFile(prep.repoRoot),
+    },
+    {
+      sshHost: prep.config.sshHost,
+      remoteWorkspacePath: prep.config.remoteWorkspacePath,
+    },
+  );
 
   // 255 is ambiguous: ssh uses it for its own transport failures, and a command may legitimately exit
   // 255. The recorded exit code settles which it was, as a fact rather than a guess.

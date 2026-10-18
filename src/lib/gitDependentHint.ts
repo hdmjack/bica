@@ -66,6 +66,37 @@ export interface GitDependentHintInput {
   syncGit: boolean;
   /** Whether this checkout is a git worktree, which the copy has to flatten. */
   fromWorktree?: boolean;
+  /**
+   * Whether the remote workspace actually has a repository, when that has been looked at.
+   *
+   * Only consulted with `git.sync` on, and only for a failing history-reading command. `undefined`
+   * means nobody has looked, which is the same as "no reason to think the copy failed": see
+   * `wantsRemoteGitProbe` for why the look is worth an extra connection when it happens at all.
+   */
+  remoteGitPresent?: boolean;
+}
+
+/**
+ * Whether it is worth asking the remote if its `.git` is there before saying anything.
+ *
+ * With `git.sync` on, the hint was firing under *every* failing history-reading run, which on a repo
+ * whose whole test script is `test:run:changed` means every failing test run. A note that appears
+ * under a genuine test failure is worse than no note: it reads as a diagnosis, sends people to look
+ * at the sync, and trains them to skip the channel it arrives on.
+ *
+ * The honest discriminator is whether the remote has a repository at all, and bica cannot tell from
+ * the exit code -- the command's own output is streamed, not captured. So it asks, once, on the one
+ * path where the answer changes what is said: a failed run, of a command that reads history, with the
+ * setting already on. That is the slow path by definition and already the rare one.
+ */
+export function wantsRemoteGitProbe(
+  input: Omit<GitDependentHintInput, 'remoteGitPresent'>,
+): boolean {
+  return (
+    input.exitCode !== 0 &&
+    input.syncGit &&
+    input.argvs.some(readsGitHistory)
+  );
 }
 
 /**
@@ -85,21 +116,24 @@ export function gitDependentHint(
     return undefined;
   }
   if (input.syncGit) {
-    // Something is still said when the setting is already on.
-    //
-    // The hint used to fall silent here, which left the person who had followed its advice with a
-    // bare `fatal: not a git repository` and nothing connecting the two. Saying what bica did is
-    // worth a line even when it cannot say what went wrong.
+    if (input.remoteGitPresent !== false) {
+      // The repository is there, so this failure is the command's own and the hint has nothing to
+      // add. Silence here is the fix for the note firing under every failing `:changed` run.
+      return undefined;
+    }
+    // The setting is on and the repository still did not arrive, which is the one case worth a line:
+    // whoever followed the previous hint would otherwise get a bare `fatal: not a git repository`
+    // with nothing connecting the two.
     return (
-      `\`${culprit.join(' ')}\` reads git history, and \`git.sync\` is on, so bica copied this ` +
-      `checkout's repository to the remote before running it${
+      `\`${culprit.join(' ')}\` reads git history and \`git.sync\` is on, but the remote workspace ` +
+      `has no repository: the copy did not land, so this failure is bica's and not your code${
         input.fromWorktree === true
-          ? ' — as one flattened repository, because this checkout is a git worktree and its `.git` is' +
-            ' a file naming a path the remote does not have'
+          ? ' — and this checkout is a git worktree, whose `.git` is a file naming a path the remote' +
+            ' does not have, so the flattening is the first thing to suspect'
           : ''
       }.\n` +
-      'If the command still cannot read history, the copy is the thing to look at: `BICA_DEBUG=1` ' +
-      'shows the rsync, and `bica run git rev-parse HEAD` says what the remote thinks it is on.'
+      '`BICA_DEBUG=1` shows the rsync that should have carried it, and `bica run git rev-parse HEAD` ' +
+      'says what the remote thinks it is on.'
     );
   }
   return (
