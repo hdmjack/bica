@@ -457,6 +457,60 @@ export interface RecordedRemoteExit {
   exitCode: number | null;
   /** Whether the recording belongs to the run that asked. */
   mine: boolean;
+  /**
+   * The claim could not be read at all, so nothing here is a statement about the run.
+   *
+   * Distinct from `mine: false`, which is a *fact* about a claim that was read: it is gone, or it
+   * names somebody else. This flag means the question went unanswered -- the host did not respond,
+   * ssh refused, the network dropped. Folding the two together is what made a 15-minute LLVM build
+   * get declared "gone" on one failed poll, with its local record deleted and its artifacts stranded.
+   */
+  unreachable: boolean;
+}
+
+/** Proof the remote shell ran at all, which is what separates "no claim" from "no answer". */
+const CLAIM_READ_MARKER = 'bica-claim-read';
+
+/**
+ * Read the claim and prove the read happened.
+ *
+ * `cat` alone cannot say which of two very different things occurred, because a missing file and a
+ * dead connection both come back non-zero with empty output. The marker is printed before the `cat`
+ * and the script always exits 0, so a reply carrying the marker means the remote answered and an
+ * empty claim is genuinely an empty claim.
+ */
+export function buildClaimReadScript(claimPath: string): string {
+  return `printf '${CLAIM_READ_MARKER}\\n'\ncat ${claimPath} 2>/dev/null\nexit 0\n`;
+}
+
+export function parseClaimRead(
+  result: { status: number; stdout: string },
+  runId: string,
+): RecordedRemoteExit {
+  const lines = result.stdout.split('\n');
+  const marker = lines.indexOf(CLAIM_READ_MARKER);
+  if (result.status !== 0 || marker === -1) {
+    return { exitCode: null, mine: false, unreachable: true };
+  }
+  const claim = lines.slice(marker + 1).join('\n').trim();
+  if (claim === '') {
+    // Read, and there is no claim: the workspace is free. A fact, not a failure.
+    return { exitCode: null, mine: false, unreachable: false };
+  }
+  // Claim layout is `runId host clientPid [tag=value...] [exitCode]`. The exit code is whatever trails
+  // the three mandatory fields and is a bare integer -- reading a fixed index would mistake a tag for
+  // it, and reading the last field unconditionally would report the client pid as an exit code for a
+  // run that has not finished. Every tag is dropped, not just the ones that exist today: the claim has
+  // grown two of them already, and a filter naming them individually is one that silently rots.
+  const fields = claim.split(/\s+/);
+  const trailing = fields.slice(3).filter((f) => !/^[a-z]+=/.test(f));
+  const last = trailing[trailing.length - 1];
+  const parsed = Number(last);
+  return {
+    exitCode: last !== undefined && Number.isInteger(parsed) ? parsed : null,
+    mine: fields[0] === runId,
+    unreachable: false,
+  };
 }
 
 /**
@@ -474,23 +528,10 @@ export function remoteReadRecordedExit(
   claimPath: string,
   runId: string,
 ): RecordedRemoteExit {
-  const result = runRemoteScriptOverStdin(sshHost, `cat ${claimPath} 2>/dev/null\n`);
-  if (result.status !== 0) {
-    return { exitCode: null, mine: false };
-  }
-  // Claim layout is `runId host clientPid [tag=value...] [exitCode]`. The exit code is whatever trails
-  // the three mandatory fields and is a bare integer -- reading a fixed index would mistake a tag for
-  // it, and reading the last field unconditionally would report the client pid as an exit code for a
-  // run that has not finished. Every tag is dropped, not just the ones that exist today: the claim has
-  // grown two of them already, and a filter naming them individually is one that silently rots.
-  const fields = result.stdout.trim().split(/\s+/);
-  const trailing = fields.slice(3).filter((f) => !/^[a-z]+=/.test(f));
-  const last = trailing[trailing.length - 1];
-  const parsed = Number(last);
-  return {
-    exitCode: last !== undefined && Number.isInteger(parsed) ? parsed : null,
-    mine: fields[0] === runId,
-  };
+  return parseClaimRead(
+    runRemoteScriptOverStdin(sshHost, buildClaimReadScript(claimPath)),
+    runId,
+  );
 }
 
 /**

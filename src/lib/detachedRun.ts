@@ -230,7 +230,7 @@ export function startDetachedRun(options: {
 /** One line per detached run, for `bica runs`. */
 export function describeDetachedRun(
   record: DetachedRunRecord,
-  state: 'running' | 'finished' | 'gone',
+  state: 'running' | 'finished' | 'gone' | 'unreachable',
   exitCode: number | null,
 ): string {
   const age = Math.round(
@@ -240,9 +240,12 @@ export function describeDetachedRun(
   const what =
     state === 'running'
       ? `running for ${minutes}`
-      : state === 'gone'
-        ? 'gone (no claim on the remote; it may have been cleared)'
-        : `finished (exit ${exitCode === null ? '?' : String(exitCode)}) after ${minutes}`;
+      : state === 'unreachable'
+        ? // Not a statement about the run: the host did not answer, so its state is simply unknown.
+          `unknown — ${record.sshHost} is not answering; started ${minutes} ago`
+        : state === 'gone'
+          ? 'gone (no claim on the remote; it may have been cleared)'
+          : `finished (exit ${exitCode === null ? '?' : String(exitCode)}) after ${minutes}`;
   return `${record.runId}  ${record.command.join(' ')}  [${what}]`;
 }
 

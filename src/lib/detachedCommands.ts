@@ -12,6 +12,7 @@ import type { DetachedRunRecord } from './detachedRun';
 import { reportArtifactPull } from './reportArtifacts';
 import { readArtifactSpec } from '../syncProject';
 import { remoteReadRecordedExit, runRemoteScriptOverStdin } from './runRemote';
+import { REMOTE_UNREACHABLE_EXIT } from './pinnedRun';
 import { dim, warn } from '../terminalStyle';
 
 
@@ -30,9 +31,12 @@ const WAIT_POLL_MS = 5_000;
 
 export interface DetachedRunState {
   record: DetachedRunRecord;
-  state: 'running' | 'finished' | 'gone';
+  state: 'running' | 'finished' | 'gone' | 'unreachable';
   exitCode: number | null;
 }
+
+/** How long `wait` keeps trying a host that will not answer before giving the caller its turn. */
+const UNREACHABLE_GRACE_MS = 5 * 60_000;
 
 /**
  * Where a detached run has got to.
@@ -40,6 +44,11 @@ export interface DetachedRunState {
  * `mine` is what separates "still going" from "gone": the claim holds this run's id until something
  * else takes the workspace, so a claim naming another run means this one's record is history and its
  * exit code is not recoverable. Saying that plainly beats reporting a stranger's exit code.
+ *
+ * A claim that could not be read says none of that. It used to arrive here as `mine: false` and get
+ * reported as a takeover, which is both false and expensive: a 15-minute LLVM build that was still
+ * compiling, still holding its claim, was declared gone on one failed poll and had its local record
+ * deleted -- the only handle on its output and its artifacts.
  */
 export function readDetachedRunState(
   record: DetachedRunRecord,
@@ -50,6 +59,9 @@ export function readDetachedRunState(
     claimPathExpr(record.remoteWorkspacePath),
     record.runId,
   );
+  if (recorded.unreachable) {
+    return { record, state: 'unreachable', exitCode: null };
+  }
   if (!recorded.mine) {
     return { record, state: 'gone', exitCode: null };
   }
@@ -164,16 +176,60 @@ function delay(ms: number): Promise<void> {
  */
 export async function cmdWait(
   runId: string,
-  options: { pollMs?: number } = {},
+  options: {
+    pollMs?: number;
+    /** How long to keep trying a silent host before handing the shell back. */
+    unreachableGraceMs?: number;
+    read?: typeof remoteReadRecordedExit;
+    now?: () => number;
+    /** Overridden in tests, which must not reach a real host to give a lease back. */
+    release?: typeof remoteReleaseClaim;
+    finish?: (record: DetachedRunRecord) => void;
+  } = {},
 ): Promise<number> {
   const record = readDetachedRunRecord(runId);
   if (record === null) {
     return missing(runId);
   }
   const pollMs = options.pollMs ?? WAIT_POLL_MS;
+  const graceMs = options.unreachableGraceMs ?? UNREACHABLE_GRACE_MS;
+  const read = options.read ?? remoteReadRecordedExit;
+  const now = options.now ?? (() => Date.now());
   let said = false;
+  let unreachableSince: number | undefined;
+  let saidUnreachable = false;
   for (;;) {
-    const state = readDetachedRunState(record);
+    const state = readDetachedRunState(record, read);
+    if (state.state === 'unreachable') {
+      // The run is almost certainly fine; it is the question that failed. Keep the record whatever
+      // happens here, so `bica wait <id>` works again once the host is back.
+      const at = now();
+      unreachableSince ??= at;
+      if (!saidUnreachable) {
+        saidUnreachable = true;
+        process.stderr.write(
+          `${warn('[bica]')} ${record.sshHost} is not answering; still waiting for ${runId}. ` +
+            'Its record is kept, so this is safe to re-run.\n',
+        );
+      }
+      if (at - unreachableSince >= graceMs) {
+        process.stderr.write(
+          `${warn('[bica]')} Gave up reaching ${record.sshHost} after ` +
+            `${String(Math.round(graceMs / 60_000))}m. ${runId} is probably still running there — ` +
+            `\`bica wait ${runId}\` again when the host is back.\n`,
+        );
+        return REMOTE_UNREACHABLE_EXIT;
+      }
+      await delay(pollMs);
+      continue;
+    }
+    if (unreachableSince !== undefined) {
+      unreachableSince = undefined;
+      saidUnreachable = false;
+      process.stderr.write(
+        `${dim('[bica]')} ${dim(`${record.sshHost} is answering again.`)}\n`,
+      );
+    }
     if (state.state === 'gone') {
       process.stderr.write(
         `${warn('[bica]')} ${runId} is no longer the run holding ${record.remoteWorkspacePath}: ` +
@@ -185,9 +241,9 @@ export async function cmdWait(
     }
     if (state.state === 'finished') {
       const code = state.exitCode ?? 1;
-      pullArtifactsForRecord(record);
+      (options.finish ?? pullArtifactsForRecord)(record);
       // The lease outlived the launcher on purpose; this is where it is given back.
-      remoteReleaseClaim(
+      (options.release ?? remoteReleaseClaim)(
         record.sshHost,
         record.remoteWorkspacePath,
         describeSelfAsOwner(runId),

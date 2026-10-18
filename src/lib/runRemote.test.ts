@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildRunRemoteSshArgs,
+  parseClaimRead,
   pickRemoteHomeFromSshStdout,
   remotePathExprForCd,
   sanitizeRemotePosixAbsolutePath,
@@ -122,5 +123,58 @@ describe('pickRemoteHomeFromSshStdout', () => {
 
   it('rejects bare / as HOME', () => {
     expect(pickRemoteHomeFromSshStdout('hello\n/')).toBeNull();
+  });
+});
+
+describe('parseClaimRead', () => {
+  /**
+   * A failed probe and an absent claim used to be the same answer. They are not: one is a fact about
+   * the workspace, the other is the absence of any fact at all, and conflating them cost a live
+   * 15-minute build its local record while it was still compiling.
+   */
+  const claim = '920 mac.local 920 t=1792290908 rpid=37032';
+
+  it('marks a probe that never ran as unreachable, not as somebody else\'s claim', () => {
+    expect(parseClaimRead({ status: 255, stdout: '' }, '920')).toMatchObject({
+      mine: false,
+      unreachable: true,
+    });
+  });
+
+  it('treats output without the marker as unreachable however it exited', () => {
+    // ssh can exit 0 having printed only its own noise; the marker is the only proof of a real read.
+    expect(
+      parseClaimRead({ status: 0, stdout: 'banner text\n' }, '920').unreachable,
+    ).toBe(true);
+  });
+
+  it('reads a live claim as ours with no exit code yet', () => {
+    expect(
+      parseClaimRead({ status: 0, stdout: `bica-claim-read\n${claim}\n` }, '920'),
+    ).toEqual({ exitCode: null, mine: true, unreachable: false });
+  });
+
+  it('reads the appended exit code past the tags', () => {
+    expect(
+      parseClaimRead(
+        { status: 0, stdout: `bica-claim-read\n${claim} 7\n` },
+        '920',
+      ),
+    ).toEqual({ exitCode: 7, mine: true, unreachable: false });
+  });
+
+  it('reads an empty claim as a free workspace rather than a failure', () => {
+    expect(
+      parseClaimRead({ status: 0, stdout: 'bica-claim-read\n' }, '920'),
+    ).toEqual({ exitCode: null, mine: false, unreachable: false });
+  });
+
+  it('reads a claim naming another run as not ours', () => {
+    expect(
+      parseClaimRead(
+        { status: 0, stdout: 'bica-claim-read\n81856 mac.local 81856 0\n' },
+        '920',
+      ),
+    ).toMatchObject({ mine: false, unreachable: false });
   });
 });
