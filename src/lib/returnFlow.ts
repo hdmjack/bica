@@ -1,4 +1,9 @@
 import { spawnSync } from 'node:child_process';
+import {
+  buildSubmodulePointerScript,
+  readSubmodulePointers,
+} from './rustWorkspace';
+import { remoteWorkspaceWordForSh } from './runRemote';
 
 
 import { dim, warn } from '../terminalStyle';
@@ -244,7 +249,11 @@ export function pushGitToRemote(prep: PrepareResult): PullResult {
   clearRemoteDotGitFile(prep);
 
   if (layout.kind === 'plain') {
-    return rsyncGit(['-az', '--delete', ensureTrailingSlash(layout.gitDir), remoteDest]);
+    const result = rsyncGit(['-az', '--delete', ensureTrailingSlash(layout.gitDir), remoteDest]);
+    if (result.exitCode === 0) {
+      restoreSubmodulePointers(prep);
+    }
+    return result;
   }
 
   // A worktree becomes an ordinary repository on the remote.
@@ -290,6 +299,36 @@ function clearRemoteDotGitFile(prep: PrepareResult): void {
     `cd ${remotePathExprForCd(prep.config.remoteWorkspacePath)} 2>/dev/null || exit 0\n` +
       '[ -f .git ] && rm -f .git\n' +
       'exit 0\n',
+  );
+}
+
+/**
+ * Put each submodule's `.git` file back on the remote.
+ *
+ * The sync ignores `.git` at every level, so a submodule's own `.git` -- a one-line file naming a
+ * path inside the parent's `.git/modules` -- never travels, while the modules directory it points at
+ * does, because that lives inside the parent `.git` this function's caller just copied. The remote
+ * ends up with all the data and nothing addressing it, and `git submodule status` calls every
+ * submodule uninitialised. rustc's bootstrap reads exactly that.
+ */
+function restoreSubmodulePointers(prep: PrepareResult): void {
+  const pointers = readSubmodulePointers(prep.repoRoot);
+  if (pointers.length === 0) {
+    return;
+  }
+  const script = buildSubmodulePointerScript({
+    remoteWorkspaceWord: remoteWorkspaceWordForSh(prep.config.remoteWorkspacePath),
+    pointers,
+  });
+  const result = runRemoteScriptOverStdin(prep.config.sshHost, script);
+  if (result.status !== 0) {
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`Could not restore ${String(pointers.length)} submodule pointer(s) on the remote; \`git submodule\` there will report them uninitialised.`)}\n`,
+    );
+    return;
+  }
+  process.stderr.write(
+    `${dim('[bica]')} ${dim(`Restored ${String(pointers.length)} submodule pointer(s) on the remote.`)}\n`,
   );
 }
 

@@ -2,6 +2,7 @@ import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { CONNECTION_LOST_EXIT } from './connectionLoss';
 import { launchDetachedRun } from './detachedRun';
 import { buildEnvForwarding, describeEnvForwarding } from './envPassthrough';
+import { readLocalBicaSettings } from '../localBicaSettings';
 import { claimPathExpr } from './remoteClaim';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
 import { remoteMissingGeneratedPaths } from './generatedPaths';
@@ -26,6 +27,7 @@ import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   loginShellFromEnv,
   remoteMkdirWorkspace,
+  shellSingleQuoteRemotePathForSh,
   remoteWorkspaceDirExists,
   runRemoteCommand,
 } from './runRemote';
@@ -362,10 +364,21 @@ export async function runRemoteCommandWithPmHooks(options: {
   // Said once per run, before anything executes, because a variable that silently did not travel
   // produces a build with different settings and no evidence of why.
   const forwarding = buildEnvForwarding(options.prep.env);
-  const envScript = forwarding.script;
+  // `$BICA_BUILD_DIR` goes across whether or not anything is declared in `env:`: it is bica's own
+  // answer to "where does this checkout build", not one of the user's variables.
+  const buildDir = readLocalBicaSettings(repoRoot).buildDir;
+  const envScript =
+    buildDir === undefined
+      ? forwarding.script
+      : `${forwarding.script}export BICA_BUILD_DIR=${shellSingleQuoteRemotePathForSh(buildDir)}\n`;
   const envSaid = describeEnvForwarding(forwarding);
   if (envSaid !== undefined) {
     process.stderr.write(`${dim('[bica]')} ${dim(envSaid)}\n`);
+  }
+  if (buildDir !== undefined) {
+    process.stderr.write(
+      `${dim('[bica]')} ${dim(`\`$BICA_BUILD_DIR\` is ${buildDir} for this checkout.`)}\n`,
+    );
   }
 
   if (options.detachRunId !== undefined) {

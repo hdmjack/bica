@@ -102,6 +102,7 @@ function makePrep(repoRoot: string): PrepareResult {
   artifacts: [],
   toolchain: [],
   env: [],
+  cargoTargetIgnored: false,
     config: {
       sshHost: 'test-host',
       remoteWorkspacePath: '/remote/repo',

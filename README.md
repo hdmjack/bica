@@ -487,6 +487,44 @@ if it does, names the branch it is on and its newest remote-tracking ref with th
 running anything. Turn `git.sync` on, or delete the remote `.git` to get the loud failure back. The
 probe costs an ssh round-trip and only happens for those runs.
 
+## Rust checkouts
+
+Three things are handled for you.
+
+**`target/` is treated as the remote's.** It is gitignored, so a local checkout usually has none, and
+a mirror that deletes what the local side lacks would remove it between runs — making every build a
+clean build. For a repository with a `Cargo.toml` or `Cargo.lock`, bica adds `target` to the ignore
+list on your behalf. A repository that already mentions `target` is left exactly as written.
+
+**Submodules reach the remote when `git.sync` is on.** The sync ignores `.git` at every level, so a
+submodule's own `.git` — a one-line file pointing into the parent's `.git/modules` — never travelled,
+while the modules directory it names did, since that lives inside the parent `.git`. The remote ended
+up with all the data and nothing addressing it, and `git submodule status` called every submodule
+uninitialised, which is what rustc's bootstrap reads. bica now writes those pointers back after the
+`.git` copy and says how many.
+
+**A pinned toolchain is checked, not assumed.** rustup reads `rust-toolchain.toml` and installs what
+it names — true for a channel or a version, false for `rustup toolchain link blackfin
+build/host/stage1`, which exists only where it was run. `bica doctor` checks the remote has it and
+says how to link it there when it does not.
+
+One thing worth knowing rather than fixing: the cargo plugin's install preflight is `cargo fetch
+--locked`, which populates the registry cache and does not touch the rustup sysroot — so it does not
+fight `-Zbuild-std`, which builds into that sysroot.
+
+## Several checkouts, one remote build tree
+
+Sibling worktrees of one fork can share a build directory on the remote, so switching branches stays
+incremental. The lease already stops two of them using it at once; what was missing was a way to say
+where it is. In `.bica/local.yml`, which is per-machine and gitignored:
+
+```yaml
+buildDir: ~/code/llvm-blackfin/build
+```
+
+Every remote command then gets it as `$BICA_BUILD_DIR`, so `cmake -B "$BICA_BUILD_DIR"` or
+`CARGO_TARGET_DIR="$BICA_BUILD_DIR"` needs no wrapper script.
+
 ## Builds that are not a package manager
 
 Two things a cmake, ninja or `./x build` project needs that a Node repo does not.

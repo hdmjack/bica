@@ -13,6 +13,10 @@
  */
 
 import { buildLoadScript, loadIsWorthMentioning, parseLoad } from './remoteLeftovers';
+import {
+  describeMissingToolchain,
+  rustupCanInstall,
+} from './rustWorkspace';
 import { describeEntryPoint } from './entryPoint';
 import { findSyncInconsistencies } from './syncConsistency';
 
@@ -70,6 +74,8 @@ export interface DoctorProbes {
   toolingPreamble: string;
   /** Ids of the package-manager plugins active here, for the entry-point note. */
   packageManagerPluginIds?: readonly string[];
+  /** The channel named in `rust-toolchain.toml`, when there is one. */
+  pinnedToolchain?: string | null;
 }
 
 const MUTAGEN_INSTALL_HINT =
@@ -271,6 +277,35 @@ function checkRemote(probes: DoctorProbes): CheckResult[] {
     );
   }
 
+  // A pinned toolchain rustup cannot fetch for itself.
+  //
+  // The rust plugin assumes rustup reads `rust-toolchain.toml` and installs what it names, which is
+  // true for a channel or a version and false for a locally linked one. `rustup toolchain link
+  // blackfin build/host/stage1` exists only where it was run, and the remote cannot obtain it.
+  const pinned = probes.pinnedToolchain;
+  if (pinned !== undefined && pinned !== null && !rustupCanInstall(pinned)) {
+    const listed = probes.remoteScript(
+      `${probes.toolingPreamble}rustup toolchain list 2>/dev/null || true\n`,
+    );
+    const present = listed.stdout
+      .split('\n')
+      .some((line) => line.trim().split(/\s+/)[0] === pinned);
+    results.push(
+      present
+        ? {
+            name: 'Pinned toolchain',
+            status: 'ok',
+            detail: `${host} has \`${pinned}\``,
+          }
+        : {
+            name: 'Pinned toolchain',
+            status: 'problem',
+            detail: `${host} has no rustup toolchain called \`${pinned}\``,
+            fix: describeMissingToolchain({ channel: pinned, sshHost: host }),
+          },
+    );
+  }
+
   // Asked through a login shell, because that is where a version manager puts these on PATH, and
   // asking any other way answers a question nobody has.
   const tools = probes.remoteScript(
@@ -451,6 +486,8 @@ export function reportOnThisMachine(options: {
   toolchain?: readonly string[];
   /** Ids of the package-manager plugins active here. */
   packageManagerPluginIds?: readonly string[];
+  /** The channel named in `rust-toolchain.toml`, when there is one. */
+  pinnedToolchain?: string | null;
   write: (text: string) => void;
   decorate: Parameters<typeof formatReport>[1];
 }): CheckResult[] {
@@ -473,6 +510,7 @@ export function reportOnThisMachine(options: {
     syncIgnorePaths: options.syncIgnorePaths ?? [],
     toolchain: options.toolchain ?? [],
     packageManagerPluginIds: options.packageManagerPluginIds ?? [],
+    pinnedToolchain: options.pinnedToolchain ?? null,
   });
   options.write(`\nbica ${options.version} on ${process.platform}\n\n`);
   options.write(formatReport(results, options.decorate));

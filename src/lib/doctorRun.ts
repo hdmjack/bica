@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { pinnedToolchain } from './rustWorkspace';
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { resolveActivePackageManagerPlugins } from '../resolveActivePlugins';
 import chalk from 'chalk';
@@ -44,6 +45,7 @@ export function checkThisMachine(): CheckResult[] {
     syncIgnorePaths: ignorePathsOrEmpty(),
     toolchain: declaredToolchainOrEmpty(),
     packageManagerPluginIds: activePackageManagerIdsOrEmpty(),
+    pinnedToolchain: pinnedToolchainOrNull(),
     write: (text) => process.stdout.write(text),
     decorate: {
       ok: (t) => chalk.green(t),
@@ -66,6 +68,12 @@ function ignorePathsOrEmpty(): readonly string[] {
   } catch {
     return [];
   }
+}
+
+/** The toolchain `rust-toolchain.toml` pins, when this is a Rust repository that pins one. */
+function pinnedToolchainOrNull(): string | null {
+  const repoRoot = gitRootOrUndefined();
+  return repoRoot === undefined ? null : pinnedToolchain(repoRoot);
 }
 
 /** Which package-manager plugins apply here, for the install-preflight note. */

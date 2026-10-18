@@ -3,6 +3,33 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.6.0 — 2026-10-17
+
+Requests 5 and 6: the Rust-specific gaps, and a shared remote build tree.
+
+### Added
+- **`target/` is ignored by default for a Rust repository.** It is gitignored, so the local checkout
+  usually has none, and the mirror deleted it between runs — every build a clean build. A repository
+  that already mentions `target` is left exactly as written.
+- **Submodules reach the remote when `git.sync` is on.** The sync ignores `.git` at every level, so a
+  submodule's own `.git` — a one-line file naming a path in the parent's `.git/modules` — never
+  travelled, while the modules directory it points at did, since that lives inside the parent `.git`.
+  The remote held all the data with nothing addressing it, and `git submodule status` reported every
+  submodule uninitialised, which is exactly what rustc's bootstrap reads. Verified both ways against
+  a real submodule: `-<sha> vendor/inner` without the pointer, ` <sha> vendor/inner (heads/main)`
+  with it.
+- **`bica doctor` checks a pinned toolchain the remote cannot fetch.** rustup installs what
+  `rust-toolchain.toml` names, which holds for a channel or a version and not for `rustup toolchain
+  link blackfin build/host/stage1` — that exists only where it was run. The check says how to link it
+  on the remote.
+- **`buildDir:` in `.bica/local.yml`**, exported to every remote command as `$BICA_BUILD_DIR`, so
+  sibling worktrees can share one remote build tree without a wrapper script. Per-machine, because it
+  is a fact about this machine's layout and not about the repository.
+
+### Notes
+- The cargo plugin's install preflight is `cargo fetch --locked`, which fills the registry cache and
+  does not touch the rustup sysroot, so it does not fight `-Zbuild-std`.
+
 ## 0.5.0 — 2026-10-17
 
 Request 4: commands that are not a package manager.

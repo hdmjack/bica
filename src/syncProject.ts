@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process';
+import { withCargoTargetIgnored } from './lib/rustWorkspace';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -47,6 +48,8 @@ export interface SyncSpecYaml {
   toolchain?: string[];
   /** Names of local environment variables to forward to every remote command. */
   env?: string[];
+  /** Whether bica added `target` to the ignore list because this looks like a Rust repository. */
+  cargoTargetIgnored?: boolean;
   /**
    * The user's configured `sync.ignore.paths`, *before* the return-flow patterns are merged in.
    * These name trees each side owns independently (node_modules, dist, …); return-flow must not
@@ -204,12 +207,16 @@ export function normalizeToSyncSpecYaml(
     }
     const sessionName = keys[0];
     const session = syncObj[sessionName] as WorkspaceSyncSession;
+    const sessionIgnore = withCargoTargetIgnored(
+      repoRoot,
+      session.ignore?.paths ?? [],
+    );
     return {
       sync: {
-        [sessionName]: applyReturnFlowToSession(session, [
-          ...returnFlow.paths,
-          ...generated.paths,
-        ]),
+        [sessionName]: applyReturnFlowToSession(
+          { ...session, ignore: { paths: sessionIgnore.paths } },
+          [...returnFlow.paths, ...generated.paths],
+        ),
       },
       returnFlow,
       generated,
@@ -217,8 +224,9 @@ export function normalizeToSyncSpecYaml(
       toolchain,
       env,
       syncIgnorePaths: [
-        ...new Set([...(session.ignore?.paths ?? []), ...generated.paths]),
+        ...new Set([...sessionIgnore.paths, ...generated.paths]),
       ],
+      cargoTargetIgnored: sessionIgnore.added,
     };
   }
 
@@ -237,6 +245,10 @@ export function normalizeToSyncSpecYaml(
       ignore = { paths };
     }
   }
+  const flatIgnore = withCargoTargetIgnored(repoRoot, ignore?.paths ?? []);
+  if (flatIgnore.added) {
+    ignore = { paths: flatIgnore.paths };
+  }
 
   return {
     sync: {
@@ -253,7 +265,8 @@ export function normalizeToSyncSpecYaml(
     artifacts,
     toolchain,
     env,
-    syncIgnorePaths: [...new Set([...(ignore?.paths ?? []), ...generated.paths])],
+    syncIgnorePaths: [...new Set([...flatIgnore.paths, ...generated.paths])],
+    cargoTargetIgnored: flatIgnore.added,
   };
 }
 
@@ -576,6 +589,8 @@ export interface PrepareResult {
   toolchain: string[];
   /** Local environment variables forwarded to every remote command. */
   env: string[];
+  /** Whether `target` was added to the ignore list on this repo's behalf. */
+  cargoTargetIgnored: boolean;
   config: RemoteEnvConfig;
 }
 
@@ -673,6 +688,7 @@ export function prepareSyncProjectFile(options: {
     artifacts: doc.artifacts ?? [],
     toolchain: doc.toolchain ?? [],
     env: doc.env ?? [],
+    cargoTargetIgnored: doc.cargoTargetIgnored ?? false,
     config,
   };
 }
