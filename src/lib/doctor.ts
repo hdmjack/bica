@@ -13,6 +13,7 @@
  */
 
 import { buildLoadScript, loadIsWorthMentioning, parseLoad } from './remoteLeftovers';
+import { describeEntryPoint } from './entryPoint';
 import { findSyncInconsistencies } from './syncConsistency';
 
 export type CheckStatus = 'ok' | 'problem' | 'warning' | 'skipped';
@@ -50,6 +51,13 @@ export interface DoctorProbes {
   bicaIsGitignored: boolean | undefined;
   /** What this repository keeps off the remote, for the companion-file check. */
   syncIgnorePaths: readonly string[];
+  /**
+   * Tools this repository declares it needs on the remote (`toolchain:` in bica.yml).
+   *
+   * Checked here rather than discovered by a run, which is the whole point: a missing `ninja` shows
+   * up as exit 127 forty minutes into a build, under a command that looks like it failed.
+   */
+  toolchain?: readonly string[];
   /** The login shell bica will ask the remote for. */
   loginShell: string;
   /**
@@ -60,6 +68,8 @@ export interface DoctorProbes {
    * PATH by this preamble rather than by the remote's own login files.
    */
   toolingPreamble: string;
+  /** Ids of the package-manager plugins active here, for the entry-point note. */
+  packageManagerPluginIds?: readonly string[];
 }
 
 const MUTAGEN_INSTALL_HINT =
@@ -96,6 +106,24 @@ function checkLocalTool(
     status: options.required ? 'problem' : 'warning',
     detail: 'not found on PATH',
     fix: options.fix,
+  };
+}
+
+/**
+ * Say whether an install preflight applies here, rather than leaving it to be discovered.
+ *
+ * Always `ok`: neither answer is a problem. A cmake or script-driven project is not misconfigured
+ * for having no package manager, and the point is to state which world this repository is in.
+ */
+function checkEntryPoint(probes: DoctorProbes): CheckResult {
+  const { detail, note } = describeEntryPoint({
+    activePluginIds: probes.packageManagerPluginIds ?? [],
+  });
+  return {
+    name: 'Install preflight',
+    status: 'ok',
+    detail,
+    ...(note === undefined ? {} : { fix: note }),
   };
 }
 
@@ -215,6 +243,34 @@ function checkRemote(probes: DoctorProbes): CheckResult[] {
         },
   );
 
+  // The repository's own declared tools, asked the same way and in the same round trip spirit as the
+  // built-in ones below.
+  const declared = (probes.toolchain ?? []).filter((t) => t.length > 0);
+  if (declared.length > 0) {
+    const probe = probes.remoteScript(
+      `${probes.toolingPreamble}for t in ${declared.join(' ')}; do command -v "$t" >/dev/null 2>&1 && echo "HAVE $t" || echo "MISS $t"; done\n`,
+    );
+    const absent = probe.stdout
+      .split('\n')
+      .filter((line) => line.startsWith('MISS '))
+      .map((line) => line.slice('MISS '.length).trim())
+      .filter((t) => t.length > 0);
+    results.push(
+      absent.length === 0
+        ? {
+            name: 'Declared toolchain',
+            status: 'ok',
+            detail: `${declared.join(', ')} are on PATH`,
+          }
+        : {
+            name: 'Declared toolchain',
+            status: 'problem',
+            detail: `${host} has no ${absent.join(', ')}`,
+            fix: `Install ${absent.join(', ')} on ${host}. Without it a run fails with 127 part-way through, which reads as the command failing.`,
+          },
+    );
+  }
+
   // Asked through a login shell, because that is where a version manager puts these on PATH, and
   // asking any other way answers a question nobody has.
   const tools = probes.remoteScript(
@@ -308,6 +364,7 @@ export function runChecks(probes: DoctorProbes): CheckResult[] {
       required: true,
     }),
     checkConfig(probes),
+    checkEntryPoint(probes),
     checkSyncConsistency(probes),
     checkGitignore(probes),
     ...checkRemote(probes),
@@ -390,6 +447,10 @@ export function reportOnThisMachine(options: {
   isGitignored: (repoRoot: string) => boolean;
   /** What this repository keeps off the remote; absent when there is no config to read. */
   syncIgnorePaths?: readonly string[];
+  /** Tools this repository declares it needs on the remote; absent when there is no config. */
+  toolchain?: readonly string[];
+  /** Ids of the package-manager plugins active here. */
+  packageManagerPluginIds?: readonly string[];
   write: (text: string) => void;
   decorate: Parameters<typeof formatReport>[1];
 }): CheckResult[] {
@@ -410,6 +471,8 @@ export function reportOnThisMachine(options: {
     loginShell: process.env.BICA_LOGIN_SHELL?.trim() ?? 'zsh',
     toolingPreamble: options.toolingPreamble,
     syncIgnorePaths: options.syncIgnorePaths ?? [],
+    toolchain: options.toolchain ?? [],
+    packageManagerPluginIds: options.packageManagerPluginIds ?? [],
   });
   options.write(`\nbica ${options.version} on ${process.platform}\n\n`);
   options.write(formatReport(results, options.decorate));

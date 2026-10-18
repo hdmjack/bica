@@ -100,6 +100,8 @@ function makePrep(repoRoot: string): PrepareResult {
     generatedCommand: undefined,
     syncIgnorePaths: [],
   artifacts: [],
+  toolchain: [],
+  env: [],
     config: {
       sshHost: 'test-host',
       remoteWorkspacePath: '/remote/repo',

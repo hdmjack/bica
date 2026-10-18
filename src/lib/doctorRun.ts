@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
+import { resolveActivePackageManagerPlugins } from '../resolveActivePlugins';
 import chalk from 'chalk';
 
 import { doctorContextForThisRepo, reportOnThisMachine } from './doctor';
@@ -40,6 +42,8 @@ export function checkThisMachine(): CheckResult[] {
     runRemote: runRemoteScriptOverStdin,
     isGitignored: bicaIsGitignored,
     syncIgnorePaths: ignorePathsOrEmpty(),
+    toolchain: declaredToolchainOrEmpty(),
+    packageManagerPluginIds: activePackageManagerIdsOrEmpty(),
     write: (text) => process.stdout.write(text),
     decorate: {
       ok: (t) => chalk.green(t),
@@ -59,6 +63,31 @@ export function checkThisMachine(): CheckResult[] {
 function ignorePathsOrEmpty(): readonly string[] {
   try {
     return prepareSyncProjectFile({ verbose: false }).syncIgnorePaths;
+  } catch {
+    return [];
+  }
+}
+
+/** Which package-manager plugins apply here, for the install-preflight note. */
+function activePackageManagerIdsOrEmpty(): readonly string[] {
+  try {
+    const repoRoot = gitRootOrUndefined();
+    if (repoRoot === undefined) {
+      return [];
+    }
+    return resolveActivePackageManagerPlugins(
+      repoRoot,
+      resolveBicaPluginConfig(repoRoot),
+    ).map((p) => p.id);
+  } catch {
+    return [];
+  }
+}
+
+/** The repository's declared `toolchain:`, or nothing when there is no readable spec. */
+function declaredToolchainOrEmpty(): readonly string[] {
+  try {
+    return prepareSyncProjectFile({ verbose: false }).toolchain;
   } catch {
     return [];
   }

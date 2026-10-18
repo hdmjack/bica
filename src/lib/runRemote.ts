@@ -859,6 +859,8 @@ export function buildRemoteCommandScript(options: {
   remoteWorkspacePath: string;
   command: string;
   repoRoot: string;
+  /** Shell lines exporting forwarded environment; see envPassthrough.ts. */
+  envScript?: string;
   dieWithConnection?: boolean;
   assertRunId?: string;
   claimPathExpr?: string;
@@ -882,7 +884,9 @@ export function buildRemoteCommandScript(options: {
     'fi',
   );
   return buildRemoteRunScript({
-    preamble: `${toolingPreamble}${nonMiseFallbacks}`,
+    // After the tooling preamble, so a forwarded variable wins over anything the preamble set: the
+    // point of declaring one is to decide this run's settings.
+    preamble: `${toolingPreamble}${nonMiseFallbacks}${options.envScript ?? ''}`,
     cdExpr: cd,
     command:
       options.dieWithConnection === true
@@ -900,6 +904,8 @@ export async function runRemoteCommand(
   command: string,
   repoRoot: string,
   options?: {
+    /** Shell lines exporting the environment this repo declares; see envPassthrough.ts. */
+    envScript?: string;
     /** Run id of the lease this run holds, for the end-of-run confirmation. */
     assertRunId?: string;
     /** Shell expression for that lease's file. */
@@ -942,6 +948,7 @@ export async function runRemoteCommand(
     remoteWorkspacePath,
     command,
     repoRoot,
+    envScript: options?.envScript,
     dieWithConnection,
     assertRunId: options?.assertRunId,
     claimPathExpr: options?.claimPathExpr,

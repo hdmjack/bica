@@ -3,6 +3,24 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.5.0 — 2026-10-17
+
+Request 4: commands that are not a package manager.
+
+### Added
+- **`toolchain:`** — tools the remote must have, checked by `bica doctor` with the same PATH a run
+  uses. A missing `ninja` was exit 127 forty minutes into a build, under a command that read as
+  having failed; it is now one line before anything starts.
+- **`env:`** — local environment variables forwarded to every remote command, by name. ssh forwards
+  nothing by default, so a `RUSTFLAGS` set for the occasion was absent on the other side and the
+  build used different settings with nothing to say so. Never wholesale: copying the environment
+  would carry credentials, `PATH` and `HOME` into a remote login shell. A declared variable that is
+  unset locally stays unset remotely rather than becoming empty — the two mean different things to
+  cargo and cmake alike — and variables describing this machine are refused with a line saying why.
+- **`bica doctor` states whether an install preflight applies.** It matches the first word of the
+  command, so a script entry point such as `./x build` gets none. That was already true and was only
+  discoverable by noticing it had not happened.
+
 ## 0.4.0 — 2026-10-17
 
 Request 3 of the large-compiled-projects set: runs that outlast the caller.

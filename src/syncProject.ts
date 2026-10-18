@@ -43,6 +43,10 @@ export interface SyncSpecYaml {
    * return-flow these are not patterns and are not mirrored; see `artifacts.ts`.
    */
   artifacts?: string[];
+  /** Tools the remote must have on PATH for this repo's commands; checked by `bica doctor`. */
+  toolchain?: string[];
+  /** Names of local environment variables to forward to every remote command. */
+  env?: string[];
   /**
    * The user's configured `sync.ignore.paths`, *before* the return-flow patterns are merged in.
    * These name trees each side owns independently (node_modules, dist, …); return-flow must not
@@ -189,6 +193,8 @@ export function normalizeToSyncSpecYaml(
   const returnFlow = parseReturnFlow(doc.returnFlow, sourceLabel);
   const generated = parseGenerated(doc.generated, sourceLabel);
   const artifacts = parseArtifacts(doc.artifacts, sourceLabel);
+  const toolchain = parseNameList(doc.toolchain, 'toolchain', sourceLabel);
+  const env = parseNameList(doc.env, 'env', sourceLabel);
 
   if (!looksLikeFlatSync && allValuesArePlainObjects) {
     if (keys.length !== 1) {
@@ -208,6 +214,8 @@ export function normalizeToSyncSpecYaml(
       returnFlow,
       generated,
       artifacts,
+      toolchain,
+      env,
       syncIgnorePaths: [
         ...new Set([...(session.ignore?.paths ?? []), ...generated.paths]),
       ],
@@ -243,6 +251,8 @@ export function normalizeToSyncSpecYaml(
     returnFlow,
     generated,
     artifacts,
+    toolchain,
+    env,
     syncIgnorePaths: [...new Set([...(ignore?.paths ?? []), ...generated.paths])],
   };
 }
@@ -270,6 +280,45 @@ function parseReturnFlow(
   }
   const paths = pathsUnknown.filter((x): x is string => typeof x === 'string');
   return { paths };
+}
+
+/**
+ * Parse a plain list of names (`toolchain:`, `env:`) from the spec root.
+ *
+ * Both are lists of bare identifiers rather than paths, and both are absent by default: bica cannot
+ * guess what a repository builds with, and checking for tools nobody declared would turn `doctor`
+ * into noise.
+ */
+function parseNameList(
+  raw: unknown,
+  key: string,
+  sourceLabel: string,
+): string[] {
+  if (raw === undefined) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error(`${sourceLabel}: ${key}: must be a list of names.`);
+  }
+  const names: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== 'string') {
+      throw new Error(`${sourceLabel}: ${key}: must be a list of names.`);
+    }
+    const trimmed = entry.trim();
+    if (trimmed === '') {
+      continue;
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_.+-]*$/.test(trimmed)) {
+      // These end up in a remote shell -- as `command -v <name>` or as `export NAME=...` -- so a
+      // name with a space or a quote in it would be a hole rather than a typo.
+      throw new Error(
+        `${sourceLabel}: ${key}: ${entry} is not a plain name.`,
+      );
+    }
+    names.push(trimmed);
+  }
+  return names;
 }
 
 /**
@@ -523,6 +572,10 @@ export interface PrepareResult {
   syncIgnorePaths: string[];
   /** Named outputs copied home after a run; see artifacts.ts. Empty list = feature off. */
   artifacts: string[];
+  /** Tools the remote must have on PATH, checked by `bica doctor`. */
+  toolchain: string[];
+  /** Local environment variables forwarded to every remote command. */
+  env: string[];
   config: RemoteEnvConfig;
 }
 
@@ -618,6 +671,8 @@ export function prepareSyncProjectFile(options: {
     generatedCommand: doc.generated?.command,
     syncIgnorePaths: doc.syncIgnorePaths,
     artifacts: doc.artifacts ?? [],
+    toolchain: doc.toolchain ?? [],
+    env: doc.env ?? [],
     config,
   };
 }

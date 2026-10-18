@@ -1,6 +1,7 @@
 import { resolveBicaPluginConfig } from '../bicaWorkspaceConfig';
 import { CONNECTION_LOST_EXIT } from './connectionLoss';
 import { launchDetachedRun } from './detachedRun';
+import { buildEnvForwarding, describeEnvForwarding } from './envPassthrough';
 import { claimPathExpr } from './remoteClaim';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
 import { remoteMissingGeneratedPaths } from './generatedPaths';
@@ -358,6 +359,15 @@ export async function runRemoteCommandWithPmHooks(options: {
     }
   }
 
+  // Said once per run, before anything executes, because a variable that silently did not travel
+  // produces a build with different settings and no evidence of why.
+  const forwarding = buildEnvForwarding(options.prep.env);
+  const envScript = forwarding.script;
+  const envSaid = describeEnvForwarding(forwarding);
+  if (envSaid !== undefined) {
+    process.stderr.write(`${dim('[bica]')} ${dim(envSaid)}\n`);
+  }
+
   if (options.detachRunId !== undefined) {
     // Everything above has already happened attached: the workspace is there, the install preflight
     // has run, generated paths have been repaired. Only the command itself is let go of, which is the
@@ -367,6 +377,7 @@ export async function runRemoteCommandWithPmHooks(options: {
       remoteWorkspacePath: config.remoteWorkspacePath,
       repoRoot,
       command: cmdStr,
+      envScript,
       argv: options.remoteArgv,
       runId: options.detachRunId,
       claimPathExpr: options.claimPathExpr ?? claimPathExpr(config.remoteWorkspacePath),
@@ -399,7 +410,11 @@ export async function runRemoteCommandWithPmHooks(options: {
           config.remoteWorkspacePath,
           cmdStr,
           repoRoot,
-          { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
+          {
+            assertRunId: options.assertRunId,
+            claimPathExpr: options.claimPathExpr,
+            envScript,
+          },
         );
 
   // Said once, after the command, and only when there is something to say.

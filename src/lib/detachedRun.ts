@@ -259,6 +259,8 @@ export function launchDetachedRun(options: {
   repoRoot: string;
   /** POSIX-quoted command, as `runRemoteCommand` takes it. */
   command: string;
+  /** Shell lines exporting forwarded environment; see envPassthrough.ts. */
+  envScript?: string;
   /** The user's argv, recorded so `bica runs` can show what is going. */
   argv: string[];
   runId: string;
@@ -270,6 +272,7 @@ export function launchDetachedRun(options: {
     remoteWorkspacePath: options.remoteWorkspacePath,
     command: options.command,
     repoRoot: options.repoRoot,
+    envScript: options.envScript,
     // Never: the command must outlive the connection that started it. That watchdog is the exact
     // thing that makes a 50-minute build impossible to launch from a caller that times out at ten.
     dieWithConnection: false,

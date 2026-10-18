@@ -487,6 +487,30 @@ if it does, names the branch it is on and its newest remote-tracking ref with th
 running anything. Turn `git.sync` on, or delete the remote `.git` to get the loud failure back. The
 probe costs an ssh round-trip and only happens for those runs.
 
+## Builds that are not a package manager
+
+Two things a cmake, ninja or `./x build` project needs that a Node repo does not.
+
+```yaml
+toolchain: [cmake, ninja, ccache, cargo, rustup]
+env: [RUSTFLAGS, CARGO_TARGET_DIR]
+```
+
+`toolchain:` names what the remote must have on PATH, and `bica doctor` checks it there using the
+same PATH a run gets — so a missing `ninja` is one line before you start rather than exit 127 forty
+minutes into a build, under a command that looks like it failed.
+
+`env:` names local environment variables to forward to every remote command. ssh forwards nothing by
+default, so without this a `RUSTFLAGS` set for the occasion is simply absent on the other side and
+the build quietly uses different settings. By name and never wholesale: copying the environment
+across would carry credentials, `PATH` and `HOME` into a remote login shell. A declared variable that
+is not set locally stays unset remotely rather than becoming empty, and the variables that describe
+this machine are refused with a line saying so.
+
+`bica doctor` also states whether an install preflight applies here at all. It matches on the first
+word of the command, so a script entry point like `./x build` gets none — correct, and previously
+something you had to work out from its absence.
+
 ## Runs that outlast the caller
 
 An agent's tool call times out after ten minutes, a CI step often sooner, and bica ends a remote
