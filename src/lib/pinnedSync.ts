@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
 import { workingTreeOid } from './contentIdentity';
+import { parseTransferredPaths } from './syncedMtimes';
 import { dim, warn } from '../terminalStyle';
 
 /**
@@ -96,6 +97,12 @@ export interface PinnedPushResult {
   treeOidAfter?: string;
   /** Paths the push removed from the remote workspace. */
   deleted: string[];
+  /**
+   * Regular files the push sent, for the mtime repair in `syncedMtimes.ts`.
+   *
+   * Taken from the same itemised output the deletions come from, so it costs nothing extra.
+   */
+  transferred: string[];
 }
 
 /** Pull the `*deleting <path>` lines out of itemised rsync output. */
@@ -184,14 +191,20 @@ export function pushPinnedWorkingTree(options: {
     process.stderr.write(
       `${warn('[bica]')} ${dim(`pinned sync rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
     );
-    return { ok: false, treeOidBefore: before ?? undefined, deleted: [] };
+    return {
+      ok: false,
+      treeOidBefore: before ?? undefined,
+      deleted: [],
+      transferred: [],
+    };
   }
 
   // An immutable source needs no re-check, and a checkout git cannot describe gets no content name —
   // in neither case is there a comparison to fail.
   const deleted = parseDeletedPaths(result.stdout ?? '');
+  const transferred = parseTransferredPaths(result.stdout ?? '');
   if (options.knownTreeOid !== undefined || !isLiveTree || before === null) {
-    return { ok: true, treeOidBefore: before ?? undefined, deleted };
+    return { ok: true, treeOidBefore: before ?? undefined, deleted, transferred };
   }
 
   const after = workingTreeOid(options.repoRoot);
@@ -201,6 +214,7 @@ export function pushPinnedWorkingTree(options: {
       treeOidBefore: before,
       treeOidAfter: after ?? undefined,
       deleted,
+      transferred,
     };
   }
   return {
@@ -209,5 +223,6 @@ export function pushPinnedWorkingTree(options: {
     treeOidBefore: before,
     treeOidAfter: after ?? undefined,
     deleted,
+    transferred,
   };
 }

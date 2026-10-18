@@ -549,6 +549,30 @@ this machine are refused with a line saying so.
 word of the command, so a script entry point like `./x build` gets none — correct, and previously
 something you had to work out from its absence.
 
+## Timestamps, and the object that is newer than its source
+
+A sync preserves each file's local mtime. That is right for a tree nobody is building, and wrong the
+moment the remote owns a build directory: a file edited at 23:40 while a long build is running
+arrives on the remote still stamped 23:40, and the object that build compiled at 23:51 from the
+*previous* copy is newer than it. ninja, make and cargo's mtime fingerprinting all compare exactly
+those two numbers, so they skip the file — not once, but on every run after it. The build then
+reports success over an artifact that does not contain the edit.
+
+A pinned run — `--detach`, `--write-back`, `--ref` — stamps the files it delivered with the remote's
+own clock, so they are newer than every object in the tree. Only those files: touching anything else
+would rebuild work that is still good. Only files whose content changed, too, because stamping
+breaks rsync's quick check and a file re-sent purely because bica stamped it must not be stamped
+again — otherwise every stamped file rebuilds on every run for ever. The repair settles after one
+extra transfer.
+
+An ordinary `bica run` uses the live session, which has no list of what it delivered and so cannot do
+this. For a project with `artifacts:`, `toolchain:`, `buildDir:` or a Rust `target/`, bica says so on
+every such run rather than leaving the hazard silent.
+
+One known limit: an edit that leaves the file's exact size unchanged looks the same to rsync as
+bica's own stamp, so one made to a file stamped on the immediately preceding run is skipped. If a
+build ever skips something it should have rebuilt, `touch` the file and run again.
+
 ## Runs that outlast the caller
 
 An agent's tool call times out after ten minutes, a CI step often sooner, and bica ends a remote

@@ -24,7 +24,13 @@ import {
 } from './runRemote';
 import { reportGitDependentHint } from './reportGitHint';
 import { warnAboutStaleRemoteGit } from './staleRemoteGit';
+import { readLocalBicaSettings } from '../localBicaSettings';
 import { pushPinnedWorkingTree } from './pinnedSync';
+import {
+  describeMtimeRepair,
+  repairSyncedMtimes,
+  wantsMtimeRepair,
+} from './syncedMtimes';
 import { remoteTrustMiseWorkspace } from './runRemote';
 import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
 import { reportArtifactPull } from './reportArtifacts';
@@ -325,6 +331,25 @@ export async function runPinned(options: {
   const runId = options.owner.runId;
 
   warnAboutDeletedGeneratedFiles(prep.repoRoot, push.deleted);
+
+  // Before the command, not after: a build tool compares the source it is about to read against the
+  // object it already has, so the stamp has to be in place by the time it looks.
+  if (
+    wantsMtimeRepair({
+      ...prep,
+      buildDir: readLocalBicaSettings(prep.repoRoot).buildDir,
+    })
+  ) {
+    const repaired = repairSyncedMtimes({
+      sshHost: prep.config.sshHost,
+      remoteWorkspacePath: prep.config.remoteWorkspacePath,
+      paths: push.transferred,
+    });
+    const said = describeMtimeRepair(repaired);
+    if (said !== undefined) {
+      process.stderr.write(`${dim('[bica]')} ${dim(said)}\n`);
+    }
+  }
 
   // The tree (and so `mise.toml`) is on the remote now, which is what `mise trust` needs to see.
   if (dirReady.created) {
