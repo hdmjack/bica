@@ -3,6 +3,61 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.6.5 — 2026-10-19
+
+### Fixed
+- **`bica tunnel --detach` detaches again.** It had started the tunnel in the foreground instead,
+  since 0.4.0. The CLI lifts a few flags out of the whole command line before it chooses a
+  subcommand — `bica run --detach` needs its flag read from after the subcommand — and `--detach`
+  joined that set when detached runs shipped. The token was therefore removed before `tunnel` could
+  read it, and `tunnel` saw a plain foreground request.
+
+  The symptom was hard to read, because every visible sign pointed somewhere else. The command never
+  returned, so anything after it in the same shell never ran. Its log stayed empty, because a
+  foreground tunnel writes to the terminal — and a terminal behind `| tail` shows nothing until the
+  process ends, which it never did. `tunnel --list` reported the tunnel up and ready, because a
+  foreground tunnel writes the same record a detached one does. The natural reading was that a
+  previous tunnel's state was being reused; nothing of the sort was happening.
+
+  Affects `--detach` on `tunnel` only. `bica run --detach` was always correct.
+
+## 0.6.4 — 2026-10-19
+
+### Fixed
+- **A large pinned sync no longer fails as a transfer error.** rsync's itemised listing is one line
+  per file considered, so mirroring a large tree runs to megabytes — 11 MB for an LLVM checkout.
+  Node kills a subprocess whose output passes 1 MiB, and rsync's signal handler exits 20, which bica
+  reported as a failed transfer that had in fact completed. Output is now read in full, and an
+  overflow is named as a bug in bica rather than a failure of the transfer.
+
+## 0.6.3 — 2026-10-19
+
+### Fixed
+- **`bica doctor` asks git whether `.bica/` is ignored** instead of reading `.gitignore` itself, so
+  an entry in `.git/info/exclude`, a parent directory's `.gitignore` or `core.excludesFile` now
+  counts. It had been reporting a repository as unconfigured when the exclusion was real but
+  written somewhere it did not look.
+
+## 0.6.2 — 2026-10-19
+
+### Fixed
+- **`bica wait` survives a probe that could not run.** An unreachable host made it report the run as
+  gone and discard the record. It now says the host is unreachable, keeps polling, and leaves the
+  record alone, so a laptop that loses wifi mid-build does not lose the build.
+- **Files the sync delivers are stamped, so a build cannot skip an edit made during a run.** A file
+  edited while a run was out could land on the remote older than the object built from its previous
+  contents, and the next build would skip it. Only content changes are stamped; a file whose
+  timestamp alone differs is left alone, because stamping those defeats rsync's own quick check and
+  makes every later run re-transfer them.
+
+## 0.6.1 — 2026-10-19
+
+### Fixed
+- **The note about remote git history no longer appears under an ordinary test failure.** It was
+  printed after any failing run, where it is advice about a situation that is usually not the one
+  the caller is in. It now appears only when the command actually reads git history and the remote
+  turns out not to have it.
+
 ## 0.6.0 — 2026-10-17
 
 Requests 5 and 6: the Rust-specific gaps, and a shared remote build tree.

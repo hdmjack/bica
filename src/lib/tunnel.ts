@@ -109,7 +109,10 @@ function requireValue(flag: string, token: string): string {
  * boundary that has to be inferred is one that can be inferred wrongly -- `bica run` makes the same
  * trade, where everything after the subcommand is argv and nothing else.
  */
-export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
+export function parseTunnelArgs(
+  tail: readonly string[],
+  options: { detachedByGlobals?: boolean } = {},
+): TunnelArgs {
   const separator = tail.indexOf('--');
   if (separator === -1) {
     throw new Error(
@@ -126,7 +129,18 @@ export function parseTunnelArgs(tail: readonly string[]): TunnelArgs {
   let remoteSocket: string | undefined;
   let readyTimeoutSeconds = DEFAULT_READY_TIMEOUT_SECONDS;
   let restart: RestartMode = 'never';
-  let detach = false;
+  // `--detach` may never reach this function. The CLI lifts a few flags out of the whole command
+  // line before it picks a subcommand -- `bica run --detach` needs them read from after the
+  // subcommand -- and `--detach` joined that set when detached runs shipped. From that release on,
+  // the token was stripped here before the tunnel could see it, so `tunnel --detach` quietly became
+  // a foreground tunnel: it bound the socket, printed "Tunnel up" to a terminal nobody was reading,
+  // and never returned. `--list` still showed it ready, because a foreground tunnel writes the same
+  // record a detached one does, which is why the symptom looked like state left over from an
+  // earlier tunnel rather than a missing flag.
+  //
+  // Passed in rather than pushed back onto `tail`, because the only safe place to re-insert it is
+  // before `--`, and getting that wrong appends `--detach` to the command that runs on the remote.
+  let detach = options.detachedByGlobals ?? false;
   let readyWhen: RegExp | undefined;
 
   for (const token of flags) {

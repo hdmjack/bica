@@ -728,7 +728,10 @@ async function detachTunnel(args: TunnelArgs): Promise<void> {
  * happens on the remote. That is the whole point of forwarding the socket rather than a port -- no
  * caller has to learn a host.
  */
-async function cmdTunnel(tail: string[]): Promise<void> {
+async function cmdTunnel(
+  tail: string[],
+  options: { detachedByGlobals: boolean },
+): Promise<void> {
   if (tail.length === 1 && tail[0] === '--list') {
     cmdTunnelList();
     return;
@@ -762,7 +765,9 @@ async function cmdTunnel(tail: string[]): Promise<void> {
     return;
   }
 
-  const args = parseTunnelArgs(tail);
+  const args = parseTunnelArgs(tail, {
+    detachedByGlobals: options.detachedByGlobals,
+  });
 
   // One tunnel per local socket. Two of them bind the same path in turn, so the second silently
   // takes the first's clients while the first keeps a remote server alive for nobody -- which is
@@ -1407,7 +1412,7 @@ async function main(): Promise<void> {
         cmdDoctor();
         break;
       case 'tunnel':
-        await cmdTunnel(tail);
+        await cmdTunnel(tail, { detachedByGlobals: globals.detach });
         break;
       case 'cancel': {
         const force = tail.includes('--force');

@@ -14,6 +14,54 @@ import {
   localSocketObstruction,
   parseTunnelArgs,
 } from './tunnel';
+import { parseArgs } from '../cliArgs';
+
+describe('parseTunnelArgs and the global flag parser together', () => {
+  // The regression this guards: `parseArgs` lifts `--detach` out of the whole command line for
+  // `bica run --detach`, so the tunnel's own parser never saw the token and started a foreground
+  // tunnel that could not return. Both halves are asserted here rather than in two files, because
+  // each half was individually correct -- only the seam was wrong.
+  const tunnelArgv = [
+    'tunnel',
+    '--local=/tmp/a.sock',
+    '--remote=/srv/b.sock',
+    '--restart=on-demand',
+    '--detach',
+    '--',
+    'serve',
+  ];
+
+  it('loses --detach from the argv the tunnel command is handed', () => {
+    const globals = parseArgs(tunnelArgv);
+    expect(globals.detach).toBe(true);
+    expect(globals.rest).not.toContain('--detach');
+  });
+
+  it('still detaches, because the global parser passes the flag on', () => {
+    const globals = parseArgs(tunnelArgv);
+    const args = parseTunnelArgs(globals.rest.slice(1), {
+      detachedByGlobals: globals.detach,
+    });
+    expect(args.detach).toBe(true);
+    // The command bound for the remote must not have grown a flag on the way through.
+    expect(args.remoteArgv).toEqual(['serve']);
+  });
+
+  it('does not detach a tunnel nobody asked to detach', () => {
+    const globals = parseArgs([
+      'tunnel',
+      '--local=/tmp/a.sock',
+      '--remote=/srv/b.sock',
+      '--',
+      'serve',
+    ]);
+    expect(
+      parseTunnelArgs(globals.rest.slice(1), {
+        detachedByGlobals: globals.detach,
+      }).detach,
+    ).toBe(false);
+  });
+});
 
 describe('parseTunnelArgs', () => {
   it('splits its own flags from the remote argv at `--`', () => {
