@@ -1,16 +1,60 @@
 # bica
 
-**bica** runs your commands on a remote machine as if they were local: it mirrors the repository
-there, runs the command, and streams the output back. A test suite that takes your laptop's fans to
-maximum runs on the big machine under your desk instead, and you keep typing.
+### Run your commands on a machine that isn't your laptop.
+
+[![license MIT](https://img.shields.io/badge/license-MIT-f4c430?style=flat-square)](LICENSE)
+[![Node 22+](https://img.shields.io/badge/node-%E2%89%A522-339933?style=flat-square&logo=nodedotjs&logoColor=white)](#requirements)
+[![latest tag](https://img.shields.io/github/v/tag/hdmjack/bica?style=flat-square&label=latest&color=5c4ee5)](CHANGELOG.md)
+
+[Install](#install) · [Quick start](#quick-start) · [`bica doctor`](#when-something-is-wrong-bica-doctor) · [Troubleshooting](#troubleshooting) · [Compiled projects](#builds-that-are-not-a-package-manager) · [Long builds](#runs-that-outlast-the-caller) · [`bica tunnel`](#bica-tunnel--a-process-that-stays-reachable-at-a-local-path)
 
 ```bash
 bica run pnpm test          # on the remote, against this exact tree
 ```
 
+**bica** mirrors the repository to a machine you can already `ssh` into, runs the command there, and
+streams the output back. A test suite that takes your laptop's fans to maximum runs on the big
+machine under your desk instead, and you keep typing.
+
+```
+  your laptop                                    the remote
+ ┌───────────────┐                              ┌───────────────┐
+ │ your checkout │ ──── sync (rsync/mutagen) ─► │ workspace     │
+ │               │                              │  + build/     │
+ │ output        │ ◄──── streamed, live ─────── │    it owns    │
+ │ artifacts     │ ◄──── pulled when done ───── │               │
+ └───────────────┘                              └───────────────┘
+            the workspace is leased for the whole run
+```
+
 Configuration lives in `bica.yml` at the repository root (shared) and `.bica/local.yml` (yours,
 gitignored). Run `bica init` to create both. Background and measurements are in
 [docs/research.md](docs/research.md).
+
+<details>
+<summary><strong>All sections</strong></summary>
+
+[What it is, and what it is not](#what-it-is-and-what-it-is-not) ·
+[Requirements](#requirements) ·
+[Install](#install) ·
+[Quick start](#quick-start) ·
+[`bica doctor`](#when-something-is-wrong-bica-doctor) ·
+[Sharing a remote machine](#sharing-a-remote-machine) ·
+[`bica run`](#bica-run) ·
+[Troubleshooting](#troubleshooting) ·
+[Platform support](#platform-support) ·
+[Rust checkouts](#rust-checkouts) ·
+[One remote build tree](#several-checkouts-one-remote-build-tree) ·
+[Builds that are not a package manager](#builds-that-are-not-a-package-manager) ·
+[Timestamps and stale objects](#timestamps-and-the-object-that-is-newer-than-its-source) ·
+[Runs that outlast the caller](#runs-that-outlast-the-caller) ·
+[Outputs from a tree the remote owns](#outputs-from-a-tree-the-remote-owns) ·
+[Several commands at once](#running-several-commands-at-once) ·
+[`bica tunnel`](#bica-tunnel--a-process-that-stays-reachable-at-a-local-path) ·
+[Environment](#environment) ·
+[Developing bica itself](#developing-bica-itself)
+
+</details>
 
 ## What it is, and what it is not
 
@@ -40,12 +84,26 @@ behave on native Windows. See [Platform support](#platform-support).
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/hdmjack/bica/main/install.sh | bash
+```
+
+Or, if you would rather not pipe a script into a shell — a reasonable preference — do what it does:
+
+```bash
 pnpm add -g hdmjack/bica
 ```
 
 That is the whole install: it brings its own dependencies and needs no build step. Check it with
-`bica --version`. Pin a version with `pnpm add -g hdmjack/bica#v0.1.0`, and update with the same
-command naming a later tag.
+`bica --version`. Pin a version with `pnpm add -g hdmjack/bica#v0.1.0` (or `install.sh --version
+v0.1.0`), and update with the same command naming a later tag.
+
+The script adds the preflight the bare command has no room for: it checks Node is new enough before
+installing rather than letting tsx fail later with an error that names a file in `node_modules` and
+says nothing about versions, names both ways to get `pnpm` if it is missing, and warns before
+replacing a `bica` that currently runs from a local checkout. `--dry-run` prints what it would do.
+It is also written so that a download cut off part-way through refuses to run at all, which an
+ordinary script does not — see the comment at the top of
+[`install.sh`](install.sh) for why that takes a brace group.
 
 pnpm prints `dependencies have build scripts that were ignored: esbuild` and that is expected —
 esbuild arrives through tsx, ships a prebuilt binary for your platform, and has nothing to build.
@@ -704,7 +762,7 @@ rather than the workspace. "Gone" means both halves of the run: the local client
 shell executing the command, whose pid the run script publishes into the claim. They have different
 lifetimes — the remote one follows the ssh connection — and testing only the client is how a lease
 gets broken over a run that is still executing. See
-[The lease's liveness oracle was the wrong process](#the-leases-liveness-oracle-was-the-wrong-process).
+[The lease's liveness oracle was the wrong process](docs/research.md#the-leases-liveness-oracle-was-the-wrong-process).
 
 **A run killed by `SIGTERM` or `SIGHUP` tears itself down** — it ends the remote command and releases
 the workspace on the way out — so a caller with a command timeout (a CI step, an agent's shell tool)
