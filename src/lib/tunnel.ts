@@ -402,22 +402,103 @@ export function localSocketObstruction(localSocket: string): string | undefined 
 function runRemoteScriptAsync(
   sshHost: string,
   script: string,
-): { child: ChildProcess; done: Promise<number> } {
+  options?: { captureStdout?: boolean },
+): { child: ChildProcess; done: Promise<number>; stdout: Promise<string> } {
+  const capture = options?.captureStdout === true;
   const child = spawn('ssh', ['-T', sshHost, 'sh', '-s'], {
-    stdio: ['pipe', 'ignore', 'inherit'],
+    stdio: ['pipe', capture ? 'pipe' : 'ignore', 'inherit'],
     shell: false,
   });
   child.stdin?.end(script);
+  let collected = '';
+  child.stdout?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    collected += chunk;
+  });
   const done = new Promise<number>((resolve) => {
     child.on('error', () => resolve(1));
     child.on('close', (code) => resolve(code ?? 1));
   });
-  return { child, done };
+  return { child, done, stdout: done.then(() => collected) };
+}
+
+/**
+ * Clear the remote socket, and stop whatever is still listening on it.
+ *
+ * Removing the path alone was not enough, and the way it failed was quiet. A server whose ssh
+ * session died -- a laptop that drops off the network, where the remote sshd may never learn the
+ * client is gone -- keeps running and keeps the socket open. The next start unlinked the path and
+ * launched a second server beside the first, which went on listening on a name that no longer
+ * existed, reachable by nobody and holding its memory. Three of them were found on one machine,
+ * two days old.
+ *
+ * Killing the holder is not an escalation over what this function already did: the `rm` makes that
+ * server unreachable either way. The only question is whether it is left running afterwards.
+ *
+ * Scoped to processes holding this exact path, which is the narrowest identity available -- bica
+ * cannot tell its own server from anything else listening there, and anything else listening there
+ * is in the way of the tunnel the caller asked for.
+ *
+ * Pure, and written for `sh`. The pid lists are deliberately unquoted: each is several words, and
+ * `kill` wants them as separate arguments.
+ */
+export function buildClearRemoteSocketScript(remoteSocket: string): string {
+  const sock = shellSingleQuoteRemotePathForSh(remoteSocket);
+  return [
+    `_bica_sock=${sock}`,
+    // No lsof, no way to name the holder: fall through to the unlink, which is what this did before.
+    'if [ -S "$_bica_sock" ] && command -v lsof >/dev/null 2>&1; then',
+    '  _bica_held="$(lsof -t -- "$_bica_sock" 2>/dev/null || true)"',
+    '  if [ -n "$_bica_held" ]; then',
+    `    printf '${SOCKET_HOLDER_MARKER} %s\\n' "$(echo $_bica_held | tr '\\n' ' ')"`,
+    '    kill -TERM $_bica_held 2>/dev/null || true',
+    '    _bica_i=0',
+    `    while [ "$_bica_i" -lt ${String(SOCKET_HOLDER_TERM_TRIES)} ]; do`,
+    '      if [ -z "$(lsof -t -- "$_bica_sock" 2>/dev/null || true)" ]; then',
+    '        break',
+    '      fi',
+    '      sleep 0.25',
+    '      _bica_i=$((_bica_i + 1))',
+    '    done',
+    '    _bica_left="$(lsof -t -- "$_bica_sock" 2>/dev/null || true)"',
+    '    if [ -n "$_bica_left" ]; then',
+    `      printf '${SOCKET_HOLDER_FORCED_MARKER} %s\\n' "$(echo $_bica_left | tr '\\n' ' ')"`,
+    '      kill -KILL $_bica_left 2>/dev/null || true',
+    '    fi',
+    '  fi',
+    'fi',
+    'rm -f "$_bica_sock"',
+    '',
+  ].join('\n');
+}
+
+/** What the clear script said it stopped, if anything. */
+export function parseClearedSocketHolders(stdout: string): {
+  stopped: string[];
+  forced: string[];
+} {
+  const pick = (marker: string): string[] => {
+    const out: string[] = [];
+    for (const line of stdout.split('\n')) {
+      if (line.startsWith(`${marker} `)) {
+        out.push(...line.slice(marker.length + 1).trim().split(/\s+/).filter(Boolean));
+      }
+    }
+    return out;
+  };
+  return { stopped: pick(SOCKET_HOLDER_MARKER), forced: pick(SOCKET_HOLDER_FORCED_MARKER) };
 }
 
 /** Backoff between reconnection attempts: doubles from the first to the cap. */
 /** How long to wait for the old listener to close before re-binding its path anyway. */
 const LISTENER_CLOSE_GRACE_MS = 2_000;
+
+/** How many quarter-seconds the remote waits for a terminated server to let go before SIGKILL. */
+const SOCKET_HOLDER_TERM_TRIES = 20;
+
+/** Markers the clear script prints, so the local side can say what it stopped. */
+const SOCKET_HOLDER_MARKER = 'bica-socket-held-by';
+const SOCKET_HOLDER_FORCED_MARKER = 'bica-socket-forced';
 
 const RECONNECT_FIRST_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
@@ -925,10 +1006,21 @@ export async function runTunnel(options: RunTunnelOptions): Promise<number> {
     // that no longer exists. Removing the path first means the only thing that can answer is the
     // server this session just started. The server does the same unlinking itself when it binds, so
     // this claims nothing the command was not about to claim anyway.
-    await runRemoteScriptAsync(
+    const cleared = runRemoteScriptAsync(
       sshHost,
-      `rm -f ${shellSingleQuoteRemotePathForSh(remoteSocket)}\n`,
-    ).done;
+      buildClearRemoteSocketScript(remoteSocket),
+      { captureStdout: true },
+    );
+    await cleared.done;
+    const holders = parseClearedSocketHolders(await cleared.stdout);
+    if (holders.stopped.length > 0) {
+      write(
+        `${dim('[bica]')} ${dim(
+          `Stopped the server still holding ${remoteSocket} on ${sshHost} (pid ${holders.stopped.join(', ')})` +
+            `${holders.forced.length > 0 ? `; ${holders.forced.join(', ')} needed SIGKILL` : ''}.`,
+        )}\n`,
+      );
+    }
     // No lease, and so no run id or claim: see the note on this function.
     // When the command says when it is ready, that is what is waited for.
     let announceSaidReady: () => void = () => {};

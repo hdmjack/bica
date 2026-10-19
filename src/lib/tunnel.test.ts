@@ -15,8 +15,55 @@ import {
   parseTunnelArgs,
   classifyTunnelInvocation,
   tunnelNeedsWorkspace,
+  buildClearRemoteSocketScript,
+  parseClearedSocketHolders,
 } from './tunnel';
 import { parseArgs } from '../cliArgs';
+
+describe('clearing the remote socket', () => {
+  it('quotes the path, so a socket with a space in it is one argument', () => {
+    const script = buildClearRemoteSocketScript('/tmp/a b.sock');
+    expect(script).toContain("_bica_sock='/tmp/a b.sock'");
+    expect(script.trimEnd().endsWith('rm -f "$_bica_sock"')).toBe(true);
+  });
+
+  it('removes the path even where lsof is missing', () => {
+    // The guard is what keeps this working on a remote without lsof: no way to name the holder is
+    // a reason to skip the kill, not a reason to skip the unlink that used to be all this did.
+    const script = buildClearRemoteSocketScript('/tmp/a.sock');
+    expect(script).toContain('command -v lsof');
+    const guard = script.indexOf('command -v lsof');
+    expect(script.indexOf('rm -f "$_bica_sock"')).toBeGreaterThan(guard);
+  });
+
+  it('escalates to SIGKILL only after SIGTERM has been given time', () => {
+    const script = buildClearRemoteSocketScript('/tmp/a.sock');
+    expect(script.indexOf('kill -TERM')).toBeLessThan(script.indexOf('kill -KILL'));
+    expect(script).toContain('sleep 0.25');
+  });
+
+  it('keeps the printf format on one line', () => {
+    // A literal newline here would split the shell script mid-statement. It has been wrong once.
+    const script = buildClearRemoteSocketScript('/tmp/a.sock');
+    for (const line of script.split('\n')) {
+      if (line.includes('printf')) {
+        expect(line).toContain('%s\\n');
+      }
+    }
+  });
+
+  it('reads back what the remote said it stopped', () => {
+    const out = 'bica-socket-held-by 101 102 \nbica-socket-forced 102 \n';
+    expect(parseClearedSocketHolders(out)).toEqual({
+      stopped: ['101', '102'],
+      forced: ['102'],
+    });
+  });
+
+  it('reports nothing when the socket was free', () => {
+    expect(parseClearedSocketHolders('')).toEqual({ stopped: [], forced: [] });
+  });
+});
 
 describe('classifyTunnelInvocation', () => {
   it('reads --list, --stop and --restart <path> without a workspace', () => {

@@ -20,6 +20,15 @@ entries note where a change affects what another version sees.
   previous tunnel's state was being reused; nothing of the sort was happening.
 
   Affects `--detach` on `tunnel` only. `bica run --detach` was always correct.
+- **A tunnel stops the server still holding the remote socket before it starts a new one.** It had
+  only unlinked the path. A server whose ssh session died — a laptop dropping off the network, where
+  the remote's sshd may never learn the client is gone — kept running and kept the socket open, so
+  the next start left it listening on a name that no longer existed: reachable by nobody, holding
+  its memory, invisible to `tunnel --list`. Three had accumulated on one machine, the oldest two
+  days old. The holder is now terminated, given time to let go, and killed if it does not. Scoped to
+  processes holding that exact path, which the `rm` was about to make unreachable in any case. A
+  remote without `lsof` falls back to the unlink alone.
+
 - **`bica tunnel --stop` and `--list` no longer need a `bica.yml`.** Both read `~/.bica/tunnels`
   and nothing else, but every `tunnel` invocation was treated as one that starts a tunnel, so both
   were refused outside a configured repository — and `--stop` is reached for precisely when
