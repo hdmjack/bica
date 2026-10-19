@@ -29,10 +29,12 @@ import {
 } from './lib/syncProgress';
 import { warnAboutStaleRemoteGit } from './lib/staleRemoteGit';
 import {
+  classifyTunnelInvocation,
   DEFAULT_READY_TIMEOUT_SECONDS,
   formatTunnelList,
   parseTunnelArgs,
   runTunnel,
+  tunnelNeedsWorkspace,
   TUNNEL_USAGE,
 } from './lib/tunnel';
 import type { TunnelArgs } from './lib/tunnel';
@@ -732,36 +734,23 @@ async function cmdTunnel(
   tail: string[],
   options: { detachedByGlobals: boolean },
 ): Promise<void> {
-  if (tail.length === 1 && tail[0] === '--list') {
+  const invocation = classifyTunnelInvocation(tail);
+  if (invocation.kind === 'list') {
     cmdTunnelList();
     return;
   }
-  const restartAt = tail.findIndex(
-    (t) => t === '--restart' || t.startsWith('--restart='),
-  );
-  // `--restart <path>` revives a recorded tunnel; `--restart=<mode>` configures a new one. They are
-  // told apart by what follows, which is unambiguous: a mode is never a path and a path never a mode.
-  if (restartAt !== -1 && !tail.includes('--')) {
-    const inline = tail[restartAt].startsWith('--restart=')
-      ? tail[restartAt].slice('--restart='.length)
-      : tail[restartAt + 1];
-    if (inline === undefined || inline === '') {
+  if (invocation.kind === 'restart') {
+    if (invocation.target === undefined || invocation.target === '') {
       die(`--restart needs the local socket path of the tunnel to restart.\n${TUNNEL_USAGE}`);
     }
-    await cmdTunnelRestart(inline);
+    await cmdTunnelRestart(invocation.target);
     return;
   }
-  const stopAt = tail.findIndex(
-    (t) => t === '--stop' || t.startsWith('--stop='),
-  );
-  if (stopAt !== -1) {
-    const inline = tail[stopAt].startsWith('--stop=')
-      ? tail[stopAt].slice('--stop='.length)
-      : tail[stopAt + 1];
-    if (inline === undefined || inline === '') {
+  if (invocation.kind === 'stop') {
+    if (invocation.target === undefined || invocation.target === '') {
       die(`--stop needs the local socket path of the tunnel to stop.\n${TUNNEL_USAGE}`);
     }
-    await cmdTunnelStop(inline);
+    await cmdTunnelStop(invocation.target);
     return;
   }
 
@@ -1370,7 +1359,15 @@ async function main(): Promise<void> {
   const tail = rest.slice(1);
 
   try {
-    if (COMMANDS_NEEDING_BICA_SPEC.has(sub)) {
+    // `tunnel` is in the set because starting one needs a host and a remote path. Ending or listing
+    // one needs neither -- those read `~/.bica/tunnels` and nothing else -- and refusing them outside
+    // a configured repository made `--stop` unusable from exactly the directory somebody debugging a
+    // stuck tunnel happens to be standing in.
+    const needsSpec =
+      sub === 'tunnel'
+        ? tunnelNeedsWorkspace(tail)
+        : COMMANDS_NEEDING_BICA_SPEC.has(sub);
+    if (needsSpec) {
       await ensureBicaWorkspaceOrInteractiveSetup(sub);
     }
 

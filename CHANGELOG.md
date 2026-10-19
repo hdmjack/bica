@@ -20,6 +20,11 @@ entries note where a change affects what another version sees.
   previous tunnel's state was being reused; nothing of the sort was happening.
 
   Affects `--detach` on `tunnel` only. `bica run --detach` was always correct.
+- **`bica tunnel --stop` and `--list` no longer need a `bica.yml`.** Both read `~/.bica/tunnels`
+  and nothing else, but every `tunnel` invocation was treated as one that starts a tunnel, so both
+  were refused outside a configured repository — and `--stop` is reached for precisely when
+  something has gone wrong, from whichever directory the caller happens to be in. Starting a
+  tunnel, and reviving a recorded one with `--restart <path>`, still require one.
 
 ## 0.6.4 — 2026-10-19
 

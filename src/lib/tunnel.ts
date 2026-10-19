@@ -109,6 +109,59 @@ function requireValue(flag: string, token: string): string {
  * boundary that has to be inferred is one that can be inferred wrongly -- `bica run` makes the same
  * trade, where everything after the subcommand is argv and nothing else.
  */
+/** Which form of `bica tunnel` an invocation is, before any of it is acted on. */
+export type TunnelInvocation =
+  | { kind: 'list' }
+  | { kind: 'restart'; target: string | undefined }
+  | { kind: 'stop'; target: string | undefined }
+  | { kind: 'start' };
+
+/**
+ * Tell the forms apart from the flags alone.
+ *
+ * Extracted because two callers have to agree on the answer and did not. `cmdTunnel` dispatches on
+ * it; `main` uses it to decide whether the command needs a workspace file. `main` had no way to look
+ * inside, so every `tunnel` was treated as one that starts a tunnel, and `--stop` and `--list` were
+ * refused outside a configured repository -- neither of which reads one. `--stop` is reached for
+ * precisely when something has gone wrong, and answering it with "run `bica init` first" sends the
+ * caller to configure a repository that has nothing to do with the tunnel they are trying to end.
+ *
+ * `--restart <path>` is not in that group. It revives a tunnel, so it starts one, and the process it
+ * spawns inherits this directory and would fail there instead -- later, and into a log file.
+ */
+export function classifyTunnelInvocation(
+  tail: readonly string[],
+): TunnelInvocation {
+  if (tail.length === 1 && tail[0] === '--list') {
+    return { kind: 'list' };
+  }
+  const restartAt = tail.findIndex(
+    (t) => t === '--restart' || t.startsWith('--restart='),
+  );
+  // `--restart <path>` revives a recorded tunnel; `--restart=<mode>` configures a new one. They are
+  // told apart by what follows, which is unambiguous: a mode is never a path and a path never a mode.
+  if (restartAt !== -1 && !tail.includes('--')) {
+    const inline = tail[restartAt].startsWith('--restart=')
+      ? tail[restartAt].slice('--restart='.length)
+      : tail[restartAt + 1];
+    return { kind: 'restart', target: inline };
+  }
+  const stopAt = tail.findIndex((t) => t === '--stop' || t.startsWith('--stop='));
+  if (stopAt !== -1) {
+    const inline = tail[stopAt].startsWith('--stop=')
+      ? tail[stopAt].slice('--stop='.length)
+      : tail[stopAt + 1];
+    return { kind: 'stop', target: inline };
+  }
+  return { kind: 'start' };
+}
+
+/** Whether this invocation reads the repository's bica.yml, or only `~/.bica/tunnels`. */
+export function tunnelNeedsWorkspace(tail: readonly string[]): boolean {
+  const kind = classifyTunnelInvocation(tail).kind;
+  return kind === 'start' || kind === 'restart';
+}
+
 export function parseTunnelArgs(
   tail: readonly string[],
   options: { detachedByGlobals?: boolean } = {},

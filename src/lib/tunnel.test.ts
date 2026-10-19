@@ -13,8 +13,53 @@ import {
   joinSockets,
   localSocketObstruction,
   parseTunnelArgs,
+  classifyTunnelInvocation,
+  tunnelNeedsWorkspace,
 } from './tunnel';
 import { parseArgs } from '../cliArgs';
+
+describe('classifyTunnelInvocation', () => {
+  it('reads --list, --stop and --restart <path> without a workspace', () => {
+    expect(classifyTunnelInvocation(['--list'])).toEqual({ kind: 'list' });
+    expect(classifyTunnelInvocation(['--stop', '/tmp/a.sock'])).toEqual({
+      kind: 'stop',
+      target: '/tmp/a.sock',
+    });
+    expect(classifyTunnelInvocation(['--stop=/tmp/a.sock'])).toEqual({
+      kind: 'stop',
+      target: '/tmp/a.sock',
+    });
+    expect(classifyTunnelInvocation(['--restart', '/tmp/a.sock'])).toEqual({
+      kind: 'restart',
+      target: '/tmp/a.sock',
+    });
+    for (const tail of [
+      ['--list'],
+      ['--stop', '/tmp/a.sock'],
+      ['--stop=/tmp/a.sock'],
+    ]) {
+      expect(tunnelNeedsWorkspace(tail)).toBe(false);
+    }
+  });
+
+  it('tells `--restart=<mode>` on a new tunnel from `--restart <path>` on a recorded one', () => {
+    const starting = [
+      '--local=/tmp/a.sock',
+      '--remote=/srv/b.sock',
+      '--restart=on-demand',
+      '--',
+      'serve',
+    ];
+    expect(classifyTunnelInvocation(starting)).toEqual({ kind: 'start' });
+    expect(tunnelNeedsWorkspace(starting)).toBe(true);
+  });
+
+  it('wants a workspace to revive a recorded tunnel, which starts one', () => {
+    // The revived tunnel is spawned into this directory, so refusing here is the earlier and
+    // clearer of the two places it can fail.
+    expect(tunnelNeedsWorkspace(['--restart', '/tmp/a.sock'])).toBe(true);
+  });
+});
 
 describe('parseTunnelArgs and the global flag parser together', () => {
   // The regression this guards: `parseArgs` lifts `--detach` out of the whole command line for
