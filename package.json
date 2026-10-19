@@ -4,6 +4,14 @@
   "description": "Remote workspace CLI — file sync, SSH, and argv-safe remote commands",
   "license": "MIT",
   "author": "Haakon Jack",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hdmjack/bica.git"
+  },
+  "homepage": "https://github.com/hdmjack/bica#readme",
+  "bugs": {
+    "url": "https://github.com/hdmjack/bica/issues"
+  },
   "engines": {
     "node": ">=22"
   },
