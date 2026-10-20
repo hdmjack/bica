@@ -3,6 +3,32 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.7.0 — 2026-10-20
+
+### Changed
+- **Parallel commands are separated by `--also`; `--` belongs to the program.** `--` is how every
+  runner in common use is told that the rest of the line is for the program it runs, and bica read
+  those as two commands — running the first without the arguments it had been given, and the
+  remainder as a program of its own. Reported from a cargo workspace where
+  `bica run cargo run --release -p worldgen-preview -- 1 1024` ran cargo with no program arguments,
+  ran `1 1024` as a command, and the binary's defaults happened to be `1` and `1024`, so the output
+  looked right. The previous guard made it worse for cargo in particular: it refused
+  `cargo run -p x -- --help` and advised dropping the `--`, which passes `--help` to cargo instead
+  of to the binary.
+
+  ```bash
+  bica run pnpm lint --also pnpm typecheck --also pnpm test:run   # three at once
+  bica run cargo run -p x -- 1 1024                               # arguments reach the binary
+  bica run pnpm test -- --coverage                                # so does this
+  ```
+
+  **For this release only**, a `--` whose next word names a program is refused rather than
+  reinterpreted, and the message gives both forms. A line written for the old meaning would
+  otherwise become one long command and fail somewhere that says nothing about the separator having
+  changed. The refusal is deliberately narrow: it needs the word after `--` to name a known runner
+  or to repeat the program the line began with, so `-- 1 1024` and `-- --coverage` pass through
+  today. It goes away in the next release.
+
 ## 0.6.5 — 2026-10-19
 
 ### Fixed

@@ -18,6 +18,7 @@ import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
 import { reportGitDependentHint } from './lib/reportGitHint';
 import { wantsMtimeRepair } from './lib/syncedMtimes';
+import { splitParallelCommands } from './lib/commandSeparator';
 import { readLocalBicaSettings } from './localBicaSettings';
 import { cmdLogs, cmdRuns, cmdWait } from './lib/detachedCommands';
 import { reportArtifactPull } from './lib/reportArtifacts';
@@ -160,10 +161,13 @@ Remote execution
                               another machine; --force overrides both.
 
 Running several commands at once
-  Separate them with --. They run concurrently in one remote workspace, against one copy of the
+  Separate them with --also. They run concurrently in one remote workspace, against one copy of the
   files, and each one's output is printed under its own heading:
 
-    bica run pnpm lint -- pnpm typecheck -- pnpm test:run
+    bica run pnpm lint --also pnpm typecheck --also pnpm test:run
+
+  -- is not a separator: it belongs to the program, as it does everywhere else, so
+  'bica run cargo run -p x -- 1 1024' passes 1 and 1024 to the binary.
 
     ===== pnpm-lint =====      <output>
     ===== pnpm-typecheck ===== <output>
@@ -309,7 +313,7 @@ Examples
   bica plugins list
 
   # Three checks at once, one workspace, one copy of the files
-  bica run pnpm lint -- pnpm typecheck -- pnpm test:run
+  bica run pnpm lint --also pnpm typecheck --also pnpm test:run
 
   # One command
   bica run pnpm test:run
@@ -1125,42 +1129,6 @@ async function runWithLiveSession(options: {
   return code;
 }
 
-/**
- * Split `a b -- c d -- e` into three argv lists. `--` is the separator because it keeps every command
- * argv-safe: bica has never shell-split a user's command and should not start now, or `pnpm test "a b"`
- * would silently become two arguments.
- */
-export function splitOnDoubleDash(tail: string[]): string[][] {
-  const out: string[][] = [[]];
-  for (const t of tail) {
-    if (t === '--') {
-      out.push([]);
-    } else {
-      out[out.length - 1].push(t);
-    }
-  }
-  const commands = out.filter((c) => c.length > 0);
-
-  // `bica run pnpm test -- --coverage` is the conventional "pass the rest through to the tool" form,
-  // and here it means something else entirely: two commands, the second being `--coverage`, which the
-  // remote shell reports as `command not found` with exit 127. Refuse it rather than let a habit
-  // produce a confusing failure, and say what to do instead — which is simply to drop the `--`, since
-  // every token after `run` already reaches the remote as argv.
-  for (const cmd of commands) {
-    if (cmd[0].startsWith('-')) {
-      throw new Error(
-        `"${cmd[0]}" cannot start a command — bica expects a program to run.\n` +
-          'If it is meant as a flag for the previous command, drop the `--` before it; everything ' +
-          'after `run` already reaches the remote as argv:\n' +
-          '  bica run pnpm test --coverage\n' +
-          '`--` separates whole commands that should run at the same time:\n' +
-          '  bica run pnpm lint -- pnpm typecheck\n' +
-          'If it is meant as a bica option, it is not one; see `bica help`.',
-      );
-    }
-  }
-  return commands;
-}
 
 async function cmdRun(options: {
   pm: string | undefined;
@@ -1432,7 +1400,7 @@ async function main(): Promise<void> {
           returnFlow: globals.returnFlow,
           writeBack: globals.writeBack,
           detach: globals.detach,
-          commands: splitOnDoubleDash(tail),
+          commands: splitParallelCommands(tail),
         });
         break;
       case 'runs':

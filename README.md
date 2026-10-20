@@ -698,12 +698,20 @@ mirror would delete it and the pull afterwards would find nothing and say nothin
 
 ## Running several commands at once
 
-Separate commands with `--`. They run concurrently in one remote workspace, against one copy of the
-files, each with its own connection, and their output is labelled and streamed as it arrives:
+Separate commands with `--also`. They run concurrently in one remote workspace, against one copy of
+the files, each with its own connection, and their output is labelled and streamed as it arrives:
 
 ```bash
-bica run pnpm lint -- pnpm typecheck -- pnpm test:run
+bica run pnpm lint --also pnpm typecheck --also pnpm test:run
 ```
+
+`--` is not the separator, and used to be. It is how a runner is told that the rest of the line
+belongs to the program it runs — `cargo run -p x -- 1 1024`, `pnpm test -- --coverage` — and bica
+read those as two commands, ran the first without its arguments and the remainder as a program. One
+report arrived after it exited 0, because the binary's defaults happened to be the values that had
+been dropped. `--` now passes straight through. For one release, a `--` whose next word names a
+program is refused rather than reinterpreted, so a line written for the old meaning cannot quietly
+become one long command.
 
 ```
 [bica] Running 3 commands at once: pnpm-lint, pnpm-typecheck, pnpm-test-run
