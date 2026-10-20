@@ -98,6 +98,43 @@ describe('cmdWait through a failed probe', () => {
     expect(code).toBe(0);
   });
 
+  it('leaves the record behind when the run finishes, so `bica logs` can still find it', async () => {
+    // `wait` ends with "its output is in `bica logs <id>`" and then used to delete the only thing
+    // that knows which host holds that log. The log is on the remote either way.
+    writeDetachedRunRecord(record);
+    const code = await cmdWait(record.runId, {
+      pollMs: 0,
+      release: () => undefined,
+      finish: () => undefined,
+      read: () => ({ exitCode: 3, mine: true, unreachable: false }),
+    });
+    expect(code).toBe(3);
+    const after = readDetachedRunRecord(record.runId);
+    expect(after).toMatchObject({ exitCode: 3, sshHost: 'mini' });
+    expect(after?.finishedAt).toBeDefined();
+    // And it reads as history from then on, without asking the remote about a workspace that has
+    // moved on.
+    expect(
+      readDetachedRunState(after as DetachedRunRecord, () => {
+        throw new Error('should not probe a finished run');
+      }),
+    ).toMatchObject({ state: 'finished', exitCode: 3 });
+    removeDetachedRunRecord(record.runId);
+  });
+
+  it('keeps the record when the workspace changed hands, which is where the log still is', async () => {
+    writeDetachedRunRecord(record);
+    const code = await cmdWait(record.runId, {
+      pollMs: 0,
+      release: () => undefined,
+      finish: () => undefined,
+      read: () => ({ exitCode: 9, mine: false, unreachable: false }),
+    });
+    expect(code).toBe(1);
+    expect(readDetachedRunRecord(record.runId)).toMatchObject({ exitCode: null });
+    removeDetachedRunRecord(record.runId);
+  });
+
   it('gives up with 96 after the grace period, leaving the record in place', async () => {
     writeDetachedRunRecord(record);
     let clock = 0;

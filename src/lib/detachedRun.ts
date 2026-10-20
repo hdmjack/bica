@@ -46,7 +46,21 @@ export interface DetachedRunRecord {
   startedAt: string;
   /** Path on the remote holding the command's combined output. */
   remoteLogPath: string;
+  /**
+   * When this run was last seen to be over. Its presence is what makes the record history.
+   *
+   * The record used to be deleted at that point, which also deleted the only thing that knows which
+   * host holds the log -- so `bica wait` would report an exit code and the `bica logs` it had just
+   * recommended would answer "no detached run called that". The log itself was never the problem; it
+   * is still on the remote. Kept and marked instead, and pruned by age.
+   */
+  finishedAt?: string;
+  /** Its exit code, where one was recovered. `null` when the workspace changed hands first. */
+  exitCode?: number | null;
 }
+
+/** How long a finished run's record is kept, so its output stays reachable afterwards. */
+export const FINISHED_RECORD_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function runsDir(): string {
   return path.join(os.homedir(), '.bica', 'runs');
@@ -83,6 +97,34 @@ export function removeDetachedRunRecord(runId: string): void {
     fs.rmSync(recordPathFor(runId), { force: true });
   } catch {
     // A record that will not go is not worth failing a wait over.
+  }
+}
+
+/**
+ * Records old enough to drop, so finished ones do not pile up forever.
+ *
+ * Pure, and takes `now`, because the alternative is a test that waits a week.
+ */
+export function expiredRunRecords(
+  records: readonly DetachedRunRecord[],
+  now: number,
+  retentionMs: number = FINISHED_RECORD_RETENTION_MS,
+): DetachedRunRecord[] {
+  return records.filter((r) => {
+    if (r.finishedAt === undefined) {
+      // Still going, or last seen going. Age says nothing about it: a build can take hours and an
+      // unreachable host can keep one unresolved for longer.
+      return false;
+    }
+    const at = Date.parse(r.finishedAt);
+    return !Number.isNaN(at) && now - at > retentionMs;
+  });
+}
+
+/** Drop the records of runs that finished long enough ago to be of no further use. */
+export function pruneFinishedRunRecords(now: number = Date.now()): void {
+  for (const record of expiredRunRecords(listDetachedRunRecords(), now)) {
+    removeDetachedRunRecord(record.runId);
   }
 }
 
@@ -291,15 +333,23 @@ export function launchDetachedRun(options: {
     loginShell: options.loginShell,
     run: options.run,
   });
-  if (outcome.started) {
+  // Written for a run that fell over inside its first second as well as for one that is going.
+  // The launcher's own message for that case points at `bica logs <id>`, and without a record there
+  // is nothing for that command to resolve -- it named a log that exists, on a host it could no
+  // longer name. The only case with no record is a start that produced no log at all.
+  if (outcome.started || outcome.exitedEarly) {
+    const now = new Date().toISOString();
     writeDetachedRunRecord({
       runId: options.runId,
       sshHost: options.sshHost,
       remoteWorkspacePath: options.remoteWorkspacePath,
       repoRoot: options.repoRoot,
       command: options.argv,
-      startedAt: new Date().toISOString(),
+      startedAt: now,
       remoteLogPath: remoteLogPathFor(options.runId),
+      // Over before it began. No exit code was recovered -- the claim is where those come from and
+      // this never got far enough to append one.
+      ...(outcome.exitedEarly ? { finishedAt: now, exitCode: null } : {}),
     });
   }
   return outcome;

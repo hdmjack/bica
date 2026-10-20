@@ -6,6 +6,7 @@ import {
   describeDetachedRun,
   parseDetachStart,
   remoteLogPathFor,
+  expiredRunRecords,
 } from './detachedRun';
 
 /**
@@ -116,5 +117,54 @@ describe('describeDetachedRun', () => {
     // Its result is genuinely unrecoverable at that point; reporting a stranger's exit code would be
     // worse than saying so.
     expect(describeDetachedRun(record, 'gone', null)).toContain('gone');
+  });
+});
+
+describe('a finished run keeps its record', () => {
+  it('drops a finished record only once it is older than the retention window', () => {
+    const base = {
+      sshHost: 'mini',
+      remoteWorkspacePath: '~/code/x',
+      repoRoot: '/local/x',
+      command: ['ninja'],
+      startedAt: '2026-10-01T00:00:00.000Z',
+      remoteLogPath: '~/.bica/runs/1.log',
+    };
+    const now = Date.parse('2026-10-20T00:00:00.000Z');
+    const records = [
+      { ...base, runId: 'running' },
+      { ...base, runId: 'justFinished', finishedAt: '2026-10-19T23:00:00.000Z', exitCode: 0 },
+      { ...base, runId: 'longDone', finishedAt: '2026-10-01T00:00:00.000Z', exitCode: 1 },
+    ];
+    expect(expiredRunRecords(records, now).map((r) => r.runId)).toEqual(['longDone']);
+  });
+
+  it('never expires a run that has not been seen to finish', () => {
+    // A build can take hours, and an unreachable host can leave one unresolved for longer. Age is
+    // not evidence that a run is over, and deleting its record is how its output is lost.
+    const ancient = {
+      runId: 'slow',
+      sshHost: 'mini',
+      remoteWorkspacePath: '~/code/x',
+      repoRoot: '/local/x',
+      command: ['ninja'],
+      startedAt: '2020-01-01T00:00:00.000Z',
+      remoteLogPath: '~/.bica/runs/slow.log',
+    };
+    expect(expiredRunRecords([ancient], Date.now())).toEqual([]);
+  });
+
+  it('ignores a finishedAt it cannot read rather than dropping the record', () => {
+    const broken = {
+      runId: 'odd',
+      sshHost: 'mini',
+      remoteWorkspacePath: '~/code/x',
+      repoRoot: '/local/x',
+      command: ['ninja'],
+      startedAt: '2026-10-01T00:00:00.000Z',
+      remoteLogPath: '~/.bica/runs/odd.log',
+      finishedAt: 'not a date',
+    };
+    expect(expiredRunRecords([broken], Date.now())).toEqual([]);
   });
 });

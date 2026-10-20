@@ -20,6 +20,18 @@ entries note where a change affects what another version sees.
   previous tunnel's state was being reused; nothing of the sort was happening.
 
   Affects `--detach` on `tunnel` only. `bica run --detach` was always correct.
+- **`bica logs` can find a run that `bica wait` has already reported on.** `wait` deleted the run's
+  local record when it finished — and that record is the only thing naming the host the log is on,
+  so the `bica logs <id>` that `wait` recommends in the same breath answered "No detached run
+  called that". The log was never gone; it is still in `~/.bica/runs` on the remote. Finished
+  records are now kept and marked, listed by `bica runs` with their exit code, and dropped after
+  seven days. The same applied to a run whose workspace changed hands, where the message explicitly
+  promised the output was still there.
+- **A detached run that dies in its first second gets a record at all.** The launcher says `bica
+  logs <id>` has its output, which was true of the log and false of bica's ability to find it: the
+  record was written only for a run that was still going. That is the case where the output matters
+  most, because the command failed before anyone could watch it.
+
 - **A tunnel stops the server still holding the remote socket before it starts a new one.** It had
   only unlinked the path. A server whose ssh session died — a laptop dropping off the network, where
   the remote's sshd may never learn the client is gone — kept running and kept the socket open, so

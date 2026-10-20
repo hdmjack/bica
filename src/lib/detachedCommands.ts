@@ -5,8 +5,9 @@ import {
   buildLogsScript,
   describeDetachedRun,
   listDetachedRunRecords,
+  pruneFinishedRunRecords,
   readDetachedRunRecord,
-  removeDetachedRunRecord,
+  writeDetachedRunRecord,
 } from './detachedRun';
 import type { DetachedRunRecord } from './detachedRun';
 import { reportArtifactPull } from './reportArtifacts';
@@ -54,6 +55,12 @@ export function readDetachedRunState(
   record: DetachedRunRecord,
   read: typeof remoteReadRecordedExit = remoteReadRecordedExit,
 ): DetachedRunState {
+  // A record that has been marked finished is history, and asking the remote about it would get an
+  // answer about whatever holds the workspace now. It would also cost `bica runs` one ssh per
+  // finished run, which is the listing nobody wants to wait for.
+  if (record.finishedAt !== undefined) {
+    return { record, state: 'finished', exitCode: record.exitCode ?? null };
+  }
   const recorded = read(
     record.sshHost,
     claimPathExpr(record.remoteWorkspacePath),
@@ -71,6 +78,7 @@ export function readDetachedRunState(
 }
 
 export function cmdRuns(): number {
+  pruneFinishedRunRecords();
   const records = listDetachedRunRecords();
   if (records.length === 0) {
     process.stderr.write(
@@ -236,7 +244,14 @@ export async function cmdWait(
           'something else took the workspace, so its result is not recoverable. ' +
           `Its output is still in \`bica logs ${runId}\`.\n`,
       );
-      removeDetachedRunRecord(runId);
+      // That sentence was false while this deleted the record: the log survives on the remote, and
+      // the record is what names the host it is on. No exit code -- the claim that would have
+      // carried one belongs to something else now.
+      writeDetachedRunRecord({
+        ...record,
+        finishedAt: new Date().toISOString(),
+        exitCode: null,
+      });
       return 1;
     }
     if (state.state === 'finished') {
@@ -248,7 +263,14 @@ export async function cmdWait(
         record.remoteWorkspacePath,
         describeSelfAsOwner(runId),
       );
-      removeDetachedRunRecord(runId);
+      // Marked, not deleted. Deleting it here took away the only record of which host holds the
+      // log, so the `bica logs` this command recommends could not resolve the run it had just
+      // reported on.
+      writeDetachedRunRecord({
+        ...record,
+        finishedAt: new Date().toISOString(),
+        exitCode: code,
+      });
       process.stderr.write(
         `${dim('[bica]')} ${dim(`${runId} finished (exit ${String(code)}).`)}\n`,
       );
