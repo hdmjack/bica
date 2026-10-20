@@ -3,12 +3,18 @@ import { remoteWorkspaceWordForSh, runRemoteScriptOverStdin } from './runRemote'
 /**
  * Make a freshly synced file newer than anything already built from an older copy of it.
  *
- * The sync preserves each file's local mtime, which is right for a tree nobody is building. It is
- * wrong the moment the remote owns a build directory, because an object can then be *newer than the
- * source it was not built from*: a file edited at 23:40 while a long build was running arrives on
- * the remote still stamped 23:40, and the object that build compiled at 23:51 from the previous copy
- * is newer than it. ninja, make and cargo's mtime fingerprinting all compare exactly those two
- * numbers, so they skip the file -- not once, but every run from then on.
+ * The pinned sync is `rsync -a`, which preserves each file's local mtime. That is right for a tree
+ * nobody is building, and wrong the moment the remote owns a build directory, because an object can
+ * then be *newer than the source it was not built from*: a file edited at 23:40 while a long build
+ * was running arrives on the remote still stamped 23:40, and the object that build compiled at 23:51
+ * from the previous copy is newer than it. ninja, make and cargo's mtime fingerprinting all compare
+ * exactly those two numbers, so they skip the file -- not once, but every run from then on.
+ *
+ * This belongs to the pinned path and only the pinned path. The live session propagates content
+ * rather than timestamps, so a file it delivers already carries the remote's own clock and is newer
+ * than everything built before it -- the state this repair has to manufacture. Measured against
+ * mini: a local file stamped 1 January 2025 arrives stamped with the time of the transfer, and so
+ * does a newly created one.
  *
  * Reported from llvm-blackfin, where it produced a `clang` with none of the edit in it from a run
  * that exited 0, and then went on reporting success. That is the failure the pinned sync's torn-tree

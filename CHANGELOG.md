@@ -20,6 +20,16 @@ entries note where a change affects what another version sees.
   previous tunnel's state was being reused; nothing of the sort was happening.
 
   Affects `--detach` on `tunnel` only. `bica run --detach` was always correct.
+- **Corrected what bica says about timestamps on the live path.** It warned that the live session
+  copies your local timestamps, so a file edited during a build could arrive older than an object
+  built from the previous copy. That is not what happens: mutagen propagates content rather than
+  mtimes, and a file it delivers carries the remote's own clock. Measured against a real remote — a
+  local file stamped 1 January 2025 arrives stamped with the time of the transfer, as does a newly
+  created one. The claim sent people to the slower pinned path to avoid a hazard that only the
+  pinned path has, since `rsync -a` is what preserves mtimes. The warning now names the hazard the
+  live session really does carry: it goes on pushing while the command runs, so an edit made
+  mid-build can land behind a build that has already read the files around it.
+
 - **`bica logs` can find a run that `bica wait` has already reported on.** `wait` deleted the run's
   local record when it finished — and that record is the only thing naming the host the log is on,
   so the `bica logs <id>` that `wait` recommends in the same breath answered "No detached run

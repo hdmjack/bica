@@ -609,12 +609,12 @@ something you had to work out from its absence.
 
 ## Timestamps, and the object that is newer than its source
 
-A sync preserves each file's local mtime. That is right for a tree nobody is building, and wrong the
-moment the remote owns a build directory: a file edited at 23:40 while a long build is running
-arrives on the remote still stamped 23:40, and the object that build compiled at 23:51 from the
-*previous* copy is newer than it. ninja, make and cargo's mtime fingerprinting all compare exactly
-those two numbers, so they skip the file — not once, but on every run after it. The build then
-reports success over an artifact that does not contain the edit.
+A pinned sync is `rsync -a`, which preserves each file's local mtime. That is right for a tree
+nobody is building, and wrong the moment the remote owns a build directory: a file edited at 23:40
+while a long build is running arrives on the remote still stamped 23:40, and the object that build
+compiled at 23:51 from the *previous* copy is newer than it. ninja, make and cargo's mtime
+fingerprinting all compare exactly those two numbers, so they skip the file — not once, but on every
+run after it. The build then reports success over an artifact that does not contain the edit.
 
 A pinned run — `--detach`, `--write-back`, `--ref` — stamps the files it delivered with the remote's
 own clock, so they are newer than every object in the tree. Only those files: touching anything else
@@ -623,9 +623,17 @@ breaks rsync's quick check and a file re-sent purely because bica stamped it mus
 again — otherwise every stamped file rebuilds on every run for ever. The repair settles after one
 extra transfer.
 
-An ordinary `bica run` uses the live session, which has no list of what it delivered and so cannot do
-this. For a project with `artifacts:`, `toolchain:`, `buildDir:` or a Rust `target/`, bica says so on
-every such run rather than leaving the hazard silent.
+An ordinary `bica run` uses the live session, which does not have this problem and needs no repair.
+It propagates content rather than timestamps, so a file it delivers carries the remote's own clock
+and is already newer than everything built before it — the state the pinned path has to be repaired
+into. Measured: a local file stamped 1 January 2025 arrives on the remote stamped with the time of
+the transfer, and so does a newly created one.
+
+What the live session does have is the hazard the pinned sync exists to remove. It is designed to go
+on pushing while your command runs, so an edit made mid-build lands behind a build that has already
+read the files around it, and the artifact is assembled from two versions of the tree. No timestamp
+reveals that. For a project with `artifacts:`, `toolchain:`, `buildDir:` or a Rust `target/`, bica
+says so on every live run, and `--detach` or `--write-back` pins the tree for the duration.
 
 One known limit: an edit that leaves the file's exact size unchanged looks the same to rsync as
 bica's own stamp, so one made to a file stamped on the immediately preceding run is skipped. If a

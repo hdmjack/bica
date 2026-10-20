@@ -1026,10 +1026,17 @@ async function runWithLiveSession(options: {
   // printing, because a reverted write still moves the file's mtime, so the probe still sees that the
   // command wrote. `--write-back` pins the tree instead, which is the only way to hold those writes
   // still long enough to bring them back.
-  // The mtime repair in `syncedMtimes.ts` belongs to the pinned push, which is the only sync whose
-  // itemised output names what it delivered. A live session has no equivalent, so a compiled project
-  // running on this path keeps the stale-object hazard and the honest thing is to say so rather than
-  // let a build report success over an object it did not rebuild.
+  // What this used to say was wrong, and wrong in the direction that sends people to the slower path
+  // for no reason: it claimed the live session copies local timestamps, so a freshly edited file
+  // could arrive older than an object built from the previous copy. Measured against mini, a file
+  // stamped 1 January 2025 locally arrives stamped with the time of the transfer. Mutagen propagates
+  // content, not mtimes, so a file it delivers is newer than everything already built -- which is
+  // the safe direction, and the direction the pinned path has to be *repaired* into.
+  //
+  // The hazard a compiled project does have on this path is a different one, and it is the reason
+  // the pinned sync exists: the session is designed to go on pushing while the command runs, so an
+  // edit made mid-build lands behind a build that has already read the old copy of some other file.
+  // The result is one artifact assembled from two versions of the tree, which no timestamp reveals.
   if (
     wantsMtimeRepair({
       ...prep,
@@ -1038,10 +1045,9 @@ async function runWithLiveSession(options: {
   ) {
     process.stderr.write(
       `${dim('[bica]')} ${dim(
-        'The live session copies your local timestamps, so a file edited while an earlier run was ' +
-          'building can end up older than the object built from the previous copy — and ninja, make ' +
-          'and cargo will skip it. `--detach` and `--write-back` pin the tree and stamp what they ' +
-          'deliver; this path does not.',
+        'The live session keeps pushing while this runs, so an edit made mid-build can land behind ' +
+          'a build that has already read the files around it — one artifact from two versions of ' +
+          'the tree. `--detach` and `--write-back` pin the tree for the run instead.',
       )}\n`,
     );
   }
