@@ -396,11 +396,28 @@ export async function runRemoteCommandWithPmHooks(options: {
       claimPathExpr: options.claimPathExpr ?? claimPathExpr(config.remoteWorkspacePath),
       loginShell: loginShellFromEnv(),
     });
+    if (outcome.exitedEarly) {
+      // Started, ran, and was over inside the second bica waits to see whether it would start at
+      // all. That is not a failure: `true` does it, and so does `ninja` on a tree with nothing to
+      // do. It used to be reported as exit 1 with no run id on stdout, which broke the
+      // `id=$(bica run --detach …) && bica wait "$id"` form in the way that looks most like a
+      // broken build -- a failing exit code over a log that says the command succeeded.
+      //
+      // Reported as started, because that is what the launcher's exit code means for every other
+      // detached run. The command's own code comes from `bica wait`, which is what ends a detached
+      // run, and which returns immediately for one already over.
+      process.stderr.write(
+        `${dim('[bica]')} ${dim(
+          outcome.exitCode === undefined
+            ? 'It finished within a second of starting; `bica wait` has its exit code.'
+            : `It finished within a second of starting, with exit ${String(outcome.exitCode)}.`,
+        )}\n`,
+      );
+      return 0;
+    }
     if (!outcome.started) {
       process.stderr.write(
-        outcome.exitedEarly
-          ? `${warn('[bica]')} The command exited within a second of starting. \`bica logs ${options.detachRunId}\` has its output.\n`
-          : `${warn('[bica]')} Could not start a detached run on ${config.sshHost}.\n`,
+        `${warn('[bica]')} Could not start a detached run on ${config.sshHost}.\n`,
       );
       return 1;
     }

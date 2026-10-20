@@ -3,6 +3,21 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.7.1 — 2026-10-20
+
+### Fixed
+- **A detached run that finishes within a second is no longer reported as a failed start.** bica
+  waits one second after launching to see whether the command can start at all, and treated "not
+  running any more" as "never ran" — so `bica run --detach true` printed `remote command exited 1`
+  and no run id, and so did `ninja` on a tree with nothing to do. The failing exit code sat above a
+  log saying the command had succeeded, which reads exactly like a broken build.
+
+  The run id now reaches stdout as it does for any other detached run, so
+  `id=$(bica run --detach …) && bica wait "$id"` works on an up-to-date tree, and the remote reports
+  the command's real exit status rather than only the fact that it had finished. The launcher still
+  exits 0 to mean *started*, which is what it means for every detached run; `bica wait` is what
+  gives you the command's own code, and returns immediately for a run already over.
+
 ## 0.7.0 — 2026-10-20
 
 ### Changed

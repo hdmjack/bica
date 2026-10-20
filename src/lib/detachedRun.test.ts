@@ -168,3 +168,48 @@ describe('a finished run keeps its record', () => {
     expect(expiredRunRecords([broken], Date.now())).toEqual([]);
   });
 });
+
+describe('a command that is already over when bica looks', () => {
+  it('reads the exit status the remote reported, and does not call it a failed start', () => {
+    // `true` cannot fail, and `ninja: no work to do` is the happiest outcome there is. Both land
+    // here, and both used to be reported as exit 1 with no run id on stdout.
+    expect(parseDetachStart('exited-early=13666 0\n')).toEqual({
+      started: false,
+      exitedEarly: true,
+      pid: 13666,
+      exitCode: 0,
+    });
+    expect(parseDetachStart('exited-early=13667 1\n')).toEqual({
+      started: false,
+      exitedEarly: true,
+      pid: 13667,
+      exitCode: 1,
+    });
+  });
+
+  it('still reads an older remote that reports no status', () => {
+    // A remote whose workspace holds a start script from before this change. Unknown is not the
+    // same as failed.
+    expect(parseDetachStart('exited-early=13666\n')).toEqual({
+      started: false,
+      exitedEarly: true,
+      pid: 13666,
+      exitCode: undefined,
+    });
+  });
+
+  it('is still a real failure when nothing started at all', () => {
+    expect(parseDetachStart('')).toEqual({ started: false, exitedEarly: false });
+  });
+
+  it('asks the remote for the status rather than inferring it', () => {
+    const script = buildDetachStartScript({
+      remoteWorkspacePath: '~/code/x',
+      innerScript: '~/.bica/runs/1.sh',
+      runId: '1',
+      loginShell: '/bin/zsh',
+    });
+    expect(script).toContain('wait "$_bica_started"');
+    expect(script).toContain("printf 'exited-early=%s %s");
+  });
+});

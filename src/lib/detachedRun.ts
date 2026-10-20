@@ -197,7 +197,12 @@ export function buildDetachStartScript(options: {
     'if kill -0 "$_bica_started" 2>/dev/null; then',
     '  printf \'started=%s\\n\' "$_bica_started"',
     'else',
-    "  printf 'exited-early=%s\\n' \"$_bica_started\"",
+    // Its status, not just the fact that it is over. A command can finish inside the second for the
+    // happiest of reasons -- `ninja: no work to do` on an up-to-date tree -- and reporting that as a
+    // failure to start told people their build had broken when it had simply been quick.
+    '  wait "$_bica_started"',
+    '  _bica_ec=$?',
+    "  printf 'exited-early=%s %s\\n' \"$_bica_started\" \"$_bica_ec\"",
     'fi',
     '',
   ].join('\n');
@@ -205,8 +210,15 @@ export function buildDetachStartScript(options: {
 
 export interface DetachStartOutcome {
   started: boolean;
-  /** Set when the command fell over within the first second; its output is in the log. */
+  /**
+   * Set when the command was already over a second after starting.
+   *
+   * Not a failure. `true`, and `ninja` on a tree with nothing to do, both land here, and reporting
+   * them as a run that would not start was the bug this field's name used to encode.
+   */
   exitedEarly: boolean;
+  /** The command's exit status, when the remote was able to report it. */
+  exitCode?: number;
   pid?: number;
 }
 
@@ -215,8 +227,16 @@ export function parseDetachStart(stdout: string): DetachStartOutcome {
   if (started !== null) {
     return { started: true, exitedEarly: false, pid: Number(started[1]) };
   }
-  if (/^exited-early=/m.test(stdout)) {
-    return { started: false, exitedEarly: true };
+  // The exit status is optional in the pattern because a remote running an older start script does
+  // not send one. Its absence means "finished, code unknown", which is still not "failed to start".
+  const early = /^exited-early=(\d+)(?: (\d+))?$/m.exec(stdout);
+  if (early !== null) {
+    return {
+      started: false,
+      exitedEarly: true,
+      pid: Number(early[1]),
+      exitCode: early[2] === undefined ? undefined : Number(early[2]),
+    };
   }
   return { started: false, exitedEarly: false };
 }
@@ -333,23 +353,22 @@ export function launchDetachedRun(options: {
     loginShell: options.loginShell,
     run: options.run,
   });
-  // Written for a run that fell over inside its first second as well as for one that is going.
-  // The launcher's own message for that case points at `bica logs <id>`, and without a record there
-  // is nothing for that command to resolve -- it named a log that exists, on a host it could no
-  // longer name. The only case with no record is a start that produced no log at all.
+  // Written for a run that was already over within the second as well as for one still going. Both
+  // have a log on the remote, and the record is the only thing that names the host it is on.
+  //
+  // Deliberately *not* marked finished. A finished record is history, which `bica wait` answers from
+  // without touching the remote -- so marking it here would skip the release of the lease and the
+  // artifact pull that a run, however short, still needs. It is `wait` that ends a detached run; the
+  // launcher's job is only to make sure it can be found.
   if (outcome.started || outcome.exitedEarly) {
-    const now = new Date().toISOString();
     writeDetachedRunRecord({
       runId: options.runId,
       sshHost: options.sshHost,
       remoteWorkspacePath: options.remoteWorkspacePath,
       repoRoot: options.repoRoot,
       command: options.argv,
-      startedAt: now,
+      startedAt: new Date().toISOString(),
       remoteLogPath: remoteLogPathFor(options.runId),
-      // Over before it began. No exit code was recovered -- the claim is where those come from and
-      // this never got far enough to append one.
-      ...(outcome.exitedEarly ? { finishedAt: now, exitCode: null } : {}),
     });
   }
   return outcome;
