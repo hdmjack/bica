@@ -117,3 +117,22 @@ export function splitParallelCommands(tail: readonly string[]): string[][] {
 
   return commands;
 }
+
+/**
+ * Render several commands as one line, the way a caller would have to type them.
+ *
+ * Used for the lease: a run records what it is doing, and the busy-workspace refusal quotes that
+ * back at whoever meets it. It joined with ` -- ` and went on doing so after 0.7.0 stopped accepting
+ * that as a separator -- so the refusal told the reader to wait or re-run, and handed them a command
+ * line bica would now refuse. The run itself was always correct; only this rendering was wrong.
+ *
+ * A `--` *inside* one of the commands is left alone, because there it means what it means
+ * everywhere: the rest belongs to the program.
+ */
+export function joinCommandsForDisplay(
+  commands: readonly (readonly string[])[],
+): string {
+  return commands
+    .map((c) => c.join(' '))
+    .join(` ${PARALLEL_SEPARATOR} `);
+}

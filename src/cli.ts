@@ -25,7 +25,7 @@ import {
 } from './lib/splitBuildState';
 import { wantsMtimeRepair } from './lib/syncedMtimes';
 import {
-  PARALLEL_SEPARATOR,
+  joinCommandsForDisplay,
   splitParallelCommands,
 } from './lib/commandSeparator';
 import { readLocalBicaSettings } from './localBicaSettings';
@@ -1209,12 +1209,7 @@ async function cmdRun(options: {
       runId: `${String(process.pid)}`,
       lease: sshLeaseOps(baseRemote.sshHost),
       sshHost: baseRemote.sshHost,
-      // Joined with the separator bica accepts. It was ` -- `, which 0.7.0 stopped accepting: the
-      // refusal that quotes this line tells the reader to wait or re-run, and the command it handed
-      // them to re-run was one bica would now refuse.
-      command: options.commands
-        .map((c) => c.join(' '))
-        .join(` ${PARALLEL_SEPARATOR} `),
+      command: joinCommandsForDisplay(options.commands),
     });
   } catch (e: unknown) {
     // A busy workspace is not a bica failure and not a verdict on the code. Its own exit code lets a

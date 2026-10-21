@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   PARALLEL_SEPARATOR,
+  joinCommandsForDisplay,
   looksLikeOldParallelForm,
   splitParallelCommands,
 } from './commandSeparator';
@@ -110,5 +111,45 @@ describe('looksLikeOldParallelForm', () => {
     expect(looksLikeOldParallelForm(['pnpm', 'lint'], 'pnpm')).toBe(true);
     expect(looksLikeOldParallelForm(['pnpm', 'lint'], 'cargo')).toBe(true);
     expect(looksLikeOldParallelForm(['./x', 'build'], './x')).toBe(true);
+  });
+});
+
+describe('joinCommandsForDisplay', () => {
+  // What a busy workspace quotes back. It joined with ` -- ` after 0.7.0 stopped accepting that,
+  // so the refusal handed the reader a command line bica would refuse.
+  it('joins commands with --also, never a bare --', () => {
+    const line = joinCommandsForDisplay([
+      ['pnpm', 'test:run', 'A', 'B', '--coverage'],
+      ['pnpm', 'validate'],
+      ['pnpm', 'lint:changed'],
+      ['pnpm', 'format:check'],
+    ]);
+    expect(line).toBe(
+      'pnpm test:run A B --coverage --also pnpm validate --also pnpm lint:changed --also pnpm format:check',
+    );
+    expect(line).toContain(PARALLEL_SEPARATOR);
+    // No ` -- ` acting as a separator anywhere in it.
+    expect(line).not.toMatch(/\s--\s/);
+  });
+
+  it('leaves a `--` that belongs to one of the programs exactly where it is', () => {
+    const line = joinCommandsForDisplay([
+      ['cargo', 'run', '-p', 'x', '--', '1', '1024'],
+      ['pnpm', 'lint'],
+    ]);
+    expect(line).toBe('cargo run -p x -- 1 1024 --also pnpm lint');
+  });
+
+  it('round-trips: what it prints is what bica would accept back', () => {
+    const commands = [
+      ['pnpm', 'lint'],
+      ['pnpm', 'typecheck'],
+    ];
+    const line = joinCommandsForDisplay(commands);
+    expect(splitParallelCommands(line.split(' '))).toEqual(commands);
+  });
+
+  it('says a single command plainly', () => {
+    expect(joinCommandsForDisplay([['pnpm', 'test']])).toBe('pnpm test');
   });
 });
