@@ -3,6 +3,30 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.7.3 — 2026-10-21
+
+### Fixed
+- **A large tree is no longer declared stalled while it is being scanned.** `bica run` gives up when
+  the sync stops making progress, measured rather than timed — except that scanning publishes no
+  number that moves. The status stays `scanning` and the file counts stay null for the whole phase,
+  so the progress fingerprint is byte-identical from one poll to the next however hard Mutagen is
+  working. A tree past about a minute of scanning therefore hit the 60-second stall budget and
+  exited 94 with nothing run, on a healthy remote.
+
+  Measured on an llvm-project checkout of 181,755 files at local load 17: the scan took **101
+  seconds**, publishing `null` for every field until the moment it finished. `bica run true` failed
+  three times in a row.
+
+  A phase with nothing to publish now gets its own budget of 600 seconds — still a ceiling, so a
+  scan that has genuinely wedged ends rather than waiting to be noticed — while staging keeps the
+  60 seconds that its climbing file and byte counts justify. The waiting line now carries the
+  elapsed time, because four identical sentences read as a hang. The refusal no longer tells you to
+  check the remote: scanning reads local disk and sends nothing, so the remote is the one part that
+  is certainly not at fault.
+
+  Not a regression in 0.7.2. Nothing between 0.6.4 and 0.7.2 touched the sync path; what changed
+  between the reporter's working runs and their failures was the machine's load.
+
 ## 0.7.2 — 2026-10-21
 
 ### Fixed

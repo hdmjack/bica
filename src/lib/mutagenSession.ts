@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
 
 import {
+  SYNC_QUIET_PHASE_STALL_SECONDS,
   SYNC_STALL_SECONDS,
+  stallBudgetSeconds,
   describeSyncProgress,
   progressFingerprint,
   readSyncProgress,
@@ -74,6 +76,12 @@ export function waitForSyncReady(
   options: {
     /** Seconds with no change of any kind before the sync is called stalled. */
     stallSeconds?: number;
+    /**
+     * Seconds to allow a phase that publishes no number at all, such as scanning.
+     *
+     * Separate because stillness there is not evidence of anything: there was nothing to watch.
+     */
+    quietStallSeconds?: number;
     /** Said every so often while waiting, so a long first sync does not look like a hang. */
     onProgress?: (line: string) => void;
     /** Injectable for tests. */
@@ -85,8 +93,16 @@ export function waitForSyncReady(
     /** Injectable for tests; the real one blocks. */
     sleep?: () => void;
   } = {},
-): { ready: boolean; lastStatus: string | null; progress: SyncProgress | null } {
+): {
+  ready: boolean;
+  lastStatus: string | null;
+  progress: SyncProgress | null;
+  /** The budget that was exceeded, so the message quotes the number that was actually used. */
+  stalledSeconds?: number;
+} {
   const stallSeconds = options.stallSeconds ?? SYNC_STALL_SECONDS;
+  const quietStallSeconds =
+    options.quietStallSeconds ?? SYNC_QUIET_PHASE_STALL_SECONDS;
   const readProgress = options.readProgress ?? readSyncProgress;
   const readStatus = options.readStatus ?? getSessionListParse;
   const now = options.now ?? Date.now;
@@ -115,12 +131,21 @@ export function waitForSyncReady(
       movedAt = now();
     }
     const stalledFor = now() - movedAt;
-    if (stalledFor >= stallSeconds * 1_000) {
-      return { ready: false, lastStatus, progress };
+    // The budget depends on what the sync is doing. Scanning a large tree publishes no number that
+    // moves, so a single budget made "working hard on 181,755 files" indistinguishable from
+    // "wedged", and the large tree lost.
+    const budget = stallBudgetSeconds(progress?.status ?? lastStatus, {
+      moving: stallSeconds,
+      quiet: quietStallSeconds,
+    });
+    if (stalledFor >= budget * 1_000) {
+      return { ready: false, lastStatus, progress, stalledSeconds: budget };
     }
     if (options.onProgress !== undefined && now() - saidAt >= PROGRESS_EVERY_MS) {
       saidAt = now();
-      const line = describeSyncProgress(progress);
+      const line = describeSyncProgress(progress, {
+        elapsedSeconds: stalledFor / 1_000,
+      });
       if (line !== undefined) {
         options.onProgress(line);
       }

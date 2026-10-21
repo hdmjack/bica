@@ -976,7 +976,8 @@ async function runWithLiveSession(options: {
     for (const line of describeSyncStall({
       lastStatus: ready.lastStatus,
       progress: ready.progress,
-      stallSeconds: SYNC_STALL_SECONDS,
+      // The budget that was actually applied, which is larger for a phase with nothing to publish.
+      stallSeconds: ready.stalledSeconds ?? SYNC_STALL_SECONDS,
     }).split('\n')) {
       process.stderr.write(`${warn('[bica]')} ${line}\n`);
     }
