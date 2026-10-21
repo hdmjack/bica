@@ -57,6 +57,42 @@ export function readsGitHistory(argv: readonly string[]): boolean {
   return argv.some(tokenReadsHistory);
 }
 
+/**
+ * The warning to print *before* a run that is going to meet this, rather than after.
+ *
+ * The note after the run was not enough, and the way it failed is worth recording. A `:changed`
+ * script fails inside its own tooling, so by the time bica gets a word in, the reader is at the
+ * bottom of a Node stack trace forty lines long. One more line there is one more line there. The
+ * agent that reported this had the note on its screen and diagnosed the stack trace instead, which
+ * is the right instinct applied to the wrong evidence.
+ *
+ * Said in advance, it arrives before any of that noise exists, and it predicts rather than explains.
+ * That is safe to say because the prediction is sound: with `git.sync` off there is no repository in
+ * the workspace at all, so a command that resolves a ref cannot do it here. This is not the case
+ * 0.6.1 had to quieten -- that one fired under ordinary test failures with the setting already *on*,
+ * where the note was guessing.
+ */
+export function gitMissingPreRunNotice(input: {
+  argvs: readonly (readonly string[])[];
+  syncGit: boolean;
+}): string | undefined {
+  if (input.syncGit) {
+    return undefined;
+  }
+  const culprit = input.argvs.find(readsGitHistory);
+  if (culprit === undefined) {
+    return undefined;
+  }
+  return (
+    `\`${culprit.join(' ')}\` resolves git refs, and this remote workspace has no \`.git\` — the ` +
+    'sync leaves repository metadata behind. Expect it to fail here with git\'s own "not a git ' +
+    'repository", whatever the tool prints around it.\n' +
+    'Fix it by turning the copy on, not by changing the command:\n' +
+    '  git:\n' +
+    '    sync: true     # in bica.yml, or BICA_GIT_SYNC=1 for one run'
+  );
+}
+
 export interface GitDependentHintInput {
   /** Every command the run executed — one per `--`-separated command, or a single one. */
   argvs: readonly (readonly string[])[];

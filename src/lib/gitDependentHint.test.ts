@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { gitDependentHint, wantsRemoteGitProbe } from './gitDependentHint';
+import {
+  gitDependentHint,
+  gitMissingPreRunNotice,
+  wantsRemoteGitProbe,
+} from './gitDependentHint';
 
 const failed = { exitCode: 1, syncGit: false };
 
@@ -179,5 +183,56 @@ describe('wantsRemoteGitProbe', () => {
         syncGit: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe('gitMissingPreRunNotice', () => {
+  it('warns before a run that cannot resolve a ref here', () => {
+    const notice = gitMissingPreRunNotice({
+      argvs: [['pnpm', 'test:run:changed']],
+      syncGit: false,
+    });
+    expect(notice).toContain('pnpm test:run:changed');
+    expect(notice).toContain('sync: true');
+  });
+
+  it('says nothing when the repository is being copied', () => {
+    expect(
+      gitMissingPreRunNotice({
+        argvs: [['pnpm', 'test:run:changed']],
+        syncGit: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('says nothing about a command that resolves no refs', () => {
+    // The value of the note is that it is rare. A line before every run would be skipped exactly
+    // as the one after every run was.
+    expect(
+      gitMissingPreRunNotice({ argvs: [['pnpm', 'typecheck']], syncGit: false }),
+    ).toBeUndefined();
+    expect(
+      gitMissingPreRunNotice({ argvs: [['echo', 'unchanged']], syncGit: false }),
+    ).toBeUndefined();
+  });
+
+  it('finds the history-reading one among several commands', () => {
+    const notice = gitMissingPreRunNotice({
+      argvs: [
+        ['pnpm', 'lint'],
+        ['pnpm', 'test:run:changed'],
+      ],
+      syncGit: false,
+    });
+    expect(notice).toContain('pnpm test:run:changed');
+  });
+
+  it('is more than one line, so every line of it has to be prefixed', () => {
+    // It was the unprefixed continuation line that got read as the failing tool's own output.
+    const notice = gitMissingPreRunNotice({
+      argvs: [['git', 'diff']],
+      syncGit: false,
+    }) as string;
+    expect(notice.split('\n').length).toBeGreaterThan(1);
   });
 });

@@ -3,6 +3,27 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.7.4 — 2026-10-21
+
+### Fixed
+- **The note about a missing remote `.git` is said before the run, and every line of it is marked as
+  bica's.** The note existed and named the exact setting, and an agent with it on screen still
+  diagnosed the stack trace above it and reported the sync as broken. Two reasons, both fixable.
+
+  It only ever appeared *after* the command, and a `:changed` script fails inside its own tooling —
+  so by the time bica got a word in, the reader was at the bottom of a forty-line Node trace, where
+  one more line is one more line. It is now said before the command runs as well, where no such
+  noise exists yet, and where it predicts rather than explains. That prediction is sound: with
+  `git.sync` off there is no repository in the workspace at all, so a command that resolves a ref
+  cannot do it there.
+
+  And only the note's first line carried `[bica]`. The line that actually says what to change —
+  `git:` / `sync: true` — rendered as bare text at the bottom of the failing command's output,
+  indistinguishable from the program's own. Every line is prefixed now.
+
+  Unchanged: a run whose commands resolve no refs says nothing, and neither does one with
+  `git.sync` already on.
+
 ## 0.7.3 — 2026-10-21
 
 ### Fixed

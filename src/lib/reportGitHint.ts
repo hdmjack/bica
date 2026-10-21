@@ -33,6 +33,20 @@ export function reportGitDependentHint(
   }
   const hint = gitDependentHint({ ...input, remoteGitPresent });
   if (hint !== undefined) {
-    process.stderr.write(`${warn('[bica]')} ${hint}\n`);
+    writeBicaLines(hint);
+  }
+}
+
+/**
+ * Every line prefixed, not just the first.
+ *
+ * The hint is several sentences and only its opening line carried `[bica]`, so the line that
+ * actually says what to change -- `git:` / `sync: true` -- rendered as bare text at the bottom of
+ * whatever the failing command had printed. In a stack trace it is indistinguishable from the
+ * program's own output, which is exactly where it was missed.
+ */
+export function writeBicaLines(text: string): void {
+  for (const line of text.split('\n')) {
+    process.stderr.write(`${warn('[bica]')} ${line}\n`);
   }
 }

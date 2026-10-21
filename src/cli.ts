@@ -16,7 +16,8 @@ import { isProcessAlive } from './lib/fileLock';
 import { hasProblem } from './lib/doctor';
 import { ownVersion } from './lib/ownVersion';
 import { checkThisMachine } from './lib/doctorRun';
-import { reportGitDependentHint } from './lib/reportGitHint';
+import { reportGitDependentHint, writeBicaLines } from './lib/reportGitHint';
+import { gitMissingPreRunNotice } from './lib/gitDependentHint';
 import { wantsMtimeRepair } from './lib/syncedMtimes';
 import { splitParallelCommands } from './lib/commandSeparator';
 import { readLocalBicaSettings } from './localBicaSettings';
@@ -1056,6 +1057,17 @@ async function runWithLiveSession(options: {
           'the tree. `--detach` and `--write-back` pin the tree for the run instead.',
       )}\n`,
     );
+  }
+
+  // Before the command, not after it. See `gitMissingPreRunNotice`.
+  {
+    const notice = gitMissingPreRunNotice({
+      argvs: options.matchArgvs ?? [tail],
+      syncGit: resolveBicaPluginConfig(repoRoot).syncGit,
+    });
+    if (notice !== undefined) {
+      writeBicaLines(notice);
+    }
   }
 
   const markerPath = writeBackMarkerPath(options.owner.runId);

@@ -22,7 +22,8 @@ import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
 } from './runRemote';
-import { reportGitDependentHint } from './reportGitHint';
+import { reportGitDependentHint, writeBicaLines } from './reportGitHint';
+import { gitMissingPreRunNotice } from './gitDependentHint';
 import { warnAboutStaleRemoteGit } from './staleRemoteGit';
 import { readLocalBicaSettings } from '../localBicaSettings';
 import { pushPinnedWorkingTree } from './pinnedSync';
@@ -407,6 +408,16 @@ export async function runPinned(options: {
       markerPath,
       runRemoteScriptOverStdin,
     );
+
+  {
+    const notice = gitMissingPreRunNotice({
+      argvs: options.matchArgvs ?? [options.remoteArgv],
+      syncGit,
+    });
+    if (notice !== undefined) {
+      writeBicaLines(notice);
+    }
+  }
 
   const code = await runRemoteCommandWithPmHooks({
     prep,
