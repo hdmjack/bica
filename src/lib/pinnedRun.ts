@@ -46,6 +46,7 @@ import {
   ensureRemoteWorkspaceDirectory,
   runRemoteCommandWithPmHooks,
 } from './runWithPackageManagerPlugins';
+import type { DetachOutcomeSink } from './runWithPackageManagerPlugins';
 import type { PrepareResult } from '../syncProject';
 import { dotGitIsAFile } from './gitLayout';
 
@@ -277,6 +278,8 @@ export async function runPinned(options: {
    * push, the install preflight, the generated-path repair. Only the command is let go of.
    */
   detachRunId?: string;
+  /** Filled in when that command was already over before the launcher let go of it. */
+  detachOutcome?: DetachOutcomeSink;
   /** Lease taken before anything was synced; this run already owns the workspace. */
   owner: ClaimOwner;
   chrome: (text: string) => void;
@@ -416,6 +419,7 @@ export async function runPinned(options: {
     assertRunId: runId,
     claimPathExpr: claimExpr,
     detachRunId: options.detachRunId,
+    detachOutcome: options.detachOutcome,
   });
 
   if (options.detachRunId !== undefined) {

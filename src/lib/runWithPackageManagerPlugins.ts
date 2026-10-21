@@ -209,7 +209,15 @@ export function aggregateExitCode(codes: readonly number[]): number {
 /**
  * Runs the remote argv after optional package-manager preflight (install hash / reinstall prompt).
  */
+/** Filled in when a detached command turned out to be over before the launcher let go of it. */
+export interface DetachOutcomeSink {
+  exitedEarly?: boolean;
+  exitCode?: number;
+}
+
 export async function runRemoteCommandWithPmHooks(options: {
+  /** Where to report a detached run that was already finished; see the early-exit branch below. */
+  detachOutcome?: DetachOutcomeSink;
   prep: PrepareResult;
   /** What actually runs on the remote. For several commands this is an `sh -c` wrapper. */
   remoteArgv: string[];
@@ -397,6 +405,14 @@ export async function runRemoteCommandWithPmHooks(options: {
       loginShell: loginShellFromEnv(),
     });
     if (outcome.exitedEarly) {
+      if (options.detachOutcome !== undefined) {
+        // Handed back rather than reported here, so one place decides what the launch output says.
+        // Saying it in two places is how `--detach false` came to print "finished with exit 1",
+        // "Started detached … to watch" and "remote command exited 0" about the same run.
+        options.detachOutcome.exitedEarly = true;
+        options.detachOutcome.exitCode = outcome.exitCode;
+        return 0;
+      }
       // Started, ran, and was over inside the second bica waits to see whether it would start at
       // all. That is not a failure: `true` does it, and so does `ninja` on a tree with nothing to
       // do. It used to be reported as exit 1 with no run id on stdout, which broke the

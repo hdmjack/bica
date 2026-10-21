@@ -3,6 +3,22 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.7.2 — 2026-10-21
+
+### Fixed
+- **A detached run that was already finished is collected by the launcher, and its output says one
+  thing.** 0.7.1 stopped calling such a run a failed start, but left three lines disagreeing about
+  it: "It finished within a second of starting, with exit 1", then "Started detached … to watch",
+  then "remote command exited 0". The last is the line a reader — or a script grepping for it —
+  takes as the result, and it was reporting the launcher rather than the command.
+
+  There is nothing to watch and nothing to come back for, so bica now finishes the run where it
+  stands: the artifacts come home, the lease is given back, and the record is marked with the exit
+  code. `bica run --detach false` prints the run id, reports `remote command exited 1`, and exits 1.
+  A later `bica wait <id>` answers 1 from the record without troubling a workspace that has moved
+  on. A run still going is untouched — it still says "Started detached", and `bica wait` is still
+  what ends it.
+
 ## 0.7.1 — 2026-10-20
 
 ### Fixed

@@ -95,6 +95,7 @@ import {
   terminateLiveRemoteCommand,
 } from './lib/runRemote';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
+import type { DetachOutcomeSink } from './lib/runWithPackageManagerPlugins';
 import { dim, remoteExitStatusLine, syncRemoteTarget, warn } from './terminalStyle';
 import {
   BUILTIN_CREDENTIALS_PLUGINS,
@@ -1241,6 +1242,7 @@ async function cmdRun(options: {
   let keepLease = false;
   try {
     if (options.detach) {
+      const detachOutcome: DetachOutcomeSink = {};
       code = await runPinned({
         prep,
         remoteArgv,
@@ -1249,10 +1251,31 @@ async function cmdRun(options: {
         pmOverride: pm,
         returnFlowOptIn: false,
         detachRunId: owner.runId,
+        detachOutcome,
         owner,
         chrome,
       });
-      if (code === 0) {
+      if (code === 0 && detachOutcome.exitedEarly === true) {
+        // Already over before the launcher let go of it. There is nothing to watch and nothing to
+        // come back for, so this collects it here rather than describing it as a run in progress
+        // and leaving the workspace leased until somebody thinks to wait for it.
+        //
+        // The launch output used to disagree with itself about such a run: "finished with exit 1",
+        // then "Started detached … to watch", then "remote command exited 0" -- the last of which
+        // is the line a reader takes as the result, and it was reporting the launcher.
+        keepLease = true;
+        process.removeListener('exit', release);
+        process.removeListener('SIGTERM', onSigterm);
+        process.removeListener('SIGHUP', onSighup);
+        process.stdout.write(`${owner.runId}\n`);
+        process.stderr.write(
+          `${dim('[bica]')} ${dim('It was already finished when the launcher let go, so bica collected it rather than leaving it to `bica wait`.')}\n`,
+        );
+        // The same path `bica wait` takes: the artifacts, the lease, and the record marked finished
+        // so a later `bica wait <id>` answers with this code instead of asking a workspace that has
+        // moved on.
+        code = await cmdWait(owner.runId, {});
+      } else if (code === 0) {
         // The lease is deliberately left held: the build is still going, and a second `bica run`
         // must meet 98 rather than rsync over a compile. `bica wait` gives it back.
         keepLease = true;
