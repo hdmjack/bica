@@ -3,6 +3,37 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.0 — 2026-10-21
+
+### Changed
+- **`git.sync` is on by default.** `.git` is mirrored to the remote with a one-shot
+  `rsync -az --delete` before each run, so `--changed`, `--since`, `turbo --filter=...[ref]` and
+  `:changed` scripts resolve the same refs they do locally. It was opt-in on the reasoning that
+  `.git` is a lot of bytes nobody asked for. Measured, it is not — a repository's history is a few
+  large packfiles, so rsync has almost nothing to walk:
+
+  | | `.git` | working tree |
+  |---|---|---|
+  | files | 1,953 | 181,755 |
+  | first sync | 21s | 101s scanning, then the transfer |
+  | every run after | 0.4s, zero bytes | — |
+
+  Against that 0.4s, every checkout had to find the setting by watching a `:changed` script fail
+  inside its own tooling, several lines into a stack trace. It was reported twice, once as a defect
+  in the sync.
+
+  `git: sync: false`, or `BICA_GIT_SYNC=0`, turns it off for a repository whose history really is
+  too large to mirror. The one cost worth knowing: `git gc` or an auto-repack rewrites the
+  packfiles, so the run after one pays the first-sync price again.
+
+  Verified against a checkout with no `git:` block at all: `bica run pnpm test:run:changed`
+  resolved its base ref and ran the impacted suites, where before it exited 1 from git.
+
+### Unchanged
+- **`--` still refuses in the old two-command shape.** 0.7.0 said that refusal would go in the next
+  release. The transition was meant to give notes and standing instructions time to catch up, not
+  to last a fixed number of versions, and it has been a day. It stays for now.
+
 ## 0.7.4 — 2026-10-21
 
 ### Fixed

@@ -67,12 +67,19 @@ describe('resolveBicaPluginConfig', () => {
     expect(r.packageManagerPluginIds).toBeUndefined();
     expect(r.credentialsPluginIds).toBeUndefined();
     expect(r.remoteShellPluginIds).toBeUndefined();
-    expect(r.syncGit).toBe(false);
+    // On unless asked otherwise: the commands that need history are the ones people run before
+    // pushing, and the mirror costs 0.4s a run once it exists.
+    expect(r.syncGit).toBe(true);
   });
 
   it('reads git.sync from YAML', () => {
     writeWorkspace(dir, `${MIN_SYNC}\ngit:\n  sync: true\n`);
     expect(resolveBicaPluginConfig(dir).syncGit).toBe(true);
+  });
+
+  it('can still be turned off, for a repository whose history is too big to mirror', () => {
+    writeWorkspace(dir, `${MIN_SYNC}\ngit:\n  sync: false\n`);
+    expect(resolveBicaPluginConfig(dir).syncGit).toBe(false);
   });
 
   it('env BICA_GIT_SYNC overrides YAML git.sync', () => {

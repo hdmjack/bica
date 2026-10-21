@@ -196,7 +196,21 @@ export function resolveBicaPluginConfig(
 
   const yamlGitSync = readGitSyncFromYaml(doc);
   const envGitSync = parseBoolEnv(process.env[ENV_GIT_SYNC]);
-  const syncGit = envGitSync ?? yamlGitSync ?? false;
+  // On by default, because off by default cost more than it saved.
+  //
+  // The reasoning for off was that `.git` is a lot of bytes nobody asked for. Measured, it is not:
+  // a repository's history is a few large packfiles, so rsync has almost nothing to walk. On
+  // float-javascript -- 508MB of `.git` across 1,953 files -- the first mirror takes 21s and every
+  // run after it takes 0.4s and transfers zero bytes. The working tree beside it is 181,755 files
+  // and scans for 101s. The history is the cheap part.
+  //
+  // Against that, every checkout had to discover the setting by watching a `:changed` script fail
+  // inside its own tooling, several lines into a stack trace -- which is how it was reported, twice,
+  // once as a defect in the sync. A default that makes the common commands work is worth 0.4s.
+  //
+  // `git: sync: false` still turns it off, for a repository whose history is genuinely too large to
+  // mirror or a workspace where it is simply not wanted.
+  const syncGit = envGitSync ?? yamlGitSync ?? true;
 
   return {
     pluginMode,

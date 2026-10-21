@@ -296,6 +296,9 @@ Environment
   BICA_RETURN_FLOW               Set to 0 to disable the post-\`bica run\` rsync that pulls test
                                  snapshots and other whitelisted files back from remote→local
                                  (configure patterns via top-level returnFlow: in bica.yml)
+  BICA_GIT_SYNC                  Set to 0 to skip mirroring .git to the remote before a run; on by
+                                 default, so \`--changed\` and friends resolve the same refs as local
+                                 (overrides git.sync in bica.yml)
   BICA_WRITE_BACK                Set to 0 to skip noticing which files a run wrote on the remote
                                  (and, with --write-back, copying them home)
 

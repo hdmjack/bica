@@ -503,16 +503,36 @@ is on by default and the copy home is opt-in.
 
 ### Git-dependent commands (`--changed`, `--since`)
 
-`.git` is excluded from the Mutagen sync, so the remote clone's git history/HEAD/refs do **not** match local. Commands that resolve files from the commit graph — `vitest --changed origin/master`, `jest --changed`, `turbo --filter=...[ref]` — therefore find nothing on the remote.
+`.git` is excluded from the Mutagen watch, because a continuous watch fights the local index over
+`index.lock`. So before each run bica does a one-shot `rsync -az --delete` of local `.git` → remote,
+mirroring history, HEAD and refs exactly. Commands that resolve files from the commit graph —
+`vitest --changed origin/master`, `jest --changed`, `turbo --filter=...[ref]`, a `:changed` script —
+then resolve the same refs they do locally.
 
-Opt in with a top-level `git:` block:
+**On by default since 0.8.0.** It used to be opt-in, on the reasoning that `.git` is a lot of bytes
+nobody asked for. Measured, it is not: a repository's history is a few large packfiles, so rsync has
+almost nothing to walk.
+
+| | `.git` | working tree |
+|---|---|---|
+| files | 1,953 | 181,755 |
+| first sync | 21s | 101s scanning, then the transfer |
+| every run after | 0.4s, zero bytes | — |
+
+Against that 0.4s, every checkout used to discover the setting by watching a `:changed` script fail
+inside its own tooling, several lines into a stack trace. It was reported twice, once as a defect in
+the sync.
+
+Turn it off for a repository whose history really is too large to mirror, or a workspace that has no
+use for it:
 
 ```yaml
 git:
-  sync: true
+  sync: false
 ```
 
-When enabled, `bica run` does a one-shot `rsync -az --delete` of local `.git` → remote right before the command, mirroring history/HEAD/refs exactly.
+The one cost worth knowing: `git gc` or an auto-repack rewrites the packfiles, so the run after one
+pays the first-sync price again.
 
 **A `git worktree` works too, as one flattened repository.** In a worktree `.git` is a one-line file
 naming an absolute path inside the main clone, and the data is split between that clone's shared
@@ -524,13 +544,15 @@ forced rather than compared by size and timestamp, because `HEAD` is the file th
 commit the remote is on and two branch names of equal length in a worktree created in the same second
 as its clone compare as identical. Keep `.git` in `sync.ignore.paths` (this is a one-shot rsync, not a continuous Mutagen watch — avoids `index.lock` churn). Toggle per-run with `BICA_GIT_SYNC=1`/`0`. Requires `rsync` on PATH; if missing, bica warns and skips.
 
-**When it is off, bica says so at the point it bites.** git's own error is "not a git repository", printed
-by the tool that shelled out to it and usually several lines into that tool's output — which reads as a
-broken checkout rather than a setting nobody turned on. So when a run fails, `git.sync` is off, and the
-command was one that resolves refs (`git …`, `--changed`, `--since`, `--changed-since`, a
-`--filter=...[ref]`, or a script name ending in `:changed`), bica adds a line naming the command and this
-setting. It stays quiet otherwise: a note about repository metadata under every failing test run would
-train you to skip the whole channel.
+**When it is off, bica says so before the run, not after.** git's own error is "not a git repository",
+printed by the tool that shelled out to it and usually several lines into that tool's output — which
+reads as a broken checkout rather than a setting somebody turned off. So when `git.sync` is off and a
+command resolves refs (`git …`, `--changed`, `--since`, `--changed-since`, a `--filter=...[ref]`, or a
+script name ending in `:changed`), bica says so before the command starts, where none of that output
+exists yet, and again after it if the run failed. Every line of it is prefixed `[bica]`: the note used
+to prefix only its first line, so the line saying what to change rendered as bare text under the
+failing tool's output and was read as the tool's own. It stays quiet otherwise — a note about
+repository metadata under every failing test run would train you to skip the whole channel.
 
 **A `.git` left behind by an earlier synced run is warned about before the command starts.** The sync
 ignores `.git` rather than deleting it, so one run with `git.sync` on leaves a repository in the remote
