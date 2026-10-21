@@ -3,6 +3,27 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.1 — 2026-10-21
+
+### Added
+- **bica says when `sync.ignore.paths` splits a build across two machines.** An incremental build
+  keeps two things that only mean anything together: the output, and the record of what produced it.
+  Ignoring `dist` while carrying `*.tsbuildinfo` separates them — the remote gets this machine's
+  record of what was built, next to output built by whatever ran there last. TypeScript reads the
+  record, believes the output is current, and compiles against another tree's declarations, so a
+  typecheck reports errors on exports that are plainly present in the source beside it.
+
+  Reported twice, diagnosed first as a broken sync and then as preserved timestamps, which
+  measurement disproved: on the reported workspace the source was five hours *newer* than the stale
+  declaration. Nothing about it looks like configuration from the inside, so bica now names it, with
+  the one-line fix, before the run.
+
+### Fixed
+- **A busy-workspace refusal no longer hands back a command bica would refuse.** The claim recorded
+  a parallel run by joining its commands with ` -- `, and 0.7.0 stopped accepting that as a
+  separator. The refusal quotes that line while telling the reader to wait or re-run. It joins with
+  `--also` now.
+
 ## 0.8.0 — 2026-10-21
 
 ### Changed

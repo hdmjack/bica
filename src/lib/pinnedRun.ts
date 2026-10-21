@@ -24,6 +24,11 @@ import {
 } from './runRemote';
 import { reportGitDependentHint, writeBicaLines } from './reportGitHint';
 import { gitMissingPreRunNotice } from './gitDependentHint';
+import {
+  describeSplitBuildState,
+  detectSplitBuildState,
+  findBuildInfoPaths,
+} from './splitBuildState';
 import { warnAboutStaleRemoteGit } from './staleRemoteGit';
 import { readLocalBicaSettings } from '../localBicaSettings';
 import { pushPinnedWorkingTree } from './pinnedSync';
@@ -408,6 +413,16 @@ export async function runPinned(options: {
       markerPath,
       runRemoteScriptOverStdin,
     );
+
+  {
+    const split = detectSplitBuildState({
+      ignorePaths: prep.syncIgnorePaths,
+      buildInfoPaths: findBuildInfoPaths(prep.repoRoot),
+    });
+    if (split !== undefined) {
+      writeBicaLines(describeSplitBuildState(split));
+    }
+  }
 
   {
     const notice = gitMissingPreRunNotice({
