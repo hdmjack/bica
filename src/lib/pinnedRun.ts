@@ -41,6 +41,7 @@ import {
 import { remoteTrustMiseWorkspace } from './runRemote';
 import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
 import { reportArtifactPull } from './reportArtifacts';
+import { exitAfterArtifactPull } from './artifacts';
 import {
   collectWriteBack,
   placeWriteBackMarker,
@@ -572,7 +573,5 @@ export async function runPinned(options: {
   // Not behind `--return-flow`. That flag guards a pattern-matched pull into the working tree, which
   // is why it is opt-in here; `artifacts:` is a short list of named outputs from a tree the sync does
   // not touch, and somebody who listed `build/bin/llc` wants `build/bin/llc`.
-  reportArtifactPull(prep);
-
-  return code;
+  return exitAfterArtifactPull(code, reportArtifactPull(prep));
 }

@@ -1,14 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  ARTIFACTS_NOT_HOME_EXIT,
   artifactDestination,
   artifactsNotProtected,
   buildArtifactRsyncArgs,
   describeArtifactPull,
+  exitAfterArtifactPull,
   parseItemizedChanges,
   pullArtifacts,
 } from './artifacts';
 import type { RsyncRunner } from './artifacts';
+import { reportArtifactPull } from './reportArtifacts';
 
 /**
  * The request's own test: "`artifacts:` with a symlinked binary inside an ignored `build/`: the local
@@ -251,5 +257,71 @@ describe('artifactsNotProtected', () => {
         generatedPaths: [],
       }),
     ).toEqual(['builds/llc']);
+  });
+});
+
+
+describe('exitAfterArtifactPull', () => {
+  const failed = { path: 'target/debug/viewer', changed: [], error: 'unexpected end of file' };
+  const copied = { path: 'target/debug/viewer', changed: ['viewer'] };
+  const missing = { path: 'target/debug/viewer', changed: [], missing: true };
+
+  it('turns a pass into 93 when an artifact could not be brought home', () => {
+    expect(exitAfterArtifactPull(0, [copied, failed])).toBe(ARTIFACTS_NOT_HOME_EXIT);
+  });
+
+  it("leaves a failing command's own code alone", () => {
+    expect(exitAfterArtifactPull(1, [failed])).toBe(1);
+  });
+
+  it('is not moved by an artifact the remote has not got, or by one that came home', () => {
+    expect(exitAfterArtifactPull(0, [copied, missing])).toBe(0);
+    expect(exitAfterArtifactPull(0, [])).toBe(0);
+  });
+});
+
+/**
+ * The report's own test, at the seam where the copy happens: an rsync that fails the way the real one
+ * did, and the run's result and message read off what came back. A stand-in `rsync` on PATH plays the
+ * remote, because the failure is rsync's and everything bica does with it starts at the exit status.
+ */
+describe('a copy home that fails part-way', () => {
+  let bin = '';
+  let repoRoot = '';
+  let originalPath = '';
+
+  beforeEach(() => {
+    bin = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-fakersync-'));
+    repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-fakerepo-'));
+    fs.writeFileSync(
+      path.join(bin, 'rsync'),
+      '#!/bin/sh\necho "rsync(16924): error: unexpected end of file" >&2\nexit 12\n',
+      { mode: 0o755 },
+    );
+    originalPath = process.env.PATH ?? '';
+    process.env.PATH = `${bin}${path.delimiter}${originalPath}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    vi.restoreAllMocks();
+    fs.rmSync(bin, { recursive: true, force: true });
+    fs.rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('exits 93 after a passing build, and says the local copy is stale', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const outcomes = reportArtifactPull({
+      artifacts: ['target/debug/viewer'],
+      syncIgnorePaths: ['target'],
+      generatedPaths: [],
+      remoteSyncUrl: 'mini:~/code/repo',
+      repoRoot,
+    });
+    expect(exitAfterArtifactPull(0, outcomes)).toBe(ARTIFACTS_NOT_HOME_EXIT);
+    const said = stderr.mock.calls.map((c) => String(c[0])).join('');
+    expect(said).toContain('Could not bring home target/debug/viewer');
+    expect(said).toContain('unexpected end of file');
+    expect(said).toContain('The local target/debug/viewer is stale');
   });
 });

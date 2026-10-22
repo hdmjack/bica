@@ -39,6 +39,32 @@ export type RsyncRunner = (args: readonly string[]) => {
 const SOURCE_NOT_THERE =
   /No such file or directory|empty file list|link_stat .* failed|change_dir .* failed/;
 
+/**
+ * Exit code for a run whose command passed but whose `artifacts:` did not all come home.
+ *
+ * In the family with 94 to 98: not a verdict on the code, which built. It exists because 0 was a
+ * false one about everything else. A copy that died on `rsync: unexpected end of file` exited 0,
+ * the local binary kept yesterday's timestamp, and the caller launched it and reported a change that
+ * was not in it.
+ */
+export const ARTIFACTS_NOT_HOME_EXIT = 93;
+
+/**
+ * The run's exit code, once its artifacts have been fetched.
+ *
+ * Only a passing command is changed. A failing one already says the outputs cannot be trusted, and
+ * its own code is the more useful thing to report. An artifact the remote has not got is not a
+ * failure: a run of something other than the build that makes it is the usual reason.
+ */
+export function exitAfterArtifactPull(
+  code: number,
+  outcomes: readonly ArtifactOutcome[],
+): number {
+  return code === 0 && outcomes.some((o) => o.error !== undefined)
+    ? ARTIFACTS_NOT_HOME_EXIT
+    : code;
+}
+
 export interface ArtifactOutcome {
   /** The configured path, as written in `bica.yml`. */
   path: string;
@@ -46,7 +72,10 @@ export interface ArtifactOutcome {
   changed: string[];
   /** The remote has not got it: a build that has not produced it yet, or did not get that far. */
   missing?: boolean;
-  /** Set when rsync failed for some other reason; the run is not failed for it, but it is said. */
+  /**
+   * Set when rsync failed for some other reason. The local copy is then whatever the last successful
+   * pull left, so a run whose command passed exits {@link ARTIFACTS_NOT_HOME_EXIT} for it.
+   */
   error?: string;
 }
 
@@ -172,8 +201,7 @@ export function pullArtifacts(options: {
       if (SOURCE_NOT_THERE.test(said)) {
         return { path: artifactPath, changed: [], missing: true };
       }
-      // Not fatal. The command's own result is the run's result, and an artifact that could not be
-      // fetched must not turn a reported failure into a different one.
+      // Not fatal here: whether it changes the run's result is `exitAfterArtifactPull`'s call.
       return {
         path: artifactPath,
         changed: [],
@@ -207,7 +235,10 @@ export function describeArtifactPull(
   }
   for (const outcome of outcomes) {
     if (outcome.error !== undefined) {
-      lines.push(`Could not bring home ${outcome.path}: ${outcome.error}`);
+      lines.push(
+        `Could not bring home ${outcome.path}: ${outcome.error}. ` +
+          `The local ${outcome.path} is stale: it is whatever the last successful copy left.`,
+      );
     }
   }
   const missing = outcomes.filter((o) => o.missing === true);

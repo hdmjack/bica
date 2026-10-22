@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.3 — 2026-10-22
+
+### Fixed
+- **A build whose artifacts did not come home no longer exits 0.** A copy that died on
+  `rsync: unexpected end of file` was reported in a dimmed line and the run exited 0, with the
+  local binary still at its old timestamp; the caller launched it and reported a change that was
+  not in it. A run whose command passed now exits **93** when any `artifacts:` entry could not be
+  brought home, the failure is a warning that names the local copy as stale, and `bica wait`
+  answers the same way for a detached run. A failing command keeps its own code, and an artifact
+  the remote has not got is still not a failure.
+- **`bica --help` lists every exit code that is not a verdict on the code**, not only 96 to 98.
+
 ## 0.8.2 — 2026-10-22
 
 ### Fixed

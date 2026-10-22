@@ -718,6 +718,12 @@ wants `build/bin/llc`.
 An artifact that is not under something the sync leaves alone is named before the run, because the
 mirror would delete it and the pull afterwards would find nothing and say nothing.
 
+A copy that fails — the link dropping mid-transfer, say — is named as a warning along with the
+stale local path, and a run whose command passed exits **93** for it rather than 0, since 0 is what
+a caller reads as "the new binary is here". A command that failed keeps its own code. An artifact
+the remote has not got at all is not a failure: running something other than the build that makes
+it is the usual reason.
+
 ## Running several commands at once
 
 Separate commands with `--also`. They run concurrently in one remote workspace, against one copy of
@@ -832,6 +838,7 @@ None of these are verdicts on your code:
 | **96** | the remote workspace could not be entered. |
 | **94** | the files never got to the remote: the sync stopped making progress, so nothing ran |
 | **95** | the connection dropped part-way through, so the command's result is unknown. The remote ends a command whose connection closes; if anything is still running there, the workspace stays leased until it stops, and `bica cancel` ends it. Re-run. |
+| **93** | the command passed, but an `artifacts:` entry could not be brought home, so the local copy is stale. Re-run. A failing command keeps its own code. |
 
 ### What the run tells you
 

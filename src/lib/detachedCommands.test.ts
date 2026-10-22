@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { cmdWait, readDetachedRunState } from './detachedCommands';
+import { ARTIFACTS_NOT_HOME_EXIT } from './artifacts';
 import {
   readDetachedRunRecord,
   removeDetachedRunRecord,
@@ -119,6 +120,23 @@ describe('cmdWait through a failed probe', () => {
         throw new Error('should not probe a finished run');
       }),
     ).toMatchObject({ state: 'finished', exitCode: 3 });
+    removeDetachedRunRecord(record.runId);
+  });
+
+  it('answers 93 when the build passed but its artifacts did not come home', async () => {
+    // The record keeps what the command said; the exit code also answers for the copy home, which is
+    // what the caller is about to rely on.
+    writeDetachedRunRecord(record);
+    const code = await cmdWait(record.runId, {
+      pollMs: 0,
+      release: () => undefined,
+      finish: () => [
+        { path: 'target/debug/viewer', changed: [], error: 'unexpected end of file' },
+      ],
+      read: () => ({ exitCode: 0, mine: true, unreachable: false }),
+    });
+    expect(code).toBe(ARTIFACTS_NOT_HOME_EXIT);
+    expect(readDetachedRunRecord(record.runId)).toMatchObject({ exitCode: 0 });
     removeDetachedRunRecord(record.runId);
   });
 

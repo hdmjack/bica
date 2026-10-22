@@ -31,6 +31,7 @@ import {
 import { readLocalBicaSettings } from './localBicaSettings';
 import { cmdLogs, cmdRuns, cmdWait } from './lib/detachedCommands';
 import { reportArtifactPull } from './lib/reportArtifacts';
+import { ARTIFACTS_NOT_HOME_EXIT, exitAfterArtifactPull } from './lib/artifacts';
 import { seedRemoteWorkspace } from './lib/seedWorkspace';
 import {
   SYNC_NOT_READY_EXIT,
@@ -214,6 +215,10 @@ Commands that write files
         different remotePath — another clone pointing at the same one is exactly what is refused.
     97  ran, but the workspace was taken part-way through, so the result was discarded. Re-run.
     96  the remote workspace could not be entered.
+    95  the connection dropped part-way through, so the command's result is unknown. Re-run.
+    94  the files never got to the remote: the sync stopped making progress, so nothing ran.
+    93  the command passed, but an \`artifacts:\` entry could not be brought home, so the local copy
+        is stale. Re-run, or copy it by hand.
 
   A run killed by SIGTERM or SIGHUP ends its remote command and releases the workspace on the way
   out, so a caller's command timeout no longer leaves an orphan. A SIGKILLed client cannot do that —
@@ -1152,7 +1157,7 @@ async function runWithLiveSession(options: {
     if (pull.ran && pull.exitCode === 0) {
       chrome(`${dim('[bica]')} ${dim('Return-flow pull done.')}\n`);
     }
-    reportArtifactPull(prep);
+    code = exitAfterArtifactPull(code, reportArtifactPull(prep));
   } finally {
     process.removeListener('SIGINT', onSigint);
     chrome(`${dim('[bica]')} ${dim('Stopping sync session…')}\n`);
@@ -1360,7 +1365,11 @@ async function cmdRun(options: {
     process.removeListener('SIGHUP', onSighup);
   }
 
-  process.stderr.write(`${remoteExitStatusLine(code)}\n`);
+  process.stderr.write(
+    code === ARTIFACTS_NOT_HOME_EXIT
+      ? `${warn(`[bica] remote command exited 0, but not every artifact came home, so exit ${String(code)}`)}\n`
+      : `${remoteExitStatusLine(code)}\n`,
+  );
   process.exitCode = code;
 }
 

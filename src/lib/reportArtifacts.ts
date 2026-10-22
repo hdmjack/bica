@@ -1,4 +1,5 @@
 import { artifactsNotProtected, describeArtifactPull, pullArtifacts } from './artifacts';
+import type { ArtifactOutcome } from './artifacts';
 import { dim, warn } from '../terminalStyle';
 
 
@@ -7,9 +8,8 @@ import { dim, warn } from '../terminalStyle';
  *
  * Run whatever the command's exit code was, for the same reason return-flow is: a build that failed
  * at the last link step has still produced everything before it, and a test run that failed has
- * still produced its artifacts. Nothing here can change the run's result -- an artifact that could
- * not be fetched is reported and nothing else -- because the command's exit code is the answer and
- * a copy afterwards must not overwrite it.
+ * still produced its artifacts. Returns what happened, so the caller can decide whether a copy that
+ * failed changes the run's result; see `exitAfterArtifactPull`.
  */
 export interface ArtifactPullInput {
   artifacts: readonly string[];
@@ -19,9 +19,11 @@ export interface ArtifactPullInput {
   repoRoot: string;
 }
 
-export function reportArtifactPull(prep: ArtifactPullInput): void {
+export function reportArtifactPull(
+  prep: ArtifactPullInput,
+): readonly ArtifactOutcome[] {
   if (prep.artifacts.length === 0) {
-    return;
+    return [];
   }
   const unprotected = artifactsNotProtected({
     artifacts: prep.artifacts,
@@ -35,17 +37,19 @@ export function reportArtifactPull(prep: ArtifactPullInput): void {
         '`sync.ignore.paths`.\n',
     );
   }
-  const said = describeArtifactPull(
-    pullArtifacts({
-      artifacts: prep.artifacts,
-      remoteSyncUrl: prep.remoteSyncUrl,
-      repoRoot: prep.repoRoot,
-    }),
-  );
-  if (said === undefined) {
-    return;
+  const outcomes = pullArtifacts({
+    artifacts: prep.artifacts,
+    remoteSyncUrl: prep.remoteSyncUrl,
+    repoRoot: prep.repoRoot,
+  });
+  const said = describeArtifactPull(outcomes);
+  for (const line of said?.split('\n') ?? []) {
+    // A copy that failed is not progress chrome: it is the one line saying the file somebody is
+    // about to run is not the one that was just built.
+    const failed = line.startsWith('Could not bring home');
+    process.stderr.write(
+      failed ? `${warn('[bica]')} ${line}\n` : `${dim('[bica]')} ${dim(line)}\n`,
+    );
   }
-  for (const line of said.split('\n')) {
-    process.stderr.write(`${dim('[bica]')} ${dim(line)}\n`);
-  }
+  return outcomes;
 }

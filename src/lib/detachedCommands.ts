@@ -11,6 +11,8 @@ import {
 } from './detachedRun';
 import type { DetachedRunRecord } from './detachedRun';
 import { reportArtifactPull } from './reportArtifacts';
+import { exitAfterArtifactPull } from './artifacts';
+import type { ArtifactOutcome } from './artifacts';
 import { readArtifactSpec } from '../syncProject';
 import { remoteReadRecordedExit, runRemoteScriptOverStdin } from './runRemote';
 import { REMOTE_UNREACHABLE_EXIT } from './pinnedRun';
@@ -149,19 +151,21 @@ export async function cmdLogs(
  * `bica wait` is routinely run from a different one than the launch, with none of the environment
  * that run had.
  */
-function pullArtifactsForRecord(record: DetachedRunRecord): void {
+function pullArtifactsForRecord(
+  record: DetachedRunRecord,
+): readonly ArtifactOutcome[] {
   let spec;
   try {
     spec = readArtifactSpec(record.repoRoot);
   } catch {
     // A checkout that has moved or lost its spec is not a reason to fail a wait; the exit code is
     // the answer and it is already known.
-    return;
+    return [];
   }
   if (spec.artifacts.length === 0) {
-    return;
+    return [];
   }
-  reportArtifactPull({
+  return reportArtifactPull({
     ...spec,
     remoteSyncUrl: `${record.sshHost}:${record.remoteWorkspacePath}`,
     repoRoot: record.repoRoot,
@@ -192,7 +196,8 @@ export async function cmdWait(
     now?: () => number;
     /** Overridden in tests, which must not reach a real host to give a lease back. */
     release?: typeof remoteReleaseClaim;
-    finish?: (record: DetachedRunRecord) => void;
+    /** Brings the artifacts home; overridden in tests, which have none. */
+    finish?: (record: DetachedRunRecord) => readonly ArtifactOutcome[] | undefined;
   } = {},
 ): Promise<number> {
   const record = readDetachedRunRecord(runId);
@@ -256,7 +261,7 @@ export async function cmdWait(
     }
     if (state.state === 'finished') {
       const code = state.exitCode ?? 1;
-      (options.finish ?? pullArtifactsForRecord)(record);
+      const outcomes = (options.finish ?? pullArtifactsForRecord)(record) ?? [];
       // The lease outlived the launcher on purpose; this is where it is given back.
       (options.release ?? remoteReleaseClaim)(
         record.sshHost,
@@ -274,7 +279,8 @@ export async function cmdWait(
       process.stderr.write(
         `${dim('[bica]')} ${dim(`${runId} finished (exit ${String(code)}).`)}\n`,
       );
-      return code;
+      // The record keeps the command's own code; what this returns also answers for the copy home.
+      return exitAfterArtifactPull(code, outcomes);
     }
     if (!said) {
       said = true;
