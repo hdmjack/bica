@@ -808,6 +808,11 @@ lifetimes — the remote one follows the ssh connection — and testing only the
 gets broken over a run that is still executing. See
 [The lease's liveness oracle was the wrong process](docs/research.md#the-leases-liveness-oracle-was-the-wrong-process).
 
+A lease taken before the remote last booted is broken outright, whoever holds it. Nothing it recorded
+survived the restart, and its process numbers are reissued from the bottom, so checking them would
+find whatever unrelated process drew one. `bica cancel` clears such a lease without signalling
+anything, for the same reason.
+
 **A run killed by `SIGTERM` or `SIGHUP` tears itself down** — it ends the remote command and releases
 the workspace on the way out — so a caller with a command timeout (a CI step, an agent's shell tool)
 no longer leaves an orphan holding the lease. `SIGKILL` cannot do that, because no handler runs.

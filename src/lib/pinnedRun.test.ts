@@ -215,3 +215,35 @@ describe('releaseAfterRun', () => {
   });
 });
 
+describe('acquireWorkspace after the remote restarted', () => {
+  it('takes over a lease from before the restart, though a process now has one of its numbers', () => {
+    const BOOT = 1_792_692_016;
+    let held: ClaimOwner | undefined = {
+      runId: 'before-reboot',
+      host: os.hostname(),
+      pid: 2147483647,
+      remotePid: 801,
+      remotePids: [801],
+      startedAt: BOOT - 600,
+    };
+    const lease: LeaseOps = {
+      // Every pid reads as alive: the freshly booted remote has given 801 to something else.
+      remotePidAlive: () => true,
+      acquire(_p, owner): ClaimResult {
+        if (held !== undefined) {
+          return { ok: false, heldBy: held, raw: 'held', now: BOOT + 120, bootedAt: BOOT };
+        }
+        held = owner;
+        return { ok: true };
+      },
+      break(_p, expected) {
+        if (held?.runId === expected.runId) held = undefined;
+      },
+      release() {
+        held = undefined;
+      },
+    };
+    expect(acquire(lease).owner.runId).toBe('mine');
+  });
+});
+

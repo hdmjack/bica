@@ -162,7 +162,12 @@ export function acquireWorkspace(options: {
   let result = lease.acquire(remoteWorkspacePath, owner, options.command);
   if (
     !result.ok &&
-    claimIsStale(result.heldBy, isProcessAlive, lease.remotePidAlive)
+    claimIsStale(
+      result.heldBy,
+      isProcessAlive,
+      lease.remotePidAlive,
+      result.bootedAt,
+    )
   ) {
     if (result.heldBy !== null) {
       lease.break(remoteWorkspacePath, result.heldBy);

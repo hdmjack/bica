@@ -1,15 +1,18 @@
+import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import { describe, expect, it } from 'vitest';
 
 import {
   claimFileName,
   claimIsStale,
+  claimPredatesBoot,
   describeAge,
   describeClaim,
   parseHeldReport,
   describeSelfAsOwner,
   formatOwner,
   parseOwner,
+  REMOTE_BOOT_REPORT,
 } from './remoteClaim';
 
 const alive = (): boolean => true;
@@ -260,3 +263,59 @@ describe('describeClaim, identifiers', () => {
     expect(describeClaim({ ok: false, heldBy: null, raw: 'junk' })).toBe('junk');
   });
 });
+
+/**
+ * A claim from before the remote's last restart. The incident: a hard reboot left seven, one naming
+ * process groups 798 to 801 while the freshly booted remote was handing out pid 539.
+ */
+describe('a claim from before the remote restarted', () => {
+  const here = os.hostname();
+  const BOOT = 1_792_692_016;
+  const beforeReboot = {
+    runId: 'r',
+    host: here,
+    pid: 999,
+    remotePids: [798, 799, 800, 801],
+    remotePid: 798,
+    startedAt: BOOT - 3 * 60 * 60,
+  };
+
+  it('is void even when one of its numbers now belongs to a live process', () => {
+    expect(claimIsStale(beforeReboot, dead, alive, BOOT)).toBe(true);
+  });
+
+  it('is void from another machine too, since nothing of it can be running', () => {
+    expect(claimIsStale({ ...beforeReboot, host: 'other-host' }, alive, alive, BOOT)).toBe(true);
+  });
+
+  it('is judged by its pids as before when the boot time or its own stamp is unknown', () => {
+    expect(claimIsStale(beforeReboot, dead, alive)).toBe(false);
+    expect(claimIsStale({ ...beforeReboot, startedAt: undefined }, dead, alive, BOOT)).toBe(false);
+  });
+
+  it('leaves a claim taken after the boot, or within the margin around it, to the pid checks', () => {
+    // The margin is on the side of honouring: reading a live claim as void would sync over a build.
+    expect(claimPredatesBoot({ ...beforeReboot, startedAt: BOOT + 60 }, BOOT)).toBe(false);
+    expect(claimPredatesBoot({ ...beforeReboot, startedAt: BOOT - 10 }, BOOT)).toBe(false);
+    expect(claimPredatesBoot({ ...beforeReboot, startedAt: BOOT - 31 }, BOOT)).toBe(true);
+  });
+
+  it('reads the boot time the remote reports beside its clock', () => {
+    const report = parseHeldReport(
+      `HELD r ${here} 999 t=${String(BOOT - 100)} rpid=798\nNOW ${String(BOOT + 300)}\nBOOT ${String(BOOT)}\nCMD pnpm test\n`,
+    );
+    expect(report.bootedAt).toBe(BOOT);
+    expect(parseHeldReport(`HELD r ${here} 999\nBOOT \n`).bootedAt).toBeUndefined();
+  });
+
+  it("asks the shell for this machine's boot time and gets it", () => {
+    // Run for real, because the `sed` that picks `sec` out of macOS's `{ sec = …, usec = … }` is the
+    // part that can be quietly wrong -- matching `usec` would give a number of microseconds.
+    const { stdout } = spawnSync('sh', ['-c', REMOTE_BOOT_REPORT], { encoding: 'utf8' });
+    const reported = parseHeldReport(stdout).bootedAt;
+    const expected = Date.now() / 1000 - os.uptime();
+    expect(reported).toBeDefined();
+    expect(Math.abs((reported ?? 0) - expected)).toBeLessThan(5);
+  });
+});
+

@@ -83,6 +83,8 @@ export type ClaimResult =
       command?: string;
       /** The remote's clock at the moment of refusal, for an age. */
       now?: number;
+      /** When the remote last booted, on that same clock. See {@link claimPredatesBoot}. */
+      bootedAt?: number;
     };
 
 /** Stable filename for a workspace path: one claim per remote directory. */
@@ -96,6 +98,50 @@ export function claimFileName(remoteWorkspacePath: string): string {
 
 export function claimPathExpr(remoteWorkspacePath: string): string {
   return `${REMOTE_CLAIM_DIR}/${claimFileName(remoteWorkspacePath)}`;
+}
+
+/**
+ * The `sh` line that reports when the remote booted, as `BOOT <epoch seconds>`.
+ *
+ * Linux keeps it in `/proc/stat`; macOS and the BSDs answer `kern.boottime` with
+ * `{ sec = 1792692016, usec = 920379 } Thu Oct 22 …`, which is matched from the start of the line so
+ * that `usec` cannot stand in for `sec`. A remote that answers neither reports `BOOT` with nothing
+ * after it, which parses as unknown and leaves the claim to the pid checks.
+ */
+export const REMOTE_BOOT_REPORT =
+  `printf 'BOOT %s\\n' "$( (awk '/^btime /{print $2}' /proc/stat 2>/dev/null; ` +
+  `sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \\([0-9]*\\),.*/\\1/p') | head -n 1)"\n`;
+
+/**
+ * Seconds of disagreement tolerated between a claim's stamp and the boot time before the claim is
+ * called older than the boot.
+ *
+ * The boot time is derived from the clock, so a clock stepped forward early after boot moves it later
+ * and can make a claim taken just after boot look as if it came first. Reading a live claim as void
+ * would sync over a running build, so the margin falls on that side: a claim taken in the last half
+ * minute before a crash is left to the pid checks, as every claim was before.
+ */
+const BOOT_MARGIN_SECONDS = 30;
+
+/**
+ * Whether a claim was taken before the remote last booted.
+ *
+ * Nothing a claim records survives a restart of the remote: its process groups are gone, and their
+ * numbers are handed out again from the bottom. Judged by pid alone, such a claim is wrong in both
+ * directions -- it reads as live once an unrelated process gets one of its numbers, wedging the
+ * workspace, and `bica cancel` then signals that process. A hard reboot of a loaded remote left seven
+ * of them, one naming groups 798 to 801 while the freshly booted host was handing out pid 539.
+ *
+ * Both readings come from the remote's clock, so no skew between machines enters into it.
+ */
+export function claimPredatesBoot(
+  heldBy: ClaimOwner | null,
+  bootedAt: number | undefined,
+): boolean {
+  if (heldBy?.startedAt === undefined || bootedAt === undefined) {
+    return false;
+  }
+  return heldBy.startedAt < bootedAt - BOOT_MARGIN_SECONDS;
 }
 
 export function describeSelfAsOwner(runId: string): ClaimOwner {
@@ -209,6 +255,7 @@ export function buildClaimAcquireScript(
     `  rm -f "$_t"\n` +
     `  printf 'HELD '; cat ${claimExpr} 2>/dev/null; echo\n` +
     `  printf 'NOW %s\\n' "$(date +%s)"\n` +
+    `  ${REMOTE_BOOT_REPORT}` +
     `  printf 'CMD '; cat ${claimExpr}.cmd 2>/dev/null; echo\n` +
     'fi\n'
   );
@@ -310,13 +357,20 @@ export function remoteCancelClaim(
 export function remoteReadClaim(
   sshHost: string,
   remoteWorkspacePath: string,
-): { heldBy: ClaimOwner; raw: string; command?: string; now?: number } | null {
+): {
+  heldBy: ClaimOwner;
+  raw: string;
+  command?: string;
+  now?: number;
+  bootedAt?: number;
+} | null {
   const claim = claimPathExpr(remoteWorkspacePath);
   const { status, stdout } = runRemoteScript(
     sshHost,
     `[ -f ${claim} ] || exit 0\n` +
       `printf 'HELD '; cat ${claim} 2>/dev/null; echo\n` +
       `printf 'NOW %s\\n' "$(date +%s)"\n` +
+      REMOTE_BOOT_REPORT +
       `printf 'CMD '; cat ${claim}.cmd 2>/dev/null; echo\n`,
   );
   if (status !== 0 || stdout === '') {
@@ -373,6 +427,7 @@ export function parseHeldReport(stdout: string): {
   raw: string;
   command?: string;
   now?: number;
+  bootedAt?: number;
 } {
   const lines = stdout.split('\n');
   const pick = (label: string): string | undefined => {
@@ -385,6 +440,7 @@ export function parseHeldReport(stdout: string): {
     raw: string;
     command?: string;
     now?: number;
+    bootedAt?: number;
   } = { heldBy: parseOwner(raw), raw };
   const command = pick('CMD');
   if (command !== undefined && command !== '') {
@@ -393,6 +449,10 @@ export function parseHeldReport(stdout: string): {
   const now = Number(pick('NOW'));
   if (Number.isInteger(now) && now > 0) {
     out.now = now;
+  }
+  const bootedAt = Number(pick('BOOT'));
+  if (Number.isInteger(bootedAt) && bootedAt > 0) {
+    out.bootedAt = bootedAt;
   }
   return out;
 }
@@ -465,9 +525,15 @@ export function claimIsStale(
   heldBy: ClaimOwner | null,
   isProcessAlive: (pid: number) => boolean,
   isRemoteProcessAlive: (pid: number) => boolean,
+  bootedAt?: number,
 ): boolean {
   if (heldBy === null) {
     // Unreadable content cannot be one of ours: a claim is published complete, by `ln`.
+    return true;
+  }
+  // Ahead of every other question, the other-machine rule included: whoever took it, nothing it
+  // recorded on the remote can still exist, and its pids now belong to other processes.
+  if (claimPredatesBoot(heldBy, bootedAt)) {
     return true;
   }
   if (heldBy.host !== os.hostname()) {

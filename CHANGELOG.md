@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.4 — 2026-10-22
+
+### Fixed
+- **A lease from before the remote's last restart is void.** A hard reboot of the remote left seven
+  leases whose runs had died with it. They were judged by their remote process numbers, which a
+  reboot hands out again from the bottom: one named groups 798–801 while the rebooted remote was at
+  539 and climbing, so the first long-lived process to draw one of those numbers would have wedged
+  that workspace at 98 indefinitely, and `bica cancel` would have signalled it. The remote now
+  reports its boot time alongside its clock, and a lease stamped more than 30 seconds before it is
+  broken by the next run and cleared by `bica cancel` without a signal. Applies to leases written by
+  earlier versions too, since it reads the start stamp they already carry.
+
 ## 0.8.3 — 2026-10-22
 
 ### Fixed

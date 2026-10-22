@@ -298,7 +298,9 @@ Two things were wrong, and only one of them was the missing command:
   green in any test that did not actually signal a live run. The ssh child had to become async first.
 
 The teardown reaches the remote by killing the local `ssh`: the connection drops, sshd hangs up the
-session, and the remote process group gets `SIGHUP`. That chain is the reason an orphaned `ssh` is so
+session, and the remote process group gets `SIGHUP`. (Corrected 2026-10-22: without a PTY it does
+not. The command only learns by writing to a closed pipe, so a quiet one carries on — see "A dropped
+link is reset, not timed out" below.) That chain is the reason an orphaned `ssh` is so
 damaging in the first place — it is the only way the remote ever learns its caller is gone.
 
 ### Measurement traps hit in the course of the above
@@ -338,3 +340,51 @@ was verified, which file lands on top), compare content or force the transfer. b
 already does the stronger thing: whether a local file moved while a run was out is a blob comparison
 against the pushed tree, not a timestamp heuristic, which is why a missed stat never costs anyone their
 work.
+
+### A dropped link is reset, not timed out, and a lease must not outlive a boot
+
+Findings of 2026-10-22, from three reports of `--also` runs exiting 95 against a Mac mini running
+runs for six checkouts at once.
+
+**The drops were not keepalive timeouts, so keepalive settings cannot fix them.** bica already passes
+`ServerAliveInterval=30` × `ServerAliveCountMax=20`, ten minutes of tolerated silence, and the drops
+came at 183s and 188s. ssh says `Timeout, server … not responding` when keepalives run out; these
+said `client_loop: send disconnect: Broken pipe`, and the first was preceded by `Read from remote
+host …: Connection reset by peer`. A reset means the remote's TCP state for the connection was gone:
+it had output in flight it could not deliver, gave up retransmitting, and answered the next packet
+with RST. A connection with nothing in flight at that moment survives, which is why one command of a
+run drops while its neighbour carries on.
+
+**The cause was the remote's link under load.** The mini was on Wi-Fi (`en1`, Ethernet inactive)
+with a healthy signal (−55 dBm / −93 dBm, MCS 9). Measured from the client while it ran at load 30–40
+on 10 cores:
+
+| target | loss | RTT max |
+| --- | --- | --- |
+| router, same client | 0% | 47 ms |
+| mini, sample 1 | 65% | 85 ms |
+| mini, sample 2 | 0% | 2867 ms |
+
+Later the same day, at load 70–110, port 22 stopped answering SYNs at all (not refused; dropped)
+while the host still answered ping, and it took a hard reboot to recover.
+
+**`bica run` needed the tunnel's watchdog after all.** The assumption that test suites print
+constantly and so die of `SIGPIPE` was wrong for a typecheck, which is silent until it ends: one
+dropped run left 25 processes behind, one holding a port the next run needed. Two things were wrong
+with the watchdog itself once it was run for real rather than read:
+
+- It killed the pid it started, which for `pnpm <script>` is pnpm, and the node processes under it
+  carried on. It signals the process group now.
+- It read stdin from a background job. `sh` and `bash` give a background job `/dev/null` when job
+  control is off, so the watchdog read EOF at once and killed a healthy command; only zsh, the
+  default remote shell, leaves stdin alone. It reads a copy taken on fd 3 now, and its tests run
+  under all three shells.
+
+**A claim taken before the remote booted is void, and pid checks cannot tell.** The reboot left seven
+claims, their clients dead. One named process groups 798–801 while the freshly booted mini was at pid
+539 and climbing: once a long-lived process drew one of those numbers, the claim would have read as
+alive, refusing every run with 98, and `bica cancel` would have sent `SIGTERM` to that stranger.
+The claim's `t=` stamp and the remote's boot time are both on the remote's clock, so comparing them
+needs no cross-machine trust. A 30-second margin sits on the side of honouring, because the boot time
+is derived from the clock and moves if the clock is stepped soon after boot.
+

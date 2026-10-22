@@ -69,7 +69,9 @@ import {
 } from './lib/pinnedRun';
 import {
   claimPathExpr,
+  claimPredatesBoot,
   describeClaim,
+  remoteBreakClaim,
   remoteCancelClaim,
   remoteReadClaim,
   sshLeaseOps,
@@ -846,6 +848,19 @@ async function cmdCancel(options: { force: boolean }): Promise<void> {
   // Rendered by the same helper the refusal uses, so the run the user was told to cancel is described
   // to them the same way twice.
   const who = describeClaim({ ok: false, ...report });
+
+  // First, and without a signal: a claim from before the remote last booted names process groups that
+  // died in the restart, and whose numbers now belong to something else. Signalling them is the one
+  // thing that must not happen. No `--force` needed for another machine's either, since nothing of
+  // that run can be ended.
+  if (claimPredatesBoot(held, report.bootedAt)) {
+    remoteBreakClaim(sshHost, remoteWorkspacePath, held);
+    process.stderr.write(
+      `${dim('[bica]')} That lease is older than ${sshHost}'s last restart, so nothing of its run can still be ` +
+        `running; cleared it without signalling anything. (${who})\n`,
+    );
+    return;
+  }
 
   if (held.host !== os.hostname() && !options.force) {
     process.stderr.write(
