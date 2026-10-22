@@ -163,6 +163,10 @@ async function runConcurrently(options: {
           claimPathExpr: options.claimPathExpr,
           label: command.label,
           recordExitCode: false,
+          // A connection that drops ends its command on the remote rather than leaving it running in
+          // a workspace the next run will sync into. Free here: nothing reads stdin when the output
+          // is being labelled, so the pipe the watchdog needs takes nothing away.
+          dieWithConnection: true,
         },
       );
       const seconds = Math.round((Date.now() - started) / 1000);

@@ -18,6 +18,7 @@ import {
   describeSelfAsOwner,
 } from './remoteClaim';
 import type { ClaimOwner, ClaimResult } from './remoteClaim';
+import { CONNECTION_LOST_EXIT } from './connectionLoss';
 import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
@@ -68,6 +69,26 @@ function returnFlowLockPath(repoRoot: string): string {
 export interface AcquiredWorkspace {
   owner: ClaimOwner;
   release: () => void;
+  /**
+   * Give the lease back at the end of a run that exited with `code`, unless that would free a
+   * workspace the run may still be using. Says whether it was released.
+   */
+  releaseAfterRun: (code: number) => boolean;
+}
+
+/**
+ * Whether a run that ended with `code` must keep its lease after its client exits.
+ *
+ * A dropped connection ends the client, not the remote command. Releasing there freed a workspace
+ * that 25 of the run's processes were still running in -- the leftovers report had just named them
+ * -- so the next run synced into it and failed on a port they held, and `bica cancel` found no
+ * holder to end them with. Kept, the claim is judged the way any orphan's is: a dead client whose
+ * process groups are still alive is honoured with 98 and named for `bica cancel`, and once they have
+ * gone the next run breaks it for the price of one round trip. Asking here instead would cost that
+ * round trip over the link that has just failed.
+ */
+export function leaseOutlivesRun(code: number): boolean {
+  return code === CONNECTION_LOST_EXIT;
 }
 
 /** Injectable so acquisition can be tested without an SSH host. */
@@ -170,6 +191,13 @@ export function acquireWorkspace(options: {
     owner,
     release: () => {
       lease.release(remoteWorkspacePath, owner);
+    },
+    releaseAfterRun: (code) => {
+      if (leaseOutlivesRun(code)) {
+        return false;
+      }
+      lease.release(remoteWorkspacePath, owner);
+      return true;
     },
   };
 }

@@ -3,6 +3,28 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.2 — 2026-10-22
+
+### Fixed
+- **A dropped connection no longer leaves its command running on the remote.** Each command of an
+  `--also` run now has the watchdog `bica tunnel` already used: when its connection closes, the
+  remote ends that command and everything it started. It had been left out on the reasoning that
+  test suites print constantly and so die of `SIGPIPE` on their own. Not all of them print — a
+  typecheck is silent until it finishes — and a dropped run left 25 processes behind, one of them
+  holding the port the next run's Storybook tests needed. The watchdog now signals the command's
+  whole process group rather than the one pid it started, which for a `pnpm` script was `pnpm`
+  itself, with the node processes doing the work underneath it.
+- **The watchdog works under `sh` and `bash`.** It read stdin from a background job, which POSIX
+  shells hand `/dev/null` when job control is off, so it saw the connection end at once and killed
+  a healthy command. zsh does not redirect it, and the remote shell defaults to zsh, which is why
+  it went unnoticed; with `BICA_LOGIN_SHELL=bash` every tunnel would have been ended as it started.
+- **A run whose connection dropped keeps the workspace leased.** It used to give it back on the
+  way out, while the remote commands were still running, so the next run synced into a live
+  workspace and `bica cancel` found no holder to end. The lease now stays, and is judged as any
+  orphan's is: refused with 98 and named for `bica cancel` while anything of the run is still
+  running, and taken by the next run once nothing is. This is the backstop for a link that dies
+  without the remote noticing, where the watchdog has nothing to wake it.
+
 ## 0.8.1 — 2026-10-21
 
 ### Added

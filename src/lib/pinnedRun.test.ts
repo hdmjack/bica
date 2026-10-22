@@ -1,6 +1,7 @@
 import * as os from 'node:os';
 import { describe, expect, it } from 'vitest';
 
+import { CONNECTION_LOST_EXIT } from './connectionLoss';
 import { acquireWorkspace, WorkspaceInUseError } from './pinnedRun';
 import type { LeaseOps } from './pinnedRun';
 import type { ClaimOwner, ClaimResult } from './remoteClaim';
@@ -166,3 +167,51 @@ describe('acquireWorkspace', () => {
     expect(() => acquire(lease)).not.toThrow();
   });
 });
+
+/**
+ * The report's own test, without the second machine: a run with `--also` loses its connection while
+ * its remote commands are alive, then (a) a second run against the workspace exits 98 and (b) the
+ * lease still names the orphan, which is what `bica cancel` reads to find it.
+ */
+describe('releaseAfterRun', () => {
+  /** The client of the run that ended, as the next run sees it once that client has exited. */
+  const exited = (owner: ClaimOwner): ClaimOwner => ({
+    ...owner,
+    pid: 2147483647,
+    remotePids: [4242, 4243],
+    remotePid: 4242,
+  });
+
+  it('gives the workspace back after an ordinary run, pass or fail', () => {
+    for (const code of [0, 1]) {
+      const lease = fakeLease();
+      expect(acquire(lease).releaseAfterRun(code)).toBe(true);
+      expect(lease.held[WS]).toBeUndefined();
+    }
+  });
+
+  it('keeps it after a dropped connection, so the next run meets 98 instead of the orphan', () => {
+    let remoteAlive = true;
+    const lease = fakeLease({}, () => remoteAlive);
+    const run = acquire(lease, 'dropped');
+    expect(run.releaseAfterRun(CONNECTION_LOST_EXIT)).toBe(false);
+
+    const held = lease.held[WS];
+    expect(held?.runId).toBe('dropped');
+    lease.held[WS] = exited(run.owner);
+
+    try {
+      acquire(lease);
+      expect.unreachable('the second run should have been refused');
+    } catch (e) {
+      expect(e).toBeInstanceOf(WorkspaceInUseError);
+      expect((e as WorkspaceInUseError).exitCode).toBe(98);
+    }
+    expect(lease.held[WS]?.runId).toBe('dropped');
+
+    // Once the orphan has gone, nobody has to cancel anything: the next run takes it.
+    remoteAlive = false;
+    expect(acquire(lease).owner.runId).toBe('mine');
+  });
+});
+

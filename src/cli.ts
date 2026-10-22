@@ -1271,7 +1271,8 @@ async function cmdRun(options: {
   const concurrentCommands = parallel ? options.commands : undefined;
 
   const prep = prepareSyncProjectFile({ verbose: false });
-  let code: number;
+  // Read in `finally`, where a run that threw has not assigned it and has left nothing running.
+  let code = 1;
   /** A detached run keeps the workspace while it builds; `bica wait` is what gives it back. */
   let keepLease = false;
   try {
@@ -1347,8 +1348,12 @@ async function cmdRun(options: {
       });
     }
   } finally {
-    if (!keepLease) {
-      release();
+    if (!keepLease && !acquired.releaseAfterRun(code)) {
+      process.stderr.write(
+        `${warn('[bica]')} The workspace stays leased while anything this run started is still running on ` +
+          `${baseRemote.sshHost}, so a later run is refused (98) rather than colliding with it; once it has ` +
+          'stopped, the next run takes the workspace as usual. `bica cancel` ends it now.\n',
+      );
     }
     process.removeListener('exit', release);
     process.removeListener('SIGTERM', onSigterm);

@@ -749,23 +749,40 @@ export function buildRemoteRunScript(options: {
  *
  * Without this, a silent long-lived process survives its own tunnel. Dropping the local ssh closes the
  * connection, but with no PTY in play sshd sends no `SIGHUP` to the remote session: a command normally
- * learns its caller is gone by writing to a closed descriptor and taking `SIGPIPE`. Test suites print
- * constantly and so die immediately, which is why `bica run` never needed this. A socket server that
+ * learns its caller is gone by writing to a closed descriptor and taking `SIGPIPE`. A socket server that
  * prints one line at startup and then waits has nothing to write, so it is reparented to init and runs
  * until somebody logs in to kill it -- holding its socket, so the next tunnel binds a second one and
  * the client talks to whichever it finds.
  *
+ * `bica run` was long thought not to need this, on the grounds that test suites print constantly and
+ * so take `SIGPIPE` at once. They do not all print: a typecheck is silent until it finishes, and a
+ * dropped `--also` run left 25 processes on the remote -- `pnpm test:run:changed` among them, holding
+ * the port the next run's Storybook tests needed.
+ *
  * `cat` on stdin is the watchdog. The caller holds that pipe open and writes nothing, so the read
  * blocks for exactly as long as the connection lives and returns the moment it does not.
+ *
+ * It reads a copy of stdin taken on fd 3 before anything is backgrounded. POSIX gives a background
+ * job `/dev/null` for stdin when job control is off, so a watchdog reading plain stdin under `sh` or
+ * `bash` reads end-of-file at once and kills a healthy command on the spot. zsh does not do that,
+ * which is the only reason it worked: the remote shell defaults to zsh, and `BICA_LOGIN_SHELL=bash`
+ * would have ended every tunnel as it started.
+ *
+ * It signals the process group, not the pid it started. That pid is usually a package manager whose
+ * work is done by grandchildren, and `pnpm` does not reliably pass a `SIGTERM` on: killing it alone
+ * left the node processes under it running. sshd starts each session in a group of its own, so the
+ * group is exactly this command and everything it started, and nothing else -- the commands of one
+ * run each have their own connection and so their own group.
  *
  * The last statement is a subshell `exit` rather than a plain one: it leaves `$?` as the command's own
  * status for whatever the enclosing script appends, instead of ending the script here.
  */
 export function wrapCommandToDieWithConnection(command: string): string {
   return shBlock(
+    'exec 3<&0',
     `${command} &`,
     '_bica_cmd=$!',
-    '( cat > /dev/null 2>&1; kill -TERM "$_bica_cmd" 2>/dev/null ) &',
+    '( cat <&3 > /dev/null 2>&1; kill -TERM 0 2>/dev/null ) &',
     '_bica_watch=$!',
     'wait "$_bica_cmd"',
     '_bica_ec=$?',

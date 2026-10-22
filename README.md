@@ -831,7 +831,7 @@ None of these are verdicts on your code:
 | **97** | ran, but the workspace was taken part-way through, so the result was discarded. Re-run. |
 | **96** | the remote workspace could not be entered. |
 | **94** | the files never got to the remote: the sync stopped making progress, so nothing ran |
-| **95** | the connection dropped part-way through. The command may have passed, failed, or still be running. Re-run. |
+| **95** | the connection dropped part-way through, so the command's result is unknown. The remote ends a command whose connection closes; if anything is still running there, the workspace stays leased until it stops, and `bica cancel` ends it. Re-run. |
 
 ### What the run tells you
 

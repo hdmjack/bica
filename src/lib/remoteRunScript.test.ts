@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -186,8 +186,8 @@ describe('wrapCommandToDieWithConnection', () => {
   it('runs the command in the background with a watchdog on stdin', () => {
     const script = wrapCommandToDieWithConnection("'pnpm' 'serve'");
     expect(script).toContain("'pnpm' 'serve' &");
-    expect(script).toContain('cat > /dev/null');
-    expect(script).toContain('kill -TERM "$_bica_cmd"');
+    expect(script).toContain('cat <&3 > /dev/null');
+    expect(script).toContain('kill -TERM 0');
   });
 
   it("leaves $? as the command's own status for the enclosing script", () => {
@@ -199,5 +199,91 @@ describe('wrapCommandToDieWithConnection', () => {
     const script = wrapCommandToDieWithConnection('serve');
     expect(script).toContain('wait "$_bica_cmd"');
     expect(script).not.toContain('wait "$_bica_watch"');
+  });
+});
+
+/**
+ * The watchdog run for real, in a process group of its own as sshd would give it, with the
+ * connection played by a pipe on stdin. Closing the pipe is the connection dropping.
+ */
+// Every shell bica might run under: `sh` and `bash` redirect a background job's stdin, zsh does not,
+// and the watchdog was only ever correct under the one that does not.
+const shells = ['sh', 'bash', 'zsh'].filter(
+  (shell) => spawnSync('sh', ['-c', `command -v ${shell}`]).status === 0,
+);
+
+describe.each(shells)('wrapCommandToDieWithConnection, run under %s', (shell) => {
+  let dir = '';
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-watchdog-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const isAlive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const startWrapped = (command: string) => {
+    const child = spawn(shell, ['-c', wrapCommandToDieWithConnection(command)], {
+      detached: true,
+      stdio: ['pipe', 'ignore', 'ignore'],
+    });
+    const exited = new Promise<number | null>((resolve) => {
+      child.on('close', (code) => {
+        resolve(code);
+      });
+    });
+    return { child, exited };
+  };
+
+  const waitFor = async (check: () => boolean, ms = 5000): Promise<boolean> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (check()) {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return check();
+  };
+
+  it('ends the processes the command started when the connection goes, not only the command', async () => {
+    // The shape of `pnpm test:run`: the pid the wrapper starts is a parent, and the work is done by a
+    // grandchild that a `SIGTERM` to the parent alone did not reach.
+    const pidFile = path.join(dir, 'grandchild');
+    const { child, exited } = startWrapped(
+      `sh -c 'sleep 60 & echo $! > ${pidFile}; wait'`,
+    );
+    try {
+      expect(await waitFor(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8').trim() !== '')).toBe(true);
+      const grandchild = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      expect(isAlive(grandchild)).toBe(true);
+
+      child.stdin.end();
+      await exited;
+      expect(await waitFor(() => !isAlive(grandchild))).toBe(true);
+    } finally {
+      try {
+        process.kill(-(child.pid ?? 0), 'SIGKILL');
+      } catch {
+        // Already gone, which is the point.
+      }
+    }
+  });
+
+  it("leaves a command that finishes on its own alone, with its own exit code", async () => {
+    const { child, exited } = startWrapped(`sh -c 'exit 3'`);
+    try {
+      expect(await exited).toBe(3);
+    } finally {
+      child.stdin.end();
+    }
   });
 });
