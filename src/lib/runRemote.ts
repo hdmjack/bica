@@ -8,6 +8,7 @@ import {
   CONNECTION_LOST_EXIT,
   classifySshFailure,
   describeConnectionLoss,
+  describeKilledBySignal,
   openSshDiagnosticsLog,
   remoteReportedItsExit,
   sshDiagnosticSummary,
@@ -768,6 +769,15 @@ export function buildRemoteRunScript(options: {
  * which is the only reason it worked: the remote shell defaults to zsh, and `BICA_LOGIN_SHELL=bash`
  * would have ended every tunnel as it started.
  *
+ * The command is given `/dev/null` for stdin, so it never shares the connection's pipe with the
+ * watchdog. Shared, they share one open file description and so its flags, and Node sets `O_NONBLOCK`
+ * on a pipe it reads: `pnpm` and `vitest` both do. A `cat` that had not yet reached its `read` when
+ * that happened got `EAGAIN` ("Resource temporarily unavailable"), exited, and the watchdog killed a
+ * healthy command. Ordinarily `cat` wins that race; at load 37 on the remote it lost, and an `--also`
+ * test run died after four seconds having printed nothing. The watchdog also retries a failed `cat`
+ * rather than taking any non-zero exit as the connection ending: `cat` exits 0 at end-of-file and
+ * only then, so anything else that leaves the pipe non-blocking costs a poll a second, not the run.
+ *
  * It signals the process group, not the pid it started. That pid is usually a package manager whose
  * work is done by grandchildren, and `pnpm` does not reliably pass a `SIGTERM` on: killing it alone
  * left the node processes under it running. sshd starts each session in a group of its own, so the
@@ -780,9 +790,9 @@ export function buildRemoteRunScript(options: {
 export function wrapCommandToDieWithConnection(command: string): string {
   return shBlock(
     'exec 3<&0',
-    `${command} &`,
+    `${command} < /dev/null &`,
     '_bica_cmd=$!',
-    '( cat <&3 > /dev/null 2>&1; kill -TERM 0 2>/dev/null ) &',
+    '( until cat <&3 > /dev/null 2>&1; do sleep 1; done; kill -TERM 0 2>/dev/null ) &',
     '_bica_watch=$!',
     'wait "$_bica_cmd"',
     '_bica_ec=$?',
@@ -1113,6 +1123,16 @@ function reportSshFailure(options: {
       sshHost: options.sshHost,
       label: options.label,
       diagnostics,
+    });
+    for (const line of message.split('\n')) {
+      process.stderr.write(`${chalk.bold.yellow('[bica]')} ${line}\n`);
+    }
+    return CONNECTION_LOST_EXIT;
+  }
+  if (failure === 'killed-by-signal') {
+    const message = describeKilledBySignal({
+      sshHost: options.sshHost,
+      label: options.label,
     });
     for (const line of message.split('\n')) {
       process.stderr.write(`${chalk.bold.yellow('[bica]')} ${line}\n`);

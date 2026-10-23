@@ -39,7 +39,9 @@ function installFakeSsh(how: { log: string; status: number }): void {
       '  if [ "$prev" = "-E" ]; then logfile="$a"; fi',
       '  prev="$a"',
       'done',
-      `[ -n "$logfile" ] && printf '%s' ${JSON.stringify(how.log)} > "$logfile"`,
+      // `%b`, so the log's newlines arrive as newlines. With `%s` the whole log was one line, and only
+      // classifiers that never anchor to the start of a line could pass against it.
+      `[ -n "$logfile" ] && printf '%b' ${JSON.stringify(how.log)} > "$logfile"`,
       `exit ${String(how.status)}`,
     ].join('\n'),
     { mode: 0o755 },
@@ -102,6 +104,23 @@ describe('a connection that drops part-way through a run', () => {
     expect(said).toContain('Connection reset by peer');
     expect(said).toContain('pnpm-test-run');
     expect(said).toContain('unknown');
+  });
+
+  it('reports a command killed on the remote as 95 and says so, not as the command exiting 255', async () => {
+    // The 0.8.4 report: `pnpm-test-run=255` after four seconds and nothing else. ssh's closing lines
+    // from a real `kill -TERM $$` on the remote.
+    installFakeSsh({
+      status: 255,
+      log:
+        'Authenticated to 192.168.0.120 ([192.168.0.120]:22) using "publickey".\n' +
+        'debug1: Entering interactive session.\n' +
+        'debug1: client_input_channel_req: channel 0 rtype exit-signal reply 0\n' +
+        'debug1: Exit status -1\n',
+    });
+    const { code, said } = await runAgainstFakeSsh();
+    expect(code).toBe(CONNECTION_LOST_EXIT);
+    expect(said).toContain('pnpm-test-run: the command was killed by a signal');
+    expect(said).toContain('not a verdict');
   });
 
   it('leaves a command that genuinely exited 255 as 255', async () => {

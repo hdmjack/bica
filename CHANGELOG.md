@@ -3,6 +3,23 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.5 — 2026-10-23
+
+### Fixed
+- **The `--also` watchdog no longer kills healthy commands on a loaded remote.** 0.8.2 gave each
+  command a watchdog that reads the connection's pipe and ends the command when it closes. The
+  command shared that pipe as its stdin, and so shared its flags, and Node sets `O_NONBLOCK` on a
+  pipe it reads. When `pnpm` or `vitest` got there before the watchdog's `cat` reached its `read`,
+  `cat` failed with `Resource temporarily unavailable` and the watchdog killed the command. At load
+  37 that ordering is likely, and a test run died four seconds in having printed nothing. The
+  command now gets `/dev/null` for stdin, and the watchdog retries a failed read instead of taking
+  any failure as the connection ending.
+- **A command killed by a signal on the remote is reported as such, under 95.** ssh logs
+  `Exit status -1` when no status comes back, and bica read any `Exit status` line as the command
+  answering for itself, so a killed command surfaced as a silent `=255` that looked like a verdict.
+  It now says the command was killed and has no exit code of its own. 95 now covers both ways a
+  result can fail to come back: a dropped connection, and a command killed on the remote.
+
 ## 0.8.4 — 2026-10-22
 
 ### Fixed

@@ -40,6 +40,8 @@ export type SshFailure =
   | 'connection-lost'
   /** The session was never established. Nothing ran. */
   | 'could-not-connect'
+  /** The session was up and the remote command was ended by a signal. It has no exit code. */
+  | 'killed-by-signal'
   /** ssh said nothing about the connection, so 255 is the command's own exit code. */
   | 'unknown';
 
@@ -58,8 +60,17 @@ const SESSION_ESTABLISHED: readonly RegExp[] = [
   /^debug1: mux_client_request_session/m,
 ];
 
-/** ssh's verbose line for the remote command's own exit code coming back. */
-const REMOTE_REPORTED_ITS_EXIT = /^debug1: Exit status /m;
+/**
+ * ssh's verbose line for the remote command's own exit code coming back.
+ *
+ * A digit, not a minus sign: ssh prints `Exit status -1` when no status came back, which is what a
+ * command killed by a signal produces. Matching the bare prefix read that as the command answering for
+ * itself, so a test run killed four seconds in was reported as `pnpm-test-run=255` and nothing else.
+ */
+const REMOTE_REPORTED_ITS_EXIT = /^debug1: Exit status \d/m;
+
+/** ssh's verbose line for sshd reporting that the remote command died of a signal. */
+const KILLED_BY_SIGNAL = /^debug1: client_input_channel_req: channel \d+ rtype exit-signal /m;
 
 /**
  * Whether the remote command's own exit code came back.
@@ -129,6 +140,9 @@ export function classifySshFailure(options: {
     return 'unknown';
   }
   if (isVerbose(diagnostics)) {
+    if (KILLED_BY_SIGNAL.test(diagnostics)) {
+      return 'killed-by-signal';
+    }
     if (REMOTE_REPORTED_ITS_EXIT.test(diagnostics)) {
       return 'unknown';
     }
@@ -206,6 +220,24 @@ export function openSshDiagnosticsLog(): SshDiagnosticsLog {
       }
     },
   };
+}
+
+/**
+ * What to tell someone whose remote command was killed by a signal.
+ *
+ * Under the same code as a drop, because the caller's position is the same: the command did not say
+ * how it ended, so there is no verdict to report, and running it again is the thing to do. ssh does
+ * not say which signal at the verbosity bica asks for, so neither does this.
+ */
+export function describeKilledBySignal(options: {
+  sshHost: string;
+  label?: string;
+}): string {
+  const who = options.label === undefined ? '' : `${options.label}: `;
+  return (
+    `${who}the command was killed by a signal on ${options.sshHost} before it finished, so it has no ` +
+    `exit code of its own.\nExit ${String(CONNECTION_LOST_EXIT)} is not a verdict on your code. Re-run it.`
+  );
 }
 
 /**

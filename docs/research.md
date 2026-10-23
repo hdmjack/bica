@@ -388,3 +388,14 @@ The claim's `t=` stamp and the remote's boot time are both on the remote's clock
 needs no cross-machine trust. A 30-second margin sits on the side of honouring, because the boot time
 is derived from the clock and moves if the clock is stepped soon after boot.
 
+**Addendum, same day: the watchdog shared more than the pipe.** 0.8.2's watchdog read a copy of the
+connection's stdin on fd 3, and the command kept the original as its own stdin. A `dup` shares the
+open file description, and with it the `O_NONBLOCK` flag, which Node sets on a pipe it reads. A `cat`
+blocked in `read` before that happens is unaffected; one that reaches `read` after gets `EAGAIN`,
+exits 1, and the watchdog killed the command. Reproduced locally with a background `node` reading
+stdin and a `cat <&3` started a second later: `cat: stdin: Resource temporarily unavailable` after
+1s, under zsh, bash and sh. On an idle remote `cat` wins the race; at load 37 it lost, and a test run
+was killed four seconds in. It looked like a connection fault rather than a kill because ssh logs
+`Exit status -1` for a command that died of a signal, and the classifier's `Exit status ` prefix
+match read that as the command answering for itself.
+

@@ -217,7 +217,7 @@ Commands that write files
         different remotePath — another clone pointing at the same one is exactly what is refused.
     97  ran, but the workspace was taken part-way through, so the result was discarded. Re-run.
     96  the remote workspace could not be entered.
-    95  the connection dropped part-way through, so the command's result is unknown. Re-run.
+    95  the command's result never came back: the connection dropped, or the remote killed it. Re-run.
     94  the files never got to the remote: the sync stopped making progress, so nothing ran.
     93  the command passed, but an \`artifacts:\` entry could not be brought home, so the local copy
         is stale. Re-run, or copy it by hand.

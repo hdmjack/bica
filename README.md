@@ -842,7 +842,7 @@ None of these are verdicts on your code:
 | **97** | ran, but the workspace was taken part-way through, so the result was discarded. Re-run. |
 | **96** | the remote workspace could not be entered. |
 | **94** | the files never got to the remote: the sync stopped making progress, so nothing ran |
-| **95** | the connection dropped part-way through, so the command's result is unknown. The remote ends a command whose connection closes; if anything is still running there, the workspace stays leased until it stops, and `bica cancel` ends it. Re-run. |
+| **95** | the command's result never came back: its connection dropped part-way through, or something on the remote killed it with a signal. The remote ends a command whose connection closes; if anything is still running there, the workspace stays leased until it stops, and `bica cancel` ends it. Re-run. |
 | **93** | the command passed, but an `artifacts:` entry could not be brought home, so the local copy is stale. Re-run. A failing command keeps its own code. |
 
 ### What the run tells you

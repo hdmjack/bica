@@ -5,6 +5,7 @@ import {
   CONNECTION_LOST_EXIT,
   classifySshFailure,
   describeConnectionLoss,
+  describeKilledBySignal,
   openSshDiagnosticsLog,
   sshDiagnosticSummary,
 } from './connectionLoss';
@@ -37,6 +38,19 @@ const VERBOSE_COMMAND_FAILED =
   'debug1: Entering interactive session.\n' +
   'debug1: Sending command: zsh -lc exit 255\n' +
   'debug1: Exit status 255\n';
+
+/**
+ * `ssh -T -v mini 'kill -TERM $$'`, its closing lines as ssh wrote them on 2026-10-22. A remote command
+ * that dies of a signal reports no status, and ssh says so as `Exit status -1` -- which the bare
+ * `Exit status ` match took for the command answering for itself.
+ */
+const VERBOSE_KILLED_BY_SIGNAL =
+  'Authenticated to 192.168.0.120 ([192.168.0.120]:22) using "publickey".\n' +
+  'debug1: Entering interactive session.\n' +
+  'debug1: client_input_channel_req: channel 0 rtype exit-signal reply 0\n' +
+  'Transferred: sent 3640, received 4036 bytes, in 0.0 seconds\n' +
+  'Bytes per second: sent 115376.1, received 127928.0\n' +
+  'debug1: Exit status -1\n';
 
 const VERBOSE_NEVER_CONNECTED =
   'debug1: Connecting to 127.0.0.1 port 9.\n' +
@@ -220,3 +234,21 @@ describe('openSshDiagnosticsLog', () => {
     expect(log.read()).toBe('');
   });
 });
+
+describe('a remote command killed by a signal', () => {
+  it('is told apart from a command that exited 255, and from a drop', () => {
+    expect(
+      classifySshFailure({ status: 255, diagnostics: VERBOSE_KILLED_BY_SIGNAL }),
+    ).toBe('killed-by-signal');
+    expect(
+      classifySshFailure({ status: 255, diagnostics: VERBOSE_COMMAND_FAILED }),
+    ).toBe('unknown');
+  });
+
+  it('says it has no exit code and is not a verdict, naming the command', () => {
+    const said = describeKilledBySignal({ sshHost: 'mini', label: 'pnpm-test-run' });
+    expect(said).toMatch(/^pnpm-test-run: the command was killed by a signal on mini/);
+    expect(said).toContain(`Exit ${String(CONNECTION_LOST_EXIT)} is not a verdict`);
+  });
+});
+

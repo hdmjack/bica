@@ -185,7 +185,7 @@ describe('the end-of-run lease check, executed', () => {
 describe('wrapCommandToDieWithConnection', () => {
   it('runs the command in the background with a watchdog on stdin', () => {
     const script = wrapCommandToDieWithConnection("'pnpm' 'serve'");
-    expect(script).toContain("'pnpm' 'serve' &");
+    expect(script).toContain("'pnpm' 'serve' < /dev/null &");
     expect(script).toContain('cat <&3 > /dev/null');
     expect(script).toContain('kill -TERM 0');
   });
@@ -230,8 +230,8 @@ describe.each(shells)('wrapCommandToDieWithConnection, run under %s', (shell) =>
     }
   };
 
-  const startWrapped = (command: string) => {
-    const child = spawn(shell, ['-c', wrapCommandToDieWithConnection(command)], {
+  const startWrapped = (command: string, before = '') => {
+    const child = spawn(shell, ['-c', `${before}${wrapCommandToDieWithConnection(command)}`], {
       detached: true,
       stdio: ['pipe', 'ignore', 'ignore'],
     });
@@ -275,6 +275,58 @@ describe.each(shells)('wrapCommandToDieWithConnection, run under %s', (shell) =>
       } catch {
         // Already gone, which is the point.
       }
+    }
+  });
+
+  // A Node process reading the connection's pipe, started before the wrapper so that the pipe is
+  // already non-blocking when the watchdog's `cat` reaches its `read`: the order a loaded remote
+  // produced, made certain rather than likely.
+  // Through fd 4, because `sh` and `bash` would hand a plain background job `/dev/null` instead.
+  const nonBlockingFirst =
+    `exec 4<&0\n${JSON.stringify(process.execPath)} -e 'process.stdin.on("data", () => {})' <&4 & sleep 1\nexec 4<&-\n`;
+
+  it('does not mistake a non-blocking pipe for the connection ending', async () => {
+    const { child, exited } = startWrapped(`sh -c 'sleep 2; exit 3'`, nonBlockingFirst);
+    try {
+      expect(await exited).toBe(3);
+    } finally {
+      child.stdin.end();
+    }
+  });
+
+  it('still ends the command when the connection closes, with the pipe non-blocking', async () => {
+    const pidFile = path.join(dir, 'grandchild');
+    const { child, exited } = startWrapped(
+      `sh -c 'sleep 60 & echo $! > ${pidFile}; wait'`,
+      nonBlockingFirst,
+    );
+    try {
+      expect(await waitFor(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8').trim() !== '')).toBe(true);
+      const grandchild = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      // Past the moment the old watchdog would have fired on `EAGAIN`.
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(isAlive(grandchild)).toBe(true);
+
+      child.stdin.end();
+      await exited;
+      expect(await waitFor(() => !isAlive(grandchild))).toBe(true);
+    } finally {
+      try {
+        process.kill(-(child.pid ?? 0), 'SIGKILL');
+      } catch {
+        // Already gone, which is the point.
+      }
+    }
+  });
+
+  it("gives the command its own stdin, so it cannot read or reconfigure the connection's", async () => {
+    // `cat` as the command reads end-of-file from `/dev/null` and finishes; reading the connection
+    // it would wait for as long as the connection lasted.
+    const { child, exited } = startWrapped('cat');
+    try {
+      expect(await exited).toBe(0);
+    } finally {
+      child.stdin.end();
     }
   });
 
