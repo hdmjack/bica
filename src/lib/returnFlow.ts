@@ -17,6 +17,8 @@ import {
   runRemoteScriptOverStdin,
 } from './runRemote';
 import { SUBPROCESS_MAX_BUFFER } from './subprocessOutput';
+import { SYNC_NOT_READY_EXIT } from './syncProgress';
+import type { RsyncRunner } from './artifacts';
 
 /**
  * Trees return-flow must never walk, on top of whatever the user ignores. `.git` is mirrored
@@ -221,15 +223,40 @@ export function pushReturnFlowToRemote(prep: PrepareResult): PullResult {
 }
 
 /**
+ * Files git creates for the length of one operation and removes when it ends.
+ *
+ * Never worth copying, and harmful to copy. Another git process in the same repository -- an editor
+ * polling `git status`, a hook, a second agent -- makes and removes `index.lock` many times a second,
+ * and one that vanished while rsync was reading it failed the whole sync with exit 23. A run from a
+ * worktree then went ahead with no refs on the remote, and `test:run:changed` reported `unknown
+ * revision 'origin/master...HEAD'` as an ordinary exit 1. One that is copied whole is worse: a stale
+ * `index.lock` on the remote stops every git command there that writes the index.
+ *
+ * Excluded on every pass, and deleted from the remote by the passes that mirror, so a lock an earlier
+ * version copied does not stay there for good.
+ */
+export const GIT_TRANSIENT_PATTERNS: readonly string[] = [
+  '*.lock',
+  'tmp_pack_*',
+  'tmp_idx_*',
+  'tmp_obj_*',
+];
+
+const transientExcludes = GIT_TRANSIENT_PATTERNS.flatMap((p) => ['--exclude', p]);
+
+/**
  * Rsync the local `.git` directory to the remote workspace (local → remote), making the remote git
  * history/HEAD/refs an exact mirror of local. Enables git-dependent commands like `vitest --changed`
  * to resolve the same changed-file set on the remote as they would locally.
  *
  * Uses `--delete` so stale remote-only refs/objects don't linger (unlike return-flow, which never
- * deletes). Best-effort — failures emit a warning and return non-zero but do not throw, so they
- * don't mask the remote command's exit code.
+ * deletes). A failure is returned rather than thrown, and the caller stops the run on it -- see
+ * {@link gitSyncStopsRun}.
  */
-export function pushGitToRemote(prep: PrepareResult): PullResult {
+export function pushGitToRemote(
+  prep: PrepareResult,
+  run: RsyncRunner = defaultRsyncRunner,
+): PullResult {
   if (!rsyncAvailable()) {
     process.stderr.write(
       `${warn('[bica]')} ${dim('rsync not on PATH; skipping .git sync (install rsync to enable git-dependent commands like --changed).')}\n`,
@@ -252,7 +279,17 @@ export function pushGitToRemote(prep: PrepareResult): PullResult {
   clearRemoteDotGitFile(prep);
 
   if (layout.kind === 'plain') {
-    const result = rsyncGit(['-az', '--delete', ensureTrailingSlash(layout.gitDir), remoteDest]);
+    const result = rsyncGit(
+      [
+        '-az',
+        '--delete',
+        '--delete-excluded',
+        ...transientExcludes,
+        ensureTrailingSlash(layout.gitDir),
+        remoteDest,
+      ],
+      run,
+    );
     if (result.exitCode === 0) {
       restoreSubmodulePointers(prep);
     }
@@ -268,14 +305,19 @@ export function pushGitToRemote(prep: PrepareResult): PullResult {
   process.stderr.write(
     `${dim('[bica]')} ${dim('This is a git worktree; syncing the shared repository and this worktree\'s state as one.')}\n`,
   );
-  const shared = rsyncGit([
-    '-az',
-    '--delete',
-    '--exclude',
-    'worktrees/',
-    ensureTrailingSlash(layout.commonDir),
-    remoteDest,
-  ]);
+  const shared = rsyncGit(
+    [
+      '-az',
+      '--delete',
+      '--delete-excluded',
+      '--exclude',
+      'worktrees/',
+      ...transientExcludes,
+      ensureTrailingSlash(layout.commonDir),
+      remoteDest,
+    ],
+    run,
+  );
   if (shared.exitCode !== 0) {
     return shared;
   }
@@ -290,9 +332,10 @@ export function pushGitToRemote(prep: PrepareResult): PullResult {
     // this worktree's refs -- so forcing it costs nothing worth measuring.
     '--ignore-times',
     ...WORKTREE_PRIVATE_ENTRIES.flatMap((entry) => ['--exclude', entry]),
+    ...transientExcludes,
     ensureTrailingSlash(layout.gitDir),
     remoteDest,
-  ]);
+  ], run);
 }
 
 /** Remove a `.git` that is a plain file on the remote, which only a worktree sync can have left. */
@@ -335,19 +378,76 @@ function restoreSubmodulePointers(prep: PrepareResult): void {
   );
 }
 
-function rsyncGit(args: string[]): PullResult {
-  const result = spawnSync('rsync', args, {
+function defaultRsyncRunner(args: readonly string[]): {
+  status: number;
+  stdout: string;
+  stderr: string;
+} {
+  const result = spawnSync('rsync', [...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: SUBPROCESS_MAX_BUFFER,
     shell: false,
   });
-  const code = result.status ?? 1;
-  if (code !== 0) {
-    const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
-    process.stderr.write(
-      `${warn('[bica]')} ${dim(`.git sync rsync exited ${String(code)}${err ? `: ${err}` : ''}`)}\n`,
-    );
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
+}
+
+/** rsync's code for "some files vanished before they could be transferred". */
+const RSYNC_VANISHED = 24;
+
+/**
+ * One `.git` pass, retried once.
+ *
+ * A repository somebody is using changes under the copy. The transient files are excluded, but a
+ * pack written by a fetch or a `gc` can still appear or go part-way through, so one failure earns one
+ * more attempt -- which, against a tree that has stopped moving, is a complete copy. A file that
+ * vanished (24) is not a failure at all: what vanishes from `.git` is by nature something git was
+ * about to remove.
+ */
+export function rsyncGit(
+  args: string[],
+  run: RsyncRunner = defaultRsyncRunner,
+): PullResult {
+  let code = 0;
+  let said = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = run(args);
+    code = result.status === RSYNC_VANISHED ? 0 : result.status;
+    if (code === 0) {
+      return { ran: true, exitCode: 0 };
+    }
+    said = `${result.stderr}${result.stdout}`.trim();
   }
+  process.stderr.write(
+    `${warn('[bica]')} ${dim(`.git sync rsync exited ${String(code)}${said ? `: ${said}` : ''}`)}\n`,
+  );
   return { ran: true, exitCode: code };
+}
+
+/**
+ * The run's exit code when the `.git` sync failed, or `undefined` to go ahead.
+ *
+ * It was best-effort, so that a failed copy could not mask the command's exit code. It masked it the
+ * other way instead: the commands ran against a repository with no refs, and a history-reading one
+ * failed in a way indistinguishable from a real failure. Stopping says the true thing, which is that
+ * nothing ran against the tree that was asked for.
+ */
+export function gitSyncStopsRun(
+  result: PullResult,
+  sshHost: string,
+): number | undefined {
+  if (!result.ran || result.exitCode === 0) {
+    return undefined;
+  }
+  process.stderr.write(
+    `${warn('[bica]')} The .git sync to ${sshHost} did not complete, so the remote's history is incomplete ` +
+      'and a command that reads it would fail as if your code had. Nothing ran, so exit ' +
+      `${String(SYNC_NOT_READY_EXIT)} is not a verdict on your code. Re-run; \`git: sync: false\` in ` +
+      'bica.yml turns the .git sync off for a repository whose commands never read history.\n',
+  );
+  return SYNC_NOT_READY_EXIT;
 }

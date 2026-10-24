@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.6 — 2026-10-23
+
+### Fixed
+- **A `.git` sync that did not complete stops the run.** It was best-effort, so a failed copy
+  printed a warning and the commands ran anyway, against a repository with missing refs. From a
+  worktree a failed first pass also skipped the overlay of the worktree's own state, so
+  `test:run:changed` and `lint:changed` failed on `unknown revision 'origin/master...HEAD'` and
+  were reported as ordinary exit 1s. The run now stops before anything runs, with **94**.
+- **git's transient files are no longer copied.** Another git process in the same repository
+  creates and removes `index.lock` many times a second, and one that vanished mid-copy failed the
+  sync with rsync exit 23. `*.lock` and git's temporary pack files are excluded, stale locks an
+  earlier sync left on the remote are deleted, a file that vanished (rsync 24) counts as a complete
+  copy, and any other failure is retried once before the run is stopped.
+
 ## 0.8.5 — 2026-10-23
 
 ### Fixed

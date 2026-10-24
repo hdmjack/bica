@@ -91,6 +91,7 @@ import {
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
 import {
   pullReturnFlow,
+  gitSyncStopsRun,
   pushGitToRemote,
   pushReturnFlowToRemote,
 } from './lib/returnFlow';
@@ -1025,7 +1026,11 @@ async function runWithLiveSession(options: {
   if (syncGit) {
     chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
     const gitPush = pushGitToRemote(prep);
-    if (gitPush.ran && gitPush.exitCode === 0) {
+    const stop = gitSyncStopsRun(gitPush, prep.config.sshHost);
+    if (stop !== undefined) {
+      return stop;
+    }
+    if (gitPush.ran) {
       chrome(`${dim('[bica]')} ${dim('.git sync done.')}\n`);
     }
   }

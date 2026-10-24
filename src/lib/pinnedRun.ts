@@ -39,7 +39,12 @@ import {
   wantsMtimeRepair,
 } from './syncedMtimes';
 import { remoteTrustMiseWorkspace } from './runRemote';
-import { pullReturnFlow, pushGitToRemote, pushReturnFlowToRemote } from './returnFlow';
+import {
+  gitSyncStopsRun,
+  pullReturnFlow,
+  pushGitToRemote,
+  pushReturnFlowToRemote,
+} from './returnFlow';
 import { reportArtifactPull } from './reportArtifacts';
 import { exitAfterArtifactPull } from './artifacts';
 import {
@@ -413,7 +418,10 @@ export async function runPinned(options: {
   const { syncGit } = resolveBicaPluginConfig(prep.repoRoot);
   if (syncGit) {
     chrome(`${dim('[bica]')} ${dim('Syncing .git → remote (git.sync)…')}\n`);
-    pushGitToRemote(prep);
+    const stop = gitSyncStopsRun(pushGitToRemote(prep), prep.config.sshHost);
+    if (stop !== undefined) {
+      return stop;
+    }
   }
 
   // Before the command, not after it: a command that believes a stale repository succeeds, and a
