@@ -55,6 +55,8 @@ export interface DoctorProbes {
   bicaIsGitignored: boolean | undefined;
   /** What this repository keeps off the remote, for the companion-file check. */
   syncIgnorePaths: readonly string[];
+  /** Records bica ignores on this repository's behalf because bica.yml has not said; see syncConsistency. */
+  defaultedIgnores?: readonly string[];
   /**
    * Tools this repository declares it needs on the remote (`toolchain:` in bica.yml).
    *
@@ -157,6 +159,20 @@ function checkConfig(probes: DoctorProbes): CheckResult {
  */
 function checkSyncConsistency(probes: DoctorProbes): CheckResult {
   const found = findSyncInconsistencies(probes.syncIgnorePaths ?? []);
+  const defaulted = probes.defaultedIgnores ?? [];
+  if (found.length === 0 && defaulted.length > 0) {
+    // Runs are already right. The suggestion is for everyone else who reads this bica.yml: a teammate
+    // on a bica older than the default gets the split back, and the file does not say why it works.
+    const listed = defaulted.map((p) => `"${p}"`).join(', ');
+    return {
+      name: 'Sync ignores',
+      status: 'warning',
+      detail: `bica is ignoring ${listed} because bica.yml ignores the build output it describes`,
+      fix:
+        `Add ${listed} to sync.ignore.paths in bica.yml, so the file says what runs do -- and so a bica ` +
+        'older than 0.8.7, which does not add it, does not typecheck against another tree\'s dist.',
+    };
+  }
   if (found.length === 0) {
     return {
       name: 'Sync ignores',
@@ -485,6 +501,8 @@ export function reportOnThisMachine(options: {
   isGitignored: (repoRoot: string) => boolean;
   /** What this repository keeps off the remote; absent when there is no config to read. */
   syncIgnorePaths?: readonly string[];
+  /** Records bica ignores on this repository's behalf; absent when there is no config to read. */
+  defaultedIgnores?: readonly string[];
   /** Tools this repository declares it needs on the remote; absent when there is no config. */
   toolchain?: readonly string[];
   /** Ids of the package-manager plugins active here. */
@@ -511,6 +529,7 @@ export function reportOnThisMachine(options: {
     loginShell: process.env.BICA_LOGIN_SHELL?.trim() ?? 'zsh',
     toolingPreamble: options.toolingPreamble,
     syncIgnorePaths: options.syncIgnorePaths ?? [],
+    defaultedIgnores: options.defaultedIgnores ?? [],
     toolchain: options.toolchain ?? [],
     packageManagerPluginIds: options.packageManagerPluginIds ?? [],
     pinnedToolchain: options.pinnedToolchain ?? null,

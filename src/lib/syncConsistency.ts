@@ -72,3 +72,29 @@ export function findSyncInconsistencies(
       `${rule.why} Add \`"${rule.record}"\` to the same list.`,
   }));
 }
+
+/**
+ * The records an ignored output needs ignored with it, added for a config that has not said.
+ *
+ * The warning alone did not get the line written: float-javascript's checkouts printed it before every
+ * run for two days while a typecheck reported names that exist in no tree. So for a config that
+ * ignores the output and says nothing about the record, bica ignores the record too, the way it adds
+ * Rust's `target`.
+ *
+ * Never overrides a decision. Any pattern that mentions the record -- to ignore it, or `!` to send it
+ * -- is left exactly as written.
+ */
+export function withCompanionRecordsIgnored(ignorePaths: readonly string[]): {
+  paths: string[];
+  added: string[];
+} {
+  const added = COMPANION_RULES.filter((rule) => {
+    const suffix = rule.record.replace(/^\*/, '');
+    return (
+      covers(ignorePaths, rule.output) &&
+      !ignorePaths.some((p) => p.includes(suffix))
+    );
+  }).map((rule) => rule.record);
+  return { paths: [...ignorePaths, ...added], added };
+}
+

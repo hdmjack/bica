@@ -1,5 +1,6 @@
 import { execSync } from 'node:child_process';
 import { withCargoTargetIgnored } from './lib/rustWorkspace';
+import { withCompanionRecordsIgnored } from './lib/syncConsistency';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -50,6 +51,8 @@ export interface SyncSpecYaml {
   env?: string[];
   /** Whether bica added `target` to the ignore list because this looks like a Rust repository. */
   cargoTargetIgnored?: boolean;
+  /** Records bica ignored because their output is ignored; see `withCompanionRecordsIgnored`. */
+  companionRecordsIgnored?: string[];
   /**
    * The user's configured `sync.ignore.paths`, *before* the return-flow patterns are merged in.
    * These name trees each side owns independently (node_modules, dist, …); return-flow must not
@@ -207,10 +210,12 @@ export function normalizeToSyncSpecYaml(
     }
     const sessionName = keys[0];
     const session = syncObj[sessionName] as WorkspaceSyncSession;
-    const sessionIgnore = withCargoTargetIgnored(
+    const cargoIgnore = withCargoTargetIgnored(
       repoRoot,
       session.ignore?.paths ?? [],
     );
+    const companions = withCompanionRecordsIgnored(cargoIgnore.paths);
+    const sessionIgnore = { ...cargoIgnore, paths: companions.paths };
     return {
       sync: {
         [sessionName]: applyReturnFlowToSession(
@@ -227,6 +232,7 @@ export function normalizeToSyncSpecYaml(
         ...new Set([...sessionIgnore.paths, ...generated.paths]),
       ],
       cargoTargetIgnored: sessionIgnore.added,
+      companionRecordsIgnored: companions.added,
     };
   }
 
@@ -245,8 +251,10 @@ export function normalizeToSyncSpecYaml(
       ignore = { paths };
     }
   }
-  const flatIgnore = withCargoTargetIgnored(repoRoot, ignore?.paths ?? []);
-  if (flatIgnore.added) {
+  const cargoIgnore = withCargoTargetIgnored(repoRoot, ignore?.paths ?? []);
+  const companions = withCompanionRecordsIgnored(cargoIgnore.paths);
+  const flatIgnore = { ...cargoIgnore, paths: companions.paths };
+  if (flatIgnore.added || companions.added.length > 0) {
     ignore = { paths: flatIgnore.paths };
   }
 
@@ -267,6 +275,7 @@ export function normalizeToSyncSpecYaml(
     env,
     syncIgnorePaths: [...new Set([...flatIgnore.paths, ...generated.paths])],
     cargoTargetIgnored: flatIgnore.added,
+    companionRecordsIgnored: companions.added,
   };
 }
 
@@ -591,6 +600,8 @@ export interface PrepareResult {
   env: string[];
   /** Whether `target` was added to the ignore list on this repo's behalf. */
   cargoTargetIgnored: boolean;
+  /** Build records added to the ignore list on this repo's behalf, for `bica doctor` to suggest. */
+  companionRecordsIgnored: string[];
   config: RemoteEnvConfig;
 }
 
@@ -689,6 +700,7 @@ export function prepareSyncProjectFile(options: {
     toolchain: doc.toolchain ?? [],
     env: doc.env ?? [],
     cargoTargetIgnored: doc.cargoTargetIgnored ?? false,
+    companionRecordsIgnored: doc.companionRecordsIgnored ?? [],
     config,
   };
 }

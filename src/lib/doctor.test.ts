@@ -258,6 +258,21 @@ describe('config that would mislead the remote compiler', () => {
     expect(find(runChecks(healthy()), 'Sync ignores').status).toBe('ok');
   });
 
+  it('suggests writing down a record bica ignored on the config\'s behalf', () => {
+    // The default makes runs right; bica.yml should still say so, for a teammate on an older bica.
+    const results = runChecks(
+      healthy({
+        syncIgnorePaths: ['node_modules', '.git', 'dist', '*.tsbuildinfo'],
+        defaultedIgnores: ['*.tsbuildinfo'],
+      }),
+    );
+    const check = find(results, 'Sync ignores');
+    expect(check.status).toBe('warning');
+    expect(check.detail).toContain('bica is ignoring "*.tsbuildinfo"');
+    expect(check.fix).toContain('Add "*.tsbuildinfo" to sync.ignore.paths in bica.yml');
+    expect(hasProblem(results)).toBe(false);
+  });
+
   it('says nothing about ignoring the record alone, which is merely slower', () => {
     // The remote rebuilds what it cannot prove is current: correct, and not worth a warning.
     const results = runChecks(

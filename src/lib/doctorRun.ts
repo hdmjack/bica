@@ -43,6 +43,7 @@ export function checkThisMachine(): CheckResult[] {
     runRemote: runRemoteScriptOverStdin,
     isGitignored: bicaIsGitignored,
     syncIgnorePaths: ignorePathsOrEmpty(),
+    defaultedIgnores: defaultedIgnoresOrEmpty(),
     toolchain: declaredToolchainOrEmpty(),
     packageManagerPluginIds: activePackageManagerIdsOrEmpty(),
     pinnedToolchain: pinnedToolchainOrNull(),
@@ -62,6 +63,14 @@ export function checkThisMachine(): CheckResult[] {
  * Total, like everything else the doctor gathers: a repository without a bica.yml is a case it has to
  * describe rather than fail on.
  */
+function defaultedIgnoresOrEmpty(): readonly string[] {
+  try {
+    return prepareSyncProjectFile({ verbose: false }).companionRecordsIgnored;
+  } catch {
+    return [];
+  }
+}
+
 function ignorePathsOrEmpty(): readonly string[] {
   try {
     return prepareSyncProjectFile({ verbose: false }).syncIgnorePaths;

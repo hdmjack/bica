@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.7 — 2026-10-23
+
+### Changed
+- **`*.tsbuildinfo` is ignored by default when `dist` is.** bica has warned about the pair since
+  0.8.1, and the warning did not get the line written: float-javascript's checkouts printed it before
+  every run while a typecheck reported names that exist in no tree, because `dist` belonged to
+  whichever checkout sharing the workspace built last and the record of it came from the caller's
+  laptop. A bica.yml that ignores `dist` and does not mention tsbuildinfo now gets `"*.tsbuildinfo"`
+  added, as a Rust repository gets `target`. A config that mentions it, either way, is left alone.
+  `bica doctor` suggests writing it into bica.yml, for teammates on older versions.
+
+  An existing workspace still holds the copies earlier runs sent, and an ignored file is no longer
+  deleted by the sync; remove them once (see the README's "Sync ignores and TypeScript `dist/`").
+
 ## 0.8.6 — 2026-10-23
 
 ### Fixed

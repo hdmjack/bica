@@ -279,7 +279,17 @@ For **composite** / project-reference monorepos, dependents often typecheck agai
 sends the record while withholding what it describes, so the remote skips rebuilding packages it has
 been told are current and typechecks consumers against whatever `dist` the last branch left there —
 several dozen type errors in a package that compiles cleanly locally and in CI, sticky until a forced
-rebuild. `bica doctor` warns when a config has one half of that pair without the other.
+rebuild.
+
+Since 0.8.7 bica adds `*.tsbuildinfo` itself when `dist` is ignored and bica.yml says nothing about
+tsbuildinfo, the way it adds `target` for a Rust repository; a config that mentions it, to ignore it
+or with `!` to send it, is left as written. `bica doctor` suggests writing the line into bica.yml
+anyway, so a teammate on an older bica gets the same behaviour.
+
+A workspace that has already run without it holds `*.tsbuildinfo` files copied from a laptop, and an
+ignored file is no longer deleted by the sync, so remove them once on the remote:
+`find <workspace> -name node_modules -prune -o -name '*.tsbuildinfo' -print -delete`. The next
+`tsc --build` there rebuilds once and writes records that match its own `dist`.
 
 **Recommendation:** add **`dist`** to `sync.ignore.paths` (Mutagen treats it like gitignore: any directory named `dist` under the repo root). The **remote** **`pnpm typecheck`** / **`tsc --build`** then rebuilds `dist` from the synced source. **Tradeoff:** the remote no longer receives prebuilt emit from **local** via sync; anything that needs emit must **build on the remote** (normal for typecheck/CI-style commands).
 

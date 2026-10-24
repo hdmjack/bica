@@ -34,6 +34,24 @@ returnFlow:
     expect(session?.ignore?.paths).toEqual(['node_modules']);
   });
 
+  it('ignores *.tsbuildinfo with dist for a bica.yml that has not said, as float-javascript\'s had not', () => {
+    const doc = YAML.parse(`
+sync:
+  ignore:
+    paths:
+      - node_modules
+      - dist
+returnFlow:
+  paths: []
+`) as unknown;
+    const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
+    const session = n.sync[Object.keys(n.sync)[0]];
+    // What the sync is configured with, not only what the report says.
+    expect(session?.ignore?.paths).toEqual(['node_modules', 'dist', '*.tsbuildinfo']);
+    expect(n.syncIgnorePaths).toContain('*.tsbuildinfo');
+    expect(n.companionRecordsIgnored).toEqual(['*.tsbuildinfo']);
+  });
+
   it('defaults mode when only ignore is set (flat sync)', () => {
     const doc = YAML.parse(`
 sync:

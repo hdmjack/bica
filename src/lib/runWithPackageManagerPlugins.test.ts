@@ -103,6 +103,7 @@ function makePrep(repoRoot: string): PrepareResult {
   toolchain: [],
   env: [],
   cargoTargetIgnored: false,
+  companionRecordsIgnored: [],
     config: {
       sshHost: 'test-host',
       remoteWorkspacePath: '/remote/repo',
