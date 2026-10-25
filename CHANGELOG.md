@@ -3,6 +3,26 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.8.8 — 2026-10-25
+
+### Fixed
+- **A sync that was not shut down cleanly no longer stops every later run with 94.** Mutagen marks
+  a project as running in `.bica/project.yml.lock` and refuses to start it again while the file is
+  there, whether or not its sessions are. A run that died without its exit hook left the file, the
+  next run ended the leftover session but not the file, and bica took Mutagen's refusal to mean the
+  sync was already up: it printed "Remote sync is already running", waited a minute for a session
+  that did not exist, and stopped with 94 and advice to check the network and the disk. When the
+  project's sessions are gone bica now clears the file and starts the sync.
+- **Another checkout's sync into the same workspace is dealt with before a run, not under it.**
+  Checkouts that share a remote workspace are kept apart by the lease, but a Mutagen session is
+  outside the lease: one left behind by another checkout went on mirroring that checkout's tree into
+  the workspace while the next run used it. A `bica run` now records its pid in `.bica/live-run`
+  while its sync is up. Before a run or a `bica start`, another checkout's session whose run has
+  ended is stopped, and said so. One started with `bica start`, or by a run that is still going, is
+  somebody's live sync and is not bica's to end: the run is refused with **98**, with the two ways
+  out -- `bica stop` in that checkout, or a `remotePath` of this checkout's own. Sessions from a bica
+  older than this carry no marker and are treated as deliberate.
+
 ## 0.8.7 — 2026-10-23
 
 ### Changed

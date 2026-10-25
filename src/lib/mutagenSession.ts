@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 import {
@@ -187,13 +188,57 @@ function writeMutagenStreams(
   }
 }
 
-export function mutagenProjectStart(
-  repoRoot: string,
-  projectFileAbsolutePath: string,
-): boolean {
+/**
+ * The project identifier Mutagen recorded when it last started this project file, or null when the
+ * project is not marked as running.
+ *
+ * `mutagen project start` writes the identifier into `<project file>.lock` and `project terminate`
+ * removes the file. "project already running" means only that the file is non-empty: Mutagen does
+ * not look for the sessions, so the file outlives them whenever they end some other way.
+ */
+function readProjectLockId(projectFileAbsolutePath: string): string | null {
+  try {
+    const id = fs.readFileSync(`${projectFileAbsolutePath}.lock`, 'utf8').trim();
+    return id === '' ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sessions Mutagen started for project `projectId`, found by the label it puts on each of them.
+ * Returns null when the listing fails, which is "cannot tell", not "there are none".
+ */
+function listProjectSessions(projectId: string): SyncSessionSummary[] | null {
+  const result = spawnSync(
+    'mutagen',
+    [
+      'sync',
+      'list',
+      '--label-selector',
+      `io.mutagen.project=${projectId}`,
+      '--template',
+      SYNC_LIST_TEMPLATE,
+    ],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false,
+    },
+  );
+  if (result.status !== 0) {
+    return null;
+  }
+  return (result.stdout ?? '')
+    .split('\n')
+    .map((line) => parseSyncListTemplateLine(line.trim()))
+    .filter((s): s is SyncSessionSummary => s !== null);
+}
+
+function spawnProjectStart(repoRoot: string, projectFileAbsolutePath: string) {
   // Prefer `-f/--project-file` so Mutagen does not default to `./mutagen.yml`
   // (some versions ignore or mishandle MUTAGEN_PROJECT_FILE alone).
-  const result = spawnSync(
+  return spawnSync(
     'mutagen',
     ['project', 'start', '-f', projectFileAbsolutePath],
     {
@@ -203,6 +248,33 @@ export function mutagenProjectStart(
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );
+}
+
+export function mutagenProjectStart(
+  repoRoot: string,
+  projectFileAbsolutePath: string,
+): boolean {
+  let result = spawnProjectStart(repoRoot, projectFileAbsolutePath);
+
+  // "Already running" was taken at its word, and it is only a statement about the lock file. A run
+  // that died without its exit hook, or a teardown that failed, leaves the file naming sessions that
+  // no longer exist, and `bica run` itself ends this checkout's leftover sessions with `sync
+  // terminate` before it gets here, which never touches the file. Every later run then started
+  // nothing, waited sixty seconds for a session that was not there, and stopped with 94 and advice to
+  // check the network and the disk. When the project's sessions are gone the lock is stale: clear it
+  // the way Mutagen does and start once more.
+  if (/already\s+running/i.test(`${result.stdout ?? ''}${result.stderr ?? ''}`)) {
+    const projectId = readProjectLockId(projectFileAbsolutePath);
+    const sessions =
+      projectId === null ? null : listProjectSessions(projectId);
+    if (sessions !== null && sessions.length === 0) {
+      process.stderr.write(
+        '[bica] The last sync from this checkout was not shut down cleanly; clearing it and starting a new one.\n',
+      );
+      mutagenProjectTerminate(repoRoot, projectFileAbsolutePath, true);
+      result = spawnProjectStart(repoRoot, projectFileAbsolutePath);
+    }
+  }
 
   const combined = `${result.stdout ?? ''}${result.stderr ?? ''}`;
 
@@ -349,6 +421,24 @@ export function findAllSessionsForRepo(
     (s) =>
       s.alpha === repoRoot &&
       (remoteSyncUrl === undefined || s.beta === remoteSyncUrl),
+  );
+}
+
+/**
+ * Sessions from *other* checkouts on this machine that sync into the remote workspace `remoteSyncUrl`.
+ *
+ * Checkouts may share a remote workspace on purpose, and the lease keeps their runs apart. But a
+ * session outlives its run whenever the run dies without its exit hook, and a one-way-replica session
+ * goes on making the remote an exact copy of *its* checkout, under whichever run holds the lease
+ * next. A run that holds the lease is the only one entitled to that workspace, so anything found here
+ * is a leftover.
+ */
+export function findSessionsFromOtherCheckouts(
+  repoRoot: string,
+  remoteSyncUrl: string,
+): SyncSessionSummary[] {
+  return listAllSyncSessions().filter(
+    (s) => s.alpha !== repoRoot && s.beta === remoteSyncUrl,
   );
 }
 

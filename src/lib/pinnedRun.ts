@@ -46,6 +46,7 @@ import {
   pushReturnFlowToRemote,
 } from './returnFlow';
 import { reportArtifactPull } from './reportArtifacts';
+import { settleOtherCheckoutsSyncs } from './ensureSyncReady';
 import { exitAfterArtifactPull } from './artifacts';
 import {
   collectWriteBack,
@@ -355,6 +356,16 @@ export async function runPinned(options: {
   process.stderr.write(
     `${dim('[bica]')} workspace ${prep.remoteSyncUrl}  run ${options.owner.runId}\n`,
   );
+  // A live sync from another checkout would overwrite the pinned tree under the run.
+  {
+    const stop = settleOtherCheckoutsSyncs({
+      repoRoot: prep.repoRoot,
+      remoteSyncUrl: prep.remoteSyncUrl,
+    });
+    if (stop !== undefined) {
+      return stop;
+    }
+  }
   chrome(
     `${dim('[bica]')} ${dim('Pinning working tree to')} ${syncRemoteTarget(prep.remoteSyncUrl)}\n`,
   );

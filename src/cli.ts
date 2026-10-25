@@ -60,7 +60,12 @@ import {
   writeTunnelRecord,
 } from './lib/tunnelState';
 import type { TunnelRecord } from './lib/tunnelState';
-import { terminateConflictingSyncSessions } from './lib/ensureSyncReady';
+import {
+  removeLiveRunMarker,
+  settleOtherCheckoutsSyncs,
+  terminateConflictingSyncSessions,
+  writeLiveRunMarker,
+} from './lib/ensureSyncReady';
 import {
   acquireWorkspace,
   runPinned,
@@ -242,8 +247,10 @@ File sync
                               (terminates any existing session for this repo *and this remote
                               workspace* before starting, and tears it down on exit). 'start' is
                               for users who want a long-lived session — but it will be killed at
-                              the next 'bica run'. A multi-command run uses no session at all, so it
-                              never disturbs one.
+                              the next 'bica run' from the same checkout. A run from another
+                              checkout into the same workspace refuses (98) rather than end it,
+                              and ends only sessions that a finished run left behind. A
+                              multi-command run uses no session of its own.
 
 Long-lived remote processes
   tunnel --local=<path.sock> --remote=<path.sock> [--ready-timeout=<s>] [--ready-when=<regex>]
@@ -400,6 +407,15 @@ async function cmdStart(autoYes: boolean): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const prep = prepareSyncProjectFile({ verbose: false });
   await terminateConflictingSyncSessions(prep, { autoYes });
+  const stop = settleOtherCheckoutsSyncs({
+    repoRoot: prep.repoRoot,
+    remoteSyncUrl: prep.remoteSyncUrl,
+  });
+  if (stop !== undefined) {
+    process.exit(stop);
+  }
+  // A marker a crashed run left here would make this deliberate session look like its leftover.
+  removeLiveRunMarker(prep.repoRoot);
   if (!mutagenProjectStart(prep.repoRoot, prep.projectFilePath)) {
     process.exit(1);
   }
@@ -947,6 +963,12 @@ async function runWithLiveSession(options: {
     );
     mutagenSyncTerminate(s.name);
   }
+  {
+    const stop = settleOtherCheckoutsSyncs({ repoRoot, remoteSyncUrl });
+    if (stop !== undefined) {
+      return stop;
+    }
+  }
 
   chrome(
     `${dim('Starting one-way sync to')} ${syncRemoteTarget(remoteSyncUrl)}\n`,
@@ -967,6 +989,10 @@ async function runWithLiveSession(options: {
         : `${warn('[bica]')} ${dim(`Could not seed the remote workspace (${seed.error ?? 'rsync failed'}); the sync will copy it instead, which is slower.`)}\n`,
     );
   }
+  // Before the start, so the window where a session exists without it is as short as it can be: a
+  // session with no marker reads as `bica start`'s, which is refused rather than ended -- safe, but
+  // a nuisance.
+  writeLiveRunMarker(repoRoot);
   if (!mutagenProjectStart(repoRoot, projectFilePath)) {
     process.exit(1);
   }
@@ -979,6 +1005,7 @@ async function runWithLiveSession(options: {
     }
     cleanupDone = true;
     mutagenProjectTerminate(repoRoot, projectFilePath, captured);
+    removeLiveRunMarker(repoRoot);
   };
   process.on('exit', cleanup);
 
