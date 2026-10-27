@@ -35,6 +35,13 @@ export interface PackageManagerPlugin {
   isInstallArgv(remoteArgv: string[]): boolean;
   /** Single remote shell command to run a full install (POSIX-safe; no user argv). */
   readonly remoteInstallCommand: string;
+  /**
+   * What the install leaves inside the workspace, relative to it, when it leaves anything there.
+   *
+   * The install record is only believed while this exists. The record lives outside the workspace, so
+   * anything that removes the workspace leaves it behind asserting an install that is gone.
+   */
+  readonly installedPath?: string;
 }
 
 export interface CredentialsPlugin {

@@ -3,6 +3,19 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A workspace recreated on the remote installs its dependencies again.** The record of what a
+  workspace installed lives outside it, in `~/.bica/installs`, so a workspace removed between runs
+  left the record behind. A pinned run creates the directory before syncing, which meant the install
+  step never saw it as new and never cleared that record: it believed the old install, skipped
+  `pnpm install`, and every command failed with `command not found`, reported as an ordinary exit 1.
+  The record is now cleared whenever a run creates the workspace, and is only believed while the
+  workspace's `node_modules` actually exists, whatever removed it.
+- **Several `pnpm` commands no longer print "Multiple package manager plugins match".** One plugin
+  matching three commands was counted as three plugins.
+
 ## 0.8.8 — 2026-10-25
 
 ### Fixed

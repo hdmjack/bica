@@ -149,3 +149,34 @@ describe('reading and writing the record', () => {
     }
   });
 });
+
+describe('a record whose install is gone', () => {
+  it('is not believed until the installed path exists in the workspace', () => {
+    // Through a real shell, because the path mixes a bare `~` with quoting and only running it shows
+    // the test looks in the right place.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-install-rec-'));
+    const run: RemoteRunner = (_host, script) => {
+      const result = spawnSync('sh', ['-s'], {
+        input: script,
+        env: { ...process.env, HOME: home },
+        encoding: 'utf8',
+      });
+      return { status: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+    };
+    try {
+      fs.mkdirSync(path.join(home, 'code', 'my repo'), { recursive: true });
+      writeRemoteInstallRecord('h', '~/code/my repo', 'pnpm', 'abc', run);
+
+      expect(
+        readRemoteInstallRecord('h', '~/code/my repo', 'pnpm', run, 'node_modules'),
+      ).toBeNull();
+
+      fs.mkdirSync(path.join(home, 'code', 'my repo', 'node_modules'));
+      expect(
+        readRemoteInstallRecord('h', '~/code/my repo', 'pnpm', run, 'node_modules'),
+      ).toBe('abc');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

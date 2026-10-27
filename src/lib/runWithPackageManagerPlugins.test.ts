@@ -32,6 +32,7 @@ vi.mock('./runRemote', () => ({
   REMOTE_CONTENT_MISMATCH_EXIT: 97,
   runRemoteCommand: vi.fn(() => Promise.resolve(0)),
   remoteWorkspaceDirExists: vi.fn(() => true),
+  remoteWorkspaceWordForSh: (v: string) => `'${v}'`,
   remoteMkdirWorkspace: vi.fn(() => 0),
   shellSingleQuoteRemotePathForSh: (v: string) =>
     `'${v.replaceAll("'", `'\\''`)}'`,
@@ -41,7 +42,11 @@ vi.mock('./runRemote', () => ({
       remoteFiles.set(write[2], `${write[1]}\n`);
       return { status: 0, stdout: '', stderr: '' };
     }
-    const read = /^cat (\S+) /.exec(script);
+    const installed = /^\[ -e (\S+) \] \|\| exit 0\n/.exec(script);
+    if (installed && !remoteFiles.has(installed[1])) {
+      return { status: 0, stdout: '', stderr: '' };
+    }
+    const read = /^(?:.*\n)?cat (\S+) /.exec(script);
     if (read) {
       return { status: 0, stdout: remoteFiles.get(read[1]) ?? '', stderr: '' };
     }
@@ -78,15 +83,33 @@ function remoteRecord(remoteWorkspacePath = '/remote/repo'): string | null {
   return stored === undefined ? null : stored.trim();
 }
 
+/** The workspace's node_modules, as the read script names it. */
+function installedPathKey(remoteWorkspacePath = '/remote/repo'): string {
+  return `'${remoteWorkspacePath}'/'node_modules'`;
+}
+
 /** Record an install against a remote workspace, the way a previous run would have left it. */
 function recordRemoteInstall(
   digest: string,
   remoteWorkspacePath = '/remote/repo',
 ): void {
+  remoteFiles.set(installedPathKey(remoteWorkspacePath), '');
   remoteFiles.set(
     installRecordPathExpr(remoteWorkspacePath, 'pnpm'),
     `${digest}\n`,
   );
+}
+
+/** A remote command that succeeds, and whose install leaves node_modules behind as a real one would. */
+function fakeRemoteCommand(
+  _host: string,
+  remoteWorkspacePath: string,
+  command: string,
+): Promise<number> {
+  if (command === pnpmPackageManagerPlugin.remoteInstallCommand) {
+    remoteFiles.set(installedPathKey(remoteWorkspacePath), '');
+  }
+  return Promise.resolve(0);
 }
 
 function makePrep(repoRoot: string): PrepareResult {
@@ -119,7 +142,7 @@ describe('runRemoteCommandWithPmHooks', () => {
   beforeEach(() => {
     remoteFiles.clear();
     runRemote.mockReset();
-    runRemote.mockResolvedValue(0);
+    runRemote.mockImplementation(fakeRemoteCommand);
     dirExists.mockReset();
     dirExists.mockReturnValue(true);
     mkdirRemote.mockReset();
@@ -210,6 +233,70 @@ describe('runRemoteCommandWithPmHooks', () => {
       expect(runRemote).toHaveBeenCalledTimes(1);
       expect(runRemote.mock.calls[0]?.[2]).toContain('test');
     } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('installs when the record matches but node_modules is gone', async () => {
+    // As reported: the workspace was removed between runs and recreated, the record outside it
+    // survived, and every command failed with `tsx: command not found`.
+    const repoRoot = makeTempRepo();
+    try {
+      writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
+      recordRemoteInstall(pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!);
+      remoteFiles.delete(installedPathKey());
+
+      await runRemoteCommandWithPmHooks({
+        prep: makePrep(repoRoot),
+        remoteArgv: ['pnpm', 'test'],
+        pmOverride: undefined,
+      });
+
+      expect(runRemote).toHaveBeenCalledTimes(2);
+      expect(runRemote.mock.calls[0]?.[2]).toBe(
+        pnpmPackageManagerPlugin.remoteInstallCommand,
+      );
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('forgets the record when the caller says it created the workspace', async () => {
+    // A pinned run creates the directory before syncing, so this function finds it already there.
+    const repoRoot = makeTempRepo();
+    try {
+      writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
+      recordRemoteInstall(pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!);
+
+      await runRemoteCommandWithPmHooks({
+        prep: makePrep(repoRoot),
+        remoteArgv: ['pnpm', 'test'],
+        pmOverride: undefined,
+        workspaceCreated: true,
+      });
+
+      expect(runRemote.mock.calls[0]?.[2]).toBe(
+        pnpmPackageManagerPlugin.remoteInstallCommand,
+      );
+    } finally {
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does not call one plugin matching several commands a conflict', async () => {
+    const repoRoot = makeTempRepo();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
+      await runRemoteCommandWithPmHooks({
+        prep: makePrep(repoRoot),
+        remoteArgv: ['pnpm', 'lint'],
+        matchArgvs: [['pnpm', 'lint'], ['pnpm', 'test']],
+        pmOverride: undefined,
+      });
+      expect(stderr.mock.calls.join('')).not.toContain('Multiple package manager');
+    } finally {
+      stderr.mockRestore();
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
   });
@@ -359,7 +446,7 @@ describe('two checkouts sharing one remote workspace', () => {
   beforeEach(() => {
     remoteFiles.clear();
     runRemote.mockReset();
-    runRemote.mockResolvedValue(0);
+    runRemote.mockImplementation(fakeRemoteCommand);
     vi.mocked(remoteWorkspaceDirExists).mockReturnValue(true);
   });
 

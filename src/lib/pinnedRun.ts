@@ -499,6 +499,7 @@ export async function runPinned(options: {
     claimPathExpr: claimExpr,
     detachRunId: options.detachRunId,
     detachOutcome: options.detachOutcome,
+    workspaceCreated: dirReady.created,
   });
 
   if (options.detachRunId !== undefined) {

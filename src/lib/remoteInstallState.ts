@@ -1,5 +1,9 @@
 import { claimFileName } from './remoteClaim';
-import { runRemoteScriptOverStdin, shellSingleQuoteRemotePathForSh } from './runRemote';
+import {
+  remoteWorkspaceWordForSh,
+  runRemoteScriptOverStdin,
+  shellSingleQuoteRemotePathForSh,
+} from './runRemote';
 
 /**
  * What the remote workspace has installed, recorded where the thing it describes actually lives.
@@ -41,9 +45,18 @@ export function installRecordPathExpr(
   return `${REMOTE_INSTALL_DIR}/${claimFileName(remoteWorkspacePath)}.${safeId}`;
 }
 
-export function buildReadInstallRecordScript(pathExpr: string): string {
+export function buildReadInstallRecordScript(
+  pathExpr: string,
+  installedPathWord?: string,
+): string {
   // `cat` of a missing file is not an error here: no record simply means nothing has installed yet.
-  return `cat ${pathExpr} 2>/dev/null || true\n`;
+  const read = `cat ${pathExpr} 2>/dev/null || true\n`;
+  // A record whose install is not on disk is not a record. A workspace removed and recreated between
+  // runs kept its record, so a fresh workspace with no node_modules was told it was installed and every
+  // command failed with `command not found`.
+  return installedPathWord === undefined
+    ? read
+    : `[ -e ${installedPathWord} ] || exit 0\n${read}`;
 }
 
 export function buildWriteInstallRecordScript(
@@ -66,11 +79,15 @@ export function readRemoteInstallRecord(
   remoteWorkspacePath: string,
   pluginId: string,
   run: RemoteRunner = runRemoteScriptOverStdin,
+  installedPath?: string,
 ): string | null {
   const result = run(
     sshHost,
     buildReadInstallRecordScript(
       installRecordPathExpr(remoteWorkspacePath, pluginId),
+      installedPath === undefined
+        ? undefined
+        : `${remoteWorkspaceWordForSh(remoteWorkspacePath)}/${shellSingleQuoteRemotePathForSh(installedPath)}`,
     ),
   );
   if (result.status !== 0) {

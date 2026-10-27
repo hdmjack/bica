@@ -257,6 +257,11 @@ export async function runRemoteCommandWithPmHooks(options: {
    * lines of POSIX shell for every feature.
    */
   concurrentCommands?: string[][];
+  /**
+   * The caller created the workspace directory this run. A pinned run makes it before syncing, so by
+   * the time it gets here the directory exists and this function's own check cannot tell it is new.
+   */
+  workspaceCreated?: boolean;
 }): Promise<number> {
   const { prep, remoteArgv, pmOverride } = options;
   const { repoRoot, config } = prep;
@@ -273,15 +278,20 @@ export async function runRemoteCommandWithPmHooks(options: {
   const active = resolveActivePackageManagerPlugins(repoRoot, resolved);
   // Any of the user's commands may name a package manager; the first match decides.
   const candidates = options.matchArgvs ?? [remoteArgv];
-  const matched = candidates.flatMap((argv) =>
-    matchingPackageManagerPlugins(active, argv, pmOverride),
-  );
+  // Deduplicated: three `pnpm` commands are one plugin matching three times, not three plugins.
+  const matched = [
+    ...new Set(
+      candidates.flatMap((argv) =>
+        matchingPackageManagerPlugins(active, argv, pmOverride),
+      ),
+    ),
+  ];
 
   // A workspace we just created has no node_modules, whatever any record claims. The record lives
   // beside the workspace rather than inside it -- a record inside would be deleted by the sync -- so
   // anything that removes the directory itself leaves the record asserting an install that no longer
   // exists. Clearing it on creation keeps the claim tied to something real.
-  if (dirReady.created) {
+  if (dirReady.created || options.workspaceCreated === true) {
     for (const plugin of active) {
       clearRemoteInstallRecord(
         config.sshHost,
@@ -311,6 +321,8 @@ export async function runRemoteCommandWithPmHooks(options: {
             config.sshHost,
             config.remoteWorkspacePath,
             plugin.id,
+            undefined,
+            plugin.installedPath,
           ),
         });
     const initial = compared.initial;

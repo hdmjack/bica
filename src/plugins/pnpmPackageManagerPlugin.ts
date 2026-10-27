@@ -92,4 +92,5 @@ export const pnpmPackageManagerPlugin: PackageManagerPlugin = {
   // lockfile is the thing being reproduced. The alternative -- pnpm silently updating the lockfile on
   // the remote so it no longer matches the local one -- is the worse failure.
   remoteInstallCommand: 'CI=true pnpm install',
+  installedPath: 'node_modules',
 };
