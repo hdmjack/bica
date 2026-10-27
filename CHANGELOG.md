@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.11 — 2026-10-27
 
 ### Fixed
 - **Two spellings of one remote folder are one workspace again.** The lease, the install records and
