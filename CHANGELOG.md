@@ -3,6 +3,21 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **Two spellings of one remote folder are one workspace again.** The lease, the install records and
+  the run records are named after the remote path as written, so `~/code/x` and
+  `/Users/me/code/x` were two workspaces to bica while being one directory on the remote. The second
+  spelling usually comes from `BICA_REMOTE_PATH=~/code/x`, which the local shell expands before bica
+  sees it. A worktree running that way and the main checkout, whose `.bica/local.yml` kept the `~`,
+  each took their own lease and ran in the one directory at once. The worktree's `--write-back` run
+  then copied 32 of the other branch's files home over its own. A path under the local home is now
+  read as `~/…`, so both take the same lease and the second run is refused with 98.
+
+  **Affects other versions:** a run on an older bica still names the lease after the expanded
+  spelling, so it does not see a lease taken by this one. Update every checkout's bica together.
+
 ## 0.8.10 — 2026-10-27
 
 ### Added

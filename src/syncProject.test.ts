@@ -5,6 +5,7 @@ import YAML from 'yaml';
 
 import {
   BICA_SPEC_FILE,
+  canonicalRemoteWorkspacePath,
   loadRemoteEnvConfig,
   BICA_WORKSPACE_SPEC_FILE,
   DEFAULT_RETURN_FLOW_PATHS,
@@ -12,6 +13,7 @@ import {
   normalizeToSyncSpecYaml,
   resolveSyncSpecPath,
 } from './syncProject';
+import { claimFileName } from './lib/remoteClaim';
 
 describe('normalizeToSyncSpecYaml', () => {
   const repoRoot = '/tmp/web-app';
@@ -254,6 +256,46 @@ describe('the remote workspace path is guarded before anything deletes into it',
     }
   });
 
+  it('spells a shell-expanded ~ the way local.yml does, so both take one lease', () => {
+    // As reported: a worktree ran with BICA_REMOTE_PATH=~/code/float-javascript-4, which the shell
+    // expanded, while the main checkout's local.yml kept the ~. Two lease files, one directory.
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-remote-path-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, 'bica.yml'),
+        'sync:\n  mode: one-way-replica\n  ignore:\n    paths: []\n',
+      );
+      vi.stubEnv('BICA_SSH_HOST', 'somehost');
+      vi.stubEnv('BICA_REMOTE_PATH', path.join(os.homedir(), 'code', 'float-javascript-4'));
+      const config = loadRemoteEnvConfig(repoRoot);
+      expect(config.remoteWorkspacePath).toBe('~/code/float-javascript-4');
+      expect(claimFileName(config.remoteWorkspacePath)).toBe(
+        claimFileName('~/code/float-javascript-4'),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('still refuses the home directory when it arrives expanded', () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-remote-path-'));
+    try {
+      fs.writeFileSync(
+        path.join(repoRoot, 'bica.yml'),
+        'sync:\n  mode: one-way-replica\n  ignore:\n    paths: []\n',
+      );
+      vi.stubEnv('BICA_SSH_HOST', 'somehost');
+      vi.stubEnv('BICA_REMOTE_PATH', os.homedir());
+      expect(() => loadRemoteEnvConfig(repoRoot)).toThrow(
+        /home or root directory|home directory itself/,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it('refuses an ssh host that ssh would read as an option', () => {
     const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-remote-path-'));
     try {
@@ -299,5 +341,18 @@ describe('what reaches the remote, by pattern rather than by exit code', () => {
   it('keeps every pattern it was given, in order', () => {
     const paths = ['node_modules', '.git', 'dist', '*.tsbuildinfo', 'coverage'];
     expect(ignorePathsFor(paths)).toEqual(expect.arrayContaining(paths));
+  });
+});
+
+describe('canonicalRemoteWorkspacePath', () => {
+  it('folds the local home back into ~', () => {
+    expect(canonicalRemoteWorkspacePath('/Users/me/code/x', '/Users/me')).toBe('~/code/x');
+    expect(canonicalRemoteWorkspacePath('/Users/me/code/x/', '/Users/me/')).toBe('~/code/x/');
+  });
+
+  it('leaves other paths alone, including ones that only share a prefix with home', () => {
+    expect(canonicalRemoteWorkspacePath('~/code/x', '/Users/me')).toBe('~/code/x');
+    expect(canonicalRemoteWorkspacePath('/srv/code/x', '/Users/me')).toBe('/srv/code/x');
+    expect(canonicalRemoteWorkspacePath('/Users/meg/code/x', '/Users/me')).toBe('/Users/meg/code/x');
   });
 });

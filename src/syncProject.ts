@@ -546,17 +546,46 @@ function assertRemoteWorkspacePathIsSafe(remotePath: string): void {
   }
 }
 
+/**
+ * One spelling per remote directory, so that every checkout pointing at it takes the same lease.
+ *
+ * The lease, the install records and the run records are all named after this string, so two
+ * spellings of one directory are two workspaces as far as bica can tell. `BICA_REMOTE_PATH=~/code/x`
+ * is the usual way to get a second one: the local shell expands the `~` before bica sees it, while
+ * `.bica/local.yml` keeps it. A worktree and the main checkout then ran into one directory at once,
+ * each holding its own lease, and the worktree's `--write-back` copied the other branch's files home
+ * over its own.
+ *
+ * Only the local home is folded back, because that is all a local expansion can produce. When the
+ * remote's home differs, the expanded path names a directory that is not the user's there anyway; when
+ * it is the same, as on a Mac remote under one username, the two are the same directory.
+ */
+export function canonicalRemoteWorkspacePath(
+  remotePath: string,
+  localHome: string = os.homedir(),
+): string {
+  const p = remotePath.trim();
+  const home = localHome.replace(/\/+$/, '');
+  if (home === '' || home === '/') {
+    return p;
+  }
+  if (p === home || p === `${home}/`) {
+    return '~';
+  }
+  return p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p;
+}
+
 function readRemoteWorkspacePath(
   repoRoot: string,
   local: LocalBicaSettings,
 ): string {
   const fromEnv = process.env.BICA_REMOTE_PATH?.trim();
   if (fromEnv !== undefined && fromEnv.length > 0) {
-    return fromEnv;
+    return canonicalRemoteWorkspacePath(fromEnv);
   }
   const fromFile = local.remotePath?.trim();
   if (fromFile !== undefined && fromFile.length > 0) {
-    return fromFile;
+    return canonicalRemoteWorkspacePath(fromFile);
   }
   const repoBasename = path.basename(repoRoot);
   // The default includes the local username, so that teammates sharing a remote login do not all
