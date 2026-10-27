@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.10 — 2026-10-27
 
 ### Added
 - **`generated.inputs`: rerun the generator when what it is made from changes.** The generated-output
