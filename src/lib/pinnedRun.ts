@@ -494,6 +494,7 @@ export async function runPinned(options: {
     concurrentCommands: options.concurrentCommands,
     generatedPaths: prep.generatedPaths,
     generatedCommand: prep.generatedCommand,
+    generatedInputs: prep.generatedInputs,
     pmOverride: options.pmOverride,
     assertRunId: runId,
     claimPathExpr: claimExpr,

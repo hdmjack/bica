@@ -39,7 +39,7 @@ export interface SyncSpecYaml {
   };
   /** Return-flow patterns: files that should rsync remote→local after `bica run`. */
   returnFlow?: { paths: string[] };
-  generated?: { paths: string[]; command?: string };
+  generated?: { paths: string[]; command?: string; inputs?: string[] };
   /**
    * Named outputs to copy remote to local after a run, from trees the sync leaves alone. Unlike
    * return-flow these are not patterns and are not mirrored; see `artifacts.ts`.
@@ -394,7 +394,7 @@ function parseArtifacts(raw: unknown, sourceLabel: string): string[] {
 function parseGenerated(
   raw: unknown,
   sourceLabel: string,
-): { paths: string[]; command?: string } {
+): { paths: string[]; command?: string; inputs?: string[] } {
   if (raw === undefined) {
     return { paths: [] };
   }
@@ -409,23 +409,48 @@ function parseGenerated(
     typeof commandUnknown === 'string' && commandUnknown.trim() !== ''
       ? commandUnknown.trim()
       : undefined;
-  const pathsUnknown = (raw as { paths?: unknown }).paths;
-  if (pathsUnknown === undefined) {
-    return { paths: [], ...(command !== undefined ? { command } : {}) };
+  const paths = parseGeneratedList(
+    (raw as { paths?: unknown }).paths,
+    'paths',
+    sourceLabel,
+  );
+  const inputs = parseGeneratedList(
+    (raw as { inputs?: unknown }).inputs,
+    'inputs',
+    sourceLabel,
+  );
+  return {
+    paths,
+    ...(command !== undefined ? { command } : {}),
+    ...(inputs.length > 0 ? { inputs } : {}),
+  };
+}
+
+function parseGeneratedList(
+  listUnknown: unknown,
+  key: 'paths' | 'inputs',
+  sourceLabel: string,
+): string[] {
+  if (listUnknown === undefined) {
+    return [];
   }
-  if (!Array.isArray(pathsUnknown)) {
-    throw new Error(`${sourceLabel}: generated.paths must be a list of strings.`);
+  if (!Array.isArray(listUnknown)) {
+    throw new Error(
+      `${sourceLabel}: generated.${key} must be a list of strings.`,
+    );
   }
-  const paths: string[] = [];
-  for (const item of pathsUnknown) {
+  const list: string[] = [];
+  for (const item of listUnknown) {
     if (typeof item !== 'string') {
-      throw new Error(`${sourceLabel}: generated.paths must contain only strings.`);
+      throw new Error(
+        `${sourceLabel}: generated.${key} must contain only strings.`,
+      );
     }
     // Validate at parse time so a bad entry is a config error naming the file, not a confusing
     // failure deep in a run.
-    paths.push(validateGeneratedPath(item));
+    list.push(validateGeneratedPath(item));
   }
-  return { paths, ...(command !== undefined ? { command } : {}) };
+  return list;
 }
 
 /**
@@ -587,6 +612,8 @@ export interface PrepareResult {
   generatedPaths: string[];
   /** Command that regenerates them, run on the remote when any is missing. */
   generatedCommand: string | undefined;
+  /** Tracked files the generated output is made from; a change to them reruns the command. */
+  generatedInputs: string[];
   /**
    * `sync.ignore.paths` as configured by the user (return-flow patterns not merged in). Trees each
    * side owns on its own — return-flow excludes them so it never mirrors artifacts across them.
@@ -695,6 +722,7 @@ export function prepareSyncProjectFile(options: {
     returnFlowPaths: doc.returnFlow?.paths ?? [],
     generatedPaths: doc.generated?.paths ?? [],
     generatedCommand: doc.generated?.command,
+    generatedInputs: doc.generated?.inputs ?? [],
     syncIgnorePaths: doc.syncIgnorePaths,
     artifacts: doc.artifacts ?? [],
     toolchain: doc.toolchain ?? [],

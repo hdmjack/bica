@@ -345,6 +345,25 @@ Three things worth knowing:
 - **A probe that cannot run reports nothing missing.** Forcing a repair because a connection blipped
   would be worse than the failure it prevents.
 
+**Presence is not freshness.** A pattern like `Icon*.tsx` is satisfied by last week's icons, so an SVG
+added on master — with no lockfile change — leaves the remote one component short and the probe
+content. Name what the output is made from, and bica reruns `command` whenever those files differ
+from what the remote last generated from:
+
+```yaml
+generated:
+  paths:
+    - ui/src/icons/essentials/Icon*.tsx
+  inputs:
+    - ui/src/icons/essentials/assets/*.svg
+  command: pnpm --filter @acme/ui run generate-icons
+```
+
+`inputs` are git pathspec globs (`*` stays within a directory, `**` crosses them; `!` excludes),
+listed from the local tree, untracked files included. They sync as usual. The digest of what was
+last generated from lives on the remote beside the install records, so checkouts sharing a workspace
+see each other's generations. The first run after adding `inputs` regenerates once, having no record.
+
 ```yaml
 sync:
   ignore:

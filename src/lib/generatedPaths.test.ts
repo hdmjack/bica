@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   buildGeneratedProbeScript,
   isNegatedGeneratedPath,
+  localGeneratedInputsDigest,
   parseMissing,
   validateGeneratedPath,
 } from './generatedPaths';
@@ -224,5 +225,55 @@ describe('a negation must not satisfy the pattern it is carved out of', () => {
         '!ui/src/icons/essentials/IconSpinner*.tsx',
       ]),
     ).toEqual([]);
+  });
+});
+
+describe('the digest of what generated output is made from', () => {
+  let repo: string;
+  const git = (...args: string[]): void => {
+    spawnSync('git', args, { cwd: repo });
+  };
+  const write = (rel: string, body: string): void => {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), body);
+  };
+  const digest = (inputs: string[]): string | null =>
+    localGeneratedInputsDigest(repo, inputs);
+
+  beforeEach(() => {
+    repo = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-gen-inputs-'));
+    git('init', '-q');
+    write('assets/icon-a.svg', '<svg>a</svg>');
+    write('.gitignore', 'assets/*.tmp\n');
+    git('add', '.');
+  });
+
+  afterEach(() => {
+    fs.rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('changes when an input is added without a commit, as master adding an SVG does', () => {
+    const before = digest(['assets/*.svg']);
+    write('assets/icon-zoom-in.svg', '<svg>zoom</svg>');
+    expect(before).not.toBeNull();
+    expect(digest(['assets/*.svg'])).not.toBe(before);
+  });
+
+  it('changes when an input is edited', () => {
+    const before = digest(['assets/*.svg']);
+    write('assets/icon-a.svg', '<svg>a2</svg>');
+    expect(digest(['assets/*.svg'])).not.toBe(before);
+  });
+
+  it('ignores files outside the inputs, ignored files and negated ones', () => {
+    const before = digest(['assets/*.svg', '!assets/skip.svg']);
+    write('other.svg', '<svg/>');
+    write('assets/scratch.tmp', 'x');
+    write('assets/skip.svg', '<svg>skip</svg>');
+    expect(digest(['assets/*.svg', '!assets/skip.svg'])).toBe(before);
+  });
+
+  it('is null when nothing matches, rather than recording an empty set as generated', () => {
+    expect(digest(['nothing/*.svg'])).toBeNull();
   });
 });

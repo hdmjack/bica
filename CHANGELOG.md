@@ -3,6 +3,21 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Added
+- **`generated.inputs`: rerun the generator when what it is made from changes.** The generated-output
+  check only asked whether anything matching `generated.paths` existed, so a set made from last
+  week's inputs passed. Master added two icon SVGs without a lockfile change; the remote kept its old
+  `Icon*.tsx`, and typecheck failed with TS2307 on the two components nobody generated. List the
+  inputs and bica records on the remote what it last generated from, and reruns `generated.command`
+  when the local files differ. The first run after adding them regenerates once.
+
+### Fixed
+- **The generated-output check runs after an install too.** It used to be skipped whenever the run
+  installed, on the assumption that `postinstall` regenerated everything. Whether it did is what the
+  check is for.
+
 ## 0.8.9 — 2026-10-27
 
 ### Fixed

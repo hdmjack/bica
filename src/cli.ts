@@ -1161,6 +1161,7 @@ async function runWithLiveSession(options: {
       concurrentCommands: options.concurrentCommands,
       generatedPaths: options.prep.generatedPaths,
       generatedCommand: options.prep.generatedCommand,
+      generatedInputs: options.prep.generatedInputs,
       pmOverride: pm,
       assertRunId: options.owner.runId,
       claimPathExpr: claimPathExpr(prep.config.remoteWorkspacePath),

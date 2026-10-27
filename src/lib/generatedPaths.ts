@@ -1,3 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import { runRemoteScriptOverStdin } from './runRemote';
 
 /**
@@ -145,4 +150,67 @@ export function remoteMissingGeneratedPaths(
     return [];
   }
   return parseMissing(r.stdout);
+}
+
+/**
+ * One digest of the files the generated output is made from, as they stand in the local tree.
+ *
+ * Presence alone cannot see a stale set. `Icon*.tsx` matched the icons generated last week, so when
+ * master added two SVGs without touching the lockfile the probe was satisfied, nothing reran the
+ * generator, and typecheck failed on the two components that were never made. Declaring the inputs
+ * lets the remote record what it last generated from, and a different digest reruns the command.
+ *
+ * Listed by git, so the patterns are git pathspec globs (`*` stays within a directory, `**` crosses
+ * them) and a negation excludes. Untracked files count, because a new SVG is an input before it is
+ * committed; ignored ones do not. Null when nothing matches or git cannot list them: a digest of
+ * nothing would record an empty set as generated, and a guess is worse than no check.
+ */
+export function localGeneratedInputsDigest(
+  repoRoot: string,
+  inputs: readonly string[],
+): string | null {
+  if (inputs.length === 0) {
+    return null;
+  }
+  const pathspecs = inputs.map((raw) => {
+    const p = validateGeneratedPath(raw);
+    return isNegatedGeneratedPath(p)
+      ? `:(glob,exclude)${p.slice(1)}`
+      : `:(glob)${p}`;
+  });
+  const listed = spawnSync(
+    'git',
+    [
+      'ls-files',
+      '-z',
+      '--cached',
+      '--others',
+      '--exclude-standard',
+      '--',
+      ...pathspecs,
+    ],
+    { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (listed.status !== 0) {
+    return null;
+  }
+  const files = [
+    ...new Set(listed.stdout.split('\0').filter((f) => f !== '')),
+  ].sort();
+  const hash = crypto.createHash('sha256');
+  let hashed = 0;
+  for (const file of files) {
+    let content: Buffer;
+    try {
+      content = fs.readFileSync(path.join(repoRoot, file));
+    } catch {
+      // Tracked but deleted in the working tree: not an input any more.
+      continue;
+    }
+    hash.update(
+      `${file}\0${crypto.createHash('sha256').update(content).digest('hex')}\n`,
+    );
+    hashed += 1;
+  }
+  return hashed === 0 ? null : hash.digest('hex');
 }

@@ -16,6 +16,37 @@ import {
 describe('normalizeToSyncSpecYaml', () => {
   const repoRoot = '/tmp/web-app';
 
+  it('reads generated.inputs, and keeps them in the sync because the remote needs them', () => {
+    const doc = YAML.parse(`
+sync:
+  ignore:
+    paths:
+      - node_modules
+generated:
+  paths:
+    - ui/src/icons/essentials/Icon*.tsx
+  inputs:
+    - ui/src/icons/essentials/assets/*.svg
+  command: pnpm --filter @float/ui run generate-icons
+`) as unknown;
+    const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
+    expect(n.generated?.inputs).toEqual(['ui/src/icons/essentials/assets/*.svg']);
+    expect(n.syncIgnorePaths).toContain('ui/src/icons/essentials/Icon*.tsx');
+    expect(n.syncIgnorePaths).not.toContain('ui/src/icons/essentials/assets/*.svg');
+  });
+
+  it('refuses a generated.inputs entry that leaves the workspace', () => {
+    const doc = YAML.parse(`
+sync:
+  ignore:
+    paths: []
+generated:
+  inputs:
+    - ../elsewhere/*.svg
+`) as unknown;
+    expect(() => normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml')).toThrow(/\.\./);
+  });
+
   it('accepts flat sync: { mode, ignore }', () => {
     const doc = YAML.parse(`
 sync:

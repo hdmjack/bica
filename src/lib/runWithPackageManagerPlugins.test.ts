@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -121,6 +122,7 @@ function makePrep(repoRoot: string): PrepareResult {
     returnFlowPaths: [],
     generatedPaths: [],
     generatedCommand: undefined,
+    generatedInputs: [],
     syncIgnorePaths: [],
   artifacts: [],
   toolchain: [],
@@ -281,6 +283,77 @@ describe('runRemoteCommandWithPmHooks', () => {
     } finally {
       fs.rmSync(repoRoot, { recursive: true, force: true });
     }
+  });
+
+  describe('generated output made from inputs', () => {
+    const GENERATE = 'pnpm --filter @float/ui run generate-icons';
+
+    const repoWithIcons = (): string => {
+      const repoRoot = makeTempRepo();
+      writePnpmWorkspace(repoRoot, "lockfileVersion: '9.0'\n");
+      fs.mkdirSync(path.join(repoRoot, 'assets'));
+      fs.writeFileSync(path.join(repoRoot, 'assets', 'icon-a.svg'), '<svg>a</svg>');
+      spawnSync('git', ['init', '-q'], { cwd: repoRoot });
+      recordRemoteInstall(pnpmPackageManagerPlugin.readLocalFingerprint(repoRoot)!);
+      return repoRoot;
+    };
+
+    const run = (repoRoot: string): Promise<number> =>
+      runRemoteCommandWithPmHooks({
+        prep: makePrep(repoRoot),
+        remoteArgv: ['pnpm', 'typecheck'],
+        pmOverride: undefined,
+        generatedInputs: ['assets/*.svg'],
+        generatedCommand: GENERATE,
+      });
+
+    const commands = (): string[] => runRemote.mock.calls.map((call) => String(call[2]));
+
+    it('regenerates when an input changes without the lockfile', async () => {
+      // As reported: master added two icon SVGs, the lockfile did not change, and typecheck failed on
+      // the two components the remote never generated.
+      const repoRoot = repoWithIcons();
+      try {
+        await run(repoRoot);
+        expect(commands().filter((c) => c === GENERATE)).toHaveLength(1);
+
+        await run(repoRoot);
+        expect(commands().filter((c) => c === GENERATE)).toHaveLength(1);
+
+        fs.writeFileSync(path.join(repoRoot, 'assets', 'icon-zoom-in.svg'), '<svg>z</svg>');
+        await run(repoRoot);
+        expect(commands().filter((c) => c === GENERATE)).toHaveLength(2);
+        expect(commands().filter((c) => c === pnpmPackageManagerPlugin.remoteInstallCommand)).toEqual([]);
+      } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('does not record the inputs when the command fails, so the next run tries again', async () => {
+      const repoRoot = repoWithIcons();
+      try {
+        runRemote.mockImplementationOnce(() => Promise.resolve(1));
+        expect(await run(repoRoot)).toBe(1);
+        await run(repoRoot);
+        expect(commands().filter((c) => c === GENERATE)).toHaveLength(2);
+      } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('still generates after an install that ran in the same run', async () => {
+      const repoRoot = repoWithIcons();
+      try {
+        remoteFiles.clear();
+        await run(repoRoot);
+        expect(commands().slice(0, 2)).toEqual([
+          pnpmPackageManagerPlugin.remoteInstallCommand,
+          GENERATE,
+        ]);
+      } finally {
+        fs.rmSync(repoRoot, { recursive: true, force: true });
+      }
+    });
   });
 
   it('does not call one plugin matching several commands a conflict', async () => {

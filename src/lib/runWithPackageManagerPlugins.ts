@@ -5,7 +5,10 @@ import { buildEnvForwarding, describeEnvForwarding } from './envPassthrough';
 import { readLocalBicaSettings } from '../localBicaSettings';
 import { claimPathExpr } from './remoteClaim';
 import { argvToPosixShCommand } from '../remoteArgvToShellCommand';
-import { remoteMissingGeneratedPaths } from './generatedPaths';
+import {
+  localGeneratedInputsDigest,
+  remoteMissingGeneratedPaths,
+} from './generatedPaths';
 import {
   matchingPackageManagerPlugins,
   resolveActivePackageManagerPlugins,
@@ -211,6 +214,104 @@ export function aggregateExitCode(codes: readonly number[]): number {
 }
 
 /**
+ * The install records' name for what the generated output was last made from.
+ *
+ * Kept beside them for the same reason they are kept outside the workspace: a record inside it would
+ * be deleted by the mirroring sync.
+ */
+const GENERATED_RECORD_ID = 'generated';
+
+/**
+ * Make the declared generated output current on the remote before the command runs.
+ *
+ * Two questions, because each misses what the other catches. Is the output there at all -- a git
+ * worktree never had it, and the lockfile does not change. And was it made from the inputs the remote
+ * now has -- master added two icon SVGs without a lockfile change, `Icon*.tsx` still matched last
+ * week's icons, and typecheck failed on the two components nobody generated. The second is only asked
+ * when the repo declares `generated.inputs`.
+ *
+ * Asked after any install, not instead of it: a `postinstall` that generates is the repo's business,
+ * and whether it did is exactly what the probe can answer.
+ */
+async function repairGeneratedOutput(options: {
+  plugin: PackageManagerPlugin;
+  repoRoot: string;
+  sshHost: string;
+  remoteWorkspacePath: string;
+  paths: readonly string[];
+  inputs: readonly string[];
+  command: string | undefined;
+  installRan: boolean;
+  assertRunId?: string;
+  claimPathExpr?: string;
+}): Promise<number> {
+  const { sshHost, remoteWorkspacePath } = options;
+  // Only probed when the repo declares something, so this costs nothing for repos that do not opt in.
+  const missing = remoteMissingGeneratedPaths(
+    sshHost,
+    remoteWorkspacePath,
+    options.paths,
+  );
+  const inputsDigest = localGeneratedInputsDigest(
+    options.repoRoot,
+    options.inputs,
+  );
+  const madeFrom =
+    inputsDigest === null
+      ? null
+      : readRemoteInstallRecord(
+          sshHost,
+          remoteWorkspacePath,
+          GENERATED_RECORD_ID,
+        );
+  const stale = inputsDigest !== null && madeFrom !== inputsDigest;
+  if (missing.length === 0 && !stale) {
+    return 0;
+  }
+
+  // The repo's own command when it declares one. Falling back to the install is a guess and usually a
+  // wrong one: `pnpm install` skips `postinstall` entirely when the lockfile is already satisfied, so
+  // the install fires, reports success, and regenerates nothing. After an install has just run there
+  // is not even that guess left to make.
+  const command =
+    options.command ??
+    (options.installRan ? undefined : options.plugin.remoteInstallCommand);
+  if (command === undefined) {
+    return 0;
+  }
+  const reason =
+    missing.length > 0
+      ? `Generated output missing on the remote (${missing.join(', ')})`
+      : madeFrom === null
+        ? 'No record of what the generated output on the remote was made from'
+        : `The generated output's inputs changed since the remote last made it (${options.inputs.join(', ')})`;
+  process.stderr.write(`[bica] ${reason}; running ${command} to produce it.\n`);
+  const code = await runRemoteCommand(
+    sshHost,
+    remoteWorkspacePath,
+    command,
+    options.repoRoot,
+    {
+      assertRunId: options.assertRunId,
+      claimPathExpr: options.claimPathExpr,
+    },
+  );
+  if (code !== 0) {
+    maybeWriteCredentialsHint(options.plugin);
+    return code;
+  }
+  if (inputsDigest !== null) {
+    writeRemoteInstallRecord(
+      sshHost,
+      remoteWorkspacePath,
+      GENERATED_RECORD_ID,
+      inputsDigest,
+    );
+  }
+  return 0;
+}
+
+/**
  * Runs the remote argv after optional package-manager preflight (install hash / reinstall prompt).
  */
 /** Filled in when a detached command turned out to be over before the launcher let go of it. */
@@ -262,6 +363,8 @@ export async function runRemoteCommandWithPmHooks(options: {
    * the time it gets here the directory exists and this function's own check cannot tell it is new.
    */
   workspaceCreated?: boolean;
+  /** Files the generated output is made from; a change to them reruns `generatedCommand`. */
+  generatedInputs?: string[];
 }): Promise<number> {
   const { prep, remoteArgv, pmOverride } = options;
   const { repoRoot, config } = prep;
@@ -292,12 +395,8 @@ export async function runRemoteCommandWithPmHooks(options: {
   // anything that removes the directory itself leaves the record asserting an install that no longer
   // exists. Clearing it on creation keeps the claim tied to something real.
   if (dirReady.created || options.workspaceCreated === true) {
-    for (const plugin of active) {
-      clearRemoteInstallRecord(
-        config.sshHost,
-        config.remoteWorkspacePath,
-        plugin.id,
-      );
+    for (const id of [...active.map((p) => p.id), GENERATED_RECORD_ID]) {
+      clearRemoteInstallRecord(config.sshHost, config.remoteWorkspacePath, id);
     }
   }
 
@@ -327,35 +426,13 @@ export async function runRemoteCommandWithPmHooks(options: {
         });
     const initial = compared.initial;
     const lockfileDrift = compared.drift;
-    // Ask whether the output is actually there, rather than inferring it from the lockfile. A
-    // `git worktree` has every gitignored generated file missing and an unchanged lockfile, so the
-    // fingerprint says "installed" while the workspace cannot compile. Only probed when the repo
-    // declares something, so this costs one round trip for repos that opt in and nothing otherwise.
-    const missingGenerated =
-      isInstall || initial || lockfileDrift
-        ? []
-        : remoteMissingGeneratedPaths(
-            config.sshHost,
-            config.remoteWorkspacePath,
-            options.generatedPaths ?? [],
-          );
 
-    if (initial || lockfileDrift || missingGenerated.length > 0) {
-      // A missing-output repair runs the repo's own command when it declares one. Falling back to
-      // the install is a guess and usually a wrong one: `pnpm install` skips `postinstall` entirely
-      // when the lockfile is already satisfied, so the install fires, reports success, and
-      // regenerates nothing -- which is exactly what happened the first time this was tried.
-      const repairCommand =
-        !initial && !lockfileDrift && options.generatedCommand !== undefined
-          ? options.generatedCommand
-          : plugin.remoteInstallCommand;
-      const reason = initial
-        ? `[bica] No remote install recorded yet (${plugin.id}); running ${plugin.remoteInstallCommand}.`
-        : lockfileDrift
-          ? `[bica] The remote workspace last installed from a different lockfile (${plugin.id}); reinstalling.`
-          : `[bica] Generated output missing on the remote (${missingGenerated.join(', ')}); ` +
-            `running ${repairCommand} to produce it.`;
-      process.stderr.write(`${reason}\n`);
+    if (initial || lockfileDrift) {
+      process.stderr.write(
+        initial
+          ? `[bica] No remote install recorded yet (${plugin.id}); running ${plugin.remoteInstallCommand}.\n`
+          : `[bica] The remote workspace last installed from a different lockfile (${plugin.id}); reinstalling.\n`,
+      );
       // No local lock around this. The remote workspace is leased for the whole run -- taken in
       // `cmdRun` before anything syncs, released in its `finally` -- so a second run against this
       // workspace exits 98 without reaching an install, and a run against a *different* workspace was
@@ -366,9 +443,12 @@ export async function runRemoteCommandWithPmHooks(options: {
       const installCode = await runRemoteCommand(
         config.sshHost,
         config.remoteWorkspacePath,
-        repairCommand,
+        plugin.remoteInstallCommand,
         repoRoot,
-        { assertRunId: options.assertRunId, claimPathExpr: options.claimPathExpr },
+        {
+          assertRunId: options.assertRunId,
+          claimPathExpr: options.claimPathExpr,
+        },
       );
       if (installCode !== 0) {
         maybeWriteCredentialsHint(plugin);
@@ -381,6 +461,24 @@ export async function runRemoteCommandWithPmHooks(options: {
           plugin.id,
           localFingerprint,
         );
+      }
+    }
+
+    if (!isInstall) {
+      const repairCode = await repairGeneratedOutput({
+        plugin,
+        repoRoot,
+        sshHost: config.sshHost,
+        remoteWorkspacePath: config.remoteWorkspacePath,
+        paths: options.generatedPaths ?? [],
+        inputs: options.generatedInputs ?? [],
+        command: options.generatedCommand,
+        installRan: initial || lockfileDrift,
+        assertRunId: options.assertRunId,
+        claimPathExpr: options.claimPathExpr,
+      });
+      if (repairCode !== 0) {
+        return repairCode;
       }
     }
   }
@@ -417,7 +515,8 @@ export async function runRemoteCommandWithPmHooks(options: {
       envScript,
       argv: options.remoteArgv,
       runId: options.detachRunId,
-      claimPathExpr: options.claimPathExpr ?? claimPathExpr(config.remoteWorkspacePath),
+      claimPathExpr:
+        options.claimPathExpr ?? claimPathExpr(config.remoteWorkspacePath),
       loginShell: loginShellFromEnv(),
     });
     if (outcome.exitedEarly) {
