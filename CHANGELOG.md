@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.9 — 2026-10-27
 
 ### Fixed
 - **A workspace recreated on the remote installs its dependencies again.** The record of what a
