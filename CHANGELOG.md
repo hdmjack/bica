@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **The watchers survive whatever kills bica.** 0.8.12 and 0.8.13 start a watcher per run that ends
+  its sync and its remote command if bica dies. They were started detached, which is a new process
+  group but still bica's child, and an agent's shell tool or a task runner stopping a job kills the
+  whole tree of descendants: the watcher died with the run it was watching. A `pnpm typecheck` ran on
+  for fourteen minutes that way, holding its workspace. The watchers are now handed to init as they
+  start, so nothing that kills bica's tree reaches them.
+- **A dropped connection now ends the remote command.** When ssh failed mid-run (exit 95), bica kept
+  the workspace leased while the command ran to its end with nobody reading it, and disarmed the
+  watcher on its way out. It now leaves the watcher armed, so the command is cancelled from a fresh
+  connection once bica has exited. If the host cannot be reached at all, the lease is kept as before.
+
 ## 0.8.13 — 2026-10-28
 
 ### Fixed

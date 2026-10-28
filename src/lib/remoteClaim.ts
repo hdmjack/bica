@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
 import * as os from 'node:os';
+
+import { startOrphanedWatcher, stopOrphanedWatcher } from './orphanedWatcher';
 
 import {
   runRemoteScriptOverStdin,
@@ -348,8 +349,8 @@ export function buildRunWatchdogScript(options: {
 }
 
 /**
- * Start that watcher, detached so it outlives whatever ends this process. The run disarms it on every
- * way out it controls; the watcher is for the ones it does not.
+ * Start that watcher where killing this process's tree cannot reach it; see orphanedWatcher.ts. The
+ * run disarms it on every way out it controls; the watcher is for the ones it does not.
  */
 export function startRunWatchdog(options: {
   sshHost: string;
@@ -357,30 +358,10 @@ export function startRunWatchdog(options: {
   runId: string;
   pid?: number;
 }): { disarm: () => void } {
-  let child: ReturnType<typeof spawn> | undefined;
-  try {
-    child = spawn(
-      'sh',
-      ['-c', buildRunWatchdogScript({ ...options, pid: options.pid ?? process.pid })],
-      { detached: true, stdio: 'ignore' },
-    );
-    child.unref();
-  } catch {
-    child = undefined;
-  }
-  return {
-    disarm: () => {
-      if (child?.pid === undefined) {
-        return;
-      }
-      try {
-        // The whole group, so the `sleep` it is waiting in goes too.
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        // Already gone.
-      }
-    },
-  };
+  const watcher = startOrphanedWatcher(
+    buildRunWatchdogScript({ ...options, pid: options.pid ?? process.pid }),
+  );
+  return { disarm: () => stopOrphanedWatcher(watcher) };
 }
 
 /** What a cancel actually did, so the caller can say something true rather than "done". */

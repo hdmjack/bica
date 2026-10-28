@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 import {
   SYNC_QUIET_PHASE_STALL_SECONDS,
@@ -10,6 +10,7 @@ import {
   readSyncProgress,
 } from './syncProgress';
 import type { ReadProgress, SyncProgress } from './syncProgress';
+import { startOrphanedWatcher } from './orphanedWatcher';
 
 /** How often to say where a long first sync has got to. */
 const PROGRESS_EVERY_MS = 10_000;
@@ -331,7 +332,7 @@ export function buildSyncWatchdogScript(options: {
 }
 
 /**
- * Start the watcher for this process's sync, detached so it survives whatever ends this process.
+ * Start the watcher for this process's sync where killing this process's tree cannot reach it.
  * Best effort: without a project id there is nothing safe to key it on, and the sweep in
  * `endLeftoverRunSyncs` still ends the session the next time anyone runs bica.
  */
@@ -344,25 +345,16 @@ export function startSyncWatchdog(options: {
   if (projectId === null) {
     return false;
   }
-  try {
-    const child = spawn(
-      'sh',
-      [
-        '-c',
-        buildSyncWatchdogScript({
-          pid: options.pid ?? process.pid,
-          projectId,
-          lockPath: `${options.projectFileAbsolutePath}.lock`,
-          markerPath: options.markerPath,
-        }),
-      ],
-      { detached: true, stdio: 'ignore' },
-    );
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
+  return (
+    startOrphanedWatcher(
+      buildSyncWatchdogScript({
+        pid: options.pid ?? process.pid,
+        projectId,
+        lockPath: `${options.projectFileAbsolutePath}.lock`,
+        markerPath: options.markerPath,
+      }),
+    ) !== undefined
+  );
 }
 
 export function mutagenProjectTerminate(

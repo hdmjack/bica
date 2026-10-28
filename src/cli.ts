@@ -1422,13 +1422,27 @@ async function cmdRun(options: {
       });
     }
   } finally {
-    runWatchdog?.disarm();
-    if (!keepLease && !acquired.releaseAfterRun(code)) {
+    const leaseKept = !keepLease && !acquired.releaseAfterRun(code);
+    if (leaseKept && runWatchdog !== undefined) {
+      // A lost connection, so the remote command may still be running with nobody to read it. Left
+      // armed, the watchdog cancels it once this process has exited, from its own connection and with
+      // its own timeout, rather than this run waiting on a round trip over the link that just failed.
+      // Disarming here is what let a typecheck run fourteen minutes for nobody, holding the lease.
       process.stderr.write(
-        `${warn('[bica]')} The workspace stays leased while anything this run started is still running on ` +
-          `${baseRemote.sshHost}, so a later run is refused (98) rather than colliding with it; once it has ` +
-          'stopped, the next run takes the workspace as usual. `bica cancel` ends it now.\n',
+        `${warn('[bica]')} Nothing can read this run's output any more, so bica is ending its remote command in the ` +
+          `background and then releasing the workspace. If ${baseRemote.sshHost} cannot be reached, the workspace ` +
+          'stays leased while the command runs, so a later run is refused (98) rather than colliding with it; ' +
+          '`bica cancel` ends it once the host answers.\n',
       );
+    } else {
+      runWatchdog?.disarm();
+      if (leaseKept) {
+        process.stderr.write(
+          `${warn('[bica]')} The workspace stays leased while anything this run started is still running on ` +
+            `${baseRemote.sshHost}, so a later run is refused (98) rather than colliding with it; once it has ` +
+            'stopped, the next run takes the workspace as usual. `bica cancel` ends it now.\n',
+        );
+      }
     }
     process.removeListener('exit', release);
     process.removeListener('SIGTERM', onSigterm);
