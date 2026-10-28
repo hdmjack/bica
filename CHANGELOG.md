@@ -16,7 +16,8 @@ entries note where a change affects what another version sees.
   abandoned command runs on the laptop, so a laptop that sleeps, loses its network or is shut does
   none of it. An attached run now refreshes a heartbeat beside its lease every 30 seconds, and each
   leased command runs with a small watcher on the remote that ends its process group once the
-  heartbeat has been quiet for five minutes. It stops watching as soon as the lease is no longer that
+  heartbeat has been quiet for eleven minutes, longer than the run's own connection waits before
+  giving up, so a network outage it would have survived does not end it. It stops watching as soon as the lease is no longer that
   run's. Detached runs and `bica tunnel` are not watched, and a bica older than this sends no heartbeat
   and so builds scripts without the watcher.
 - **A dropped connection now ends the remote command.** When ssh failed mid-run (exit 95), bica kept

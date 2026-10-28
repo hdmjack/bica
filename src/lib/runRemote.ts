@@ -795,11 +795,14 @@ export function buildRemoteRunScript(options: {
  * remote checks it every {@link HEARTBEAT_CHECK_SECONDS} and ends the command's process group once it
  * has not changed for this long.
  *
- * Five minutes rather than one, because a laptop lid closed for a minute should not cost a build whose
- * connection survives it. Long enough to be sure, short enough that an abandoned typecheck no longer
- * holds a workspace for a quarter of an hour.
+ * Longer than the run's own connection will wait. Its ssh tolerates ten minutes of silence (a
+ * keep-alive every 30 seconds, 20 missed), so a network outage shorter than that leaves the run
+ * connected and its result still on the way home. The first version used five minutes and ended
+ * exactly such a run: the mini dropped off the network for six, the heartbeats failed, the build was
+ * killed, and the exit 143 arrived over the connection that had survived. Past eleven minutes the
+ * connection has given up too, so nothing ended here could still have been read.
  */
-export const HEARTBEAT_STALE_MINUTES = 5;
+export const HEARTBEAT_STALE_MINUTES = 11;
 /** How often the remote looks at the heartbeat. */
 export const HEARTBEAT_CHECK_SECONDS = 15;
 /** How often the client refreshes it. */

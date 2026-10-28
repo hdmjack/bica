@@ -376,7 +376,7 @@ export function buildHeartbeatScript(claimExpr: string, runId: string): string {
  *
  * The remote ends a leased command whose heartbeat has gone quiet; see HEARTBEAT_STALE_MINUTES in
  * runRemote.ts. Each beat is its own short ssh, so a dropped run connection does not stop it, and a
- * beat that fails is simply tried again next time: only five minutes of silence ends anything. One
+ * beat that fails is simply tried again next time: only eleven minutes of silence ends anything. One
  * beat at a time, so a slow host does not pile them up.
  */
 export function startHeartbeat(options: {
