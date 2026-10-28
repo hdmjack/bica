@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.14 — 2026-10-28
 
 ### Fixed
 - **The watchers survive whatever kills bica.** 0.8.12 and 0.8.13 start a watcher per run that ends
