@@ -1,8 +1,9 @@
+import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 
 import { startOrphanedWatcher, stopOrphanedWatcher } from './orphanedWatcher';
-
 import {
+  HEARTBEAT_EVERY_MS,
   runRemoteScriptOverStdin,
   shellSingleQuoteRemotePathForSh,
 } from './runRemote';
@@ -272,7 +273,7 @@ export function buildClaimReleaseScript(
   runId: string,
 ): string {
   const q = shellSingleQuoteRemotePathForSh(runId);
-  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr} ${claimExpr}.cmd\nexit 0\n`;
+  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr} ${claimExpr}.cmd ${claimExpr}.beat ${claimExpr}.beat.*\nexit 0\n`;
 }
 
 /**
@@ -314,7 +315,7 @@ export function buildClaimCancelScript(
     'else\n' +
     '  echo BICA_NEVER_RAN\n' +
     'fi\n' +
-    `rm -f ${claimExpr} ${claimExpr}.cmd\n` +
+    `rm -f ${claimExpr} ${claimExpr}.cmd ${claimExpr}.beat ${claimExpr}.beat.*\n` +
     'echo BICA_CLEARED\n'
   );
 }
@@ -362,6 +363,55 @@ export function startRunWatchdog(options: {
     buildRunWatchdogScript({ ...options, pid: options.pid ?? process.pid }),
   );
   return { disarm: () => stopOrphanedWatcher(watcher) };
+}
+
+/** The remote half of a heartbeat: refresh it, but only while the lease is still this run's. */
+export function buildHeartbeatScript(claimExpr: string, runId: string): string {
+  const q = shellSingleQuoteRemotePathForSh(runId);
+  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && touch ${claimExpr}.beat\nexit 0\n`;
+}
+
+/**
+ * Keep telling the remote this run's client is still here, for as long as it is.
+ *
+ * The remote ends a leased command whose heartbeat has gone quiet; see HEARTBEAT_STALE_MINUTES in
+ * runRemote.ts. Each beat is its own short ssh, so a dropped run connection does not stop it, and a
+ * beat that fails is simply tried again next time: only five minutes of silence ends anything. One
+ * beat at a time, so a slow host does not pile them up.
+ */
+export function startHeartbeat(options: {
+  sshHost: string;
+  remoteWorkspacePath: string;
+  runId: string;
+  everyMs?: number;
+}): { stop: () => void } {
+  const script = buildHeartbeatScript(claimPathExpr(options.remoteWorkspacePath), options.runId);
+  let inFlight = false;
+  const timer = setInterval(() => {
+    if (inFlight) {
+      return;
+    }
+    inFlight = true;
+    try {
+      const child = spawn(
+        'ssh',
+        ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', options.sshHost, 'sh', '-s'],
+        { stdio: ['pipe', 'ignore', 'ignore'] },
+      );
+      child.on('error', () => {
+        inFlight = false;
+      });
+      child.on('close', () => {
+        inFlight = false;
+      });
+      child.stdin.end(script);
+      child.unref();
+    } catch {
+      inFlight = false;
+    }
+  }, options.everyMs ?? HEARTBEAT_EVERY_MS);
+  timer.unref();
+  return { stop: () => clearInterval(timer) };
 }
 
 /** What a cancel actually did, so the caller can say something true rather than "done". */

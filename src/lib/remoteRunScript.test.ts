@@ -339,3 +339,83 @@ describe.each(shells)('wrapCommandToDieWithConnection, run under %s', (shell) =>
     }
   });
 });
+
+/**
+ * A command whose client has gone quiet is ended on the remote. Run for real under `sh`, with the
+ * intervals shortened: the parts that matter are the shell's -- `-nt`, the process-group kill, and
+ * stopping when the lease is no longer this run's.
+ */
+describe('buildRemoteRunScript — heartbeat', () => {
+  let dir = '';
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-heartbeat-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const claim = (): string => path.join(dir, 'code_repo');
+
+  /** Start the script in its own process group, as sshd starts a session. */
+  const start = (runId = 'run-1'): { pid: number; done: Promise<number | null> } => {
+    fs.writeFileSync(claim(), `${runId} laptop 1 t=0\n`);
+    const script = buildRemoteRunScript({
+      preamble: '',
+      cdExpr: `cd '${dir}'`,
+      command: 'sleep 30',
+      runId,
+      claimPathExpr: `'${claim()}'`,
+      heartbeat: true,
+      heartbeatTiming: { checkSeconds: 1, staleSeconds: 3 },
+    });
+    const child = spawn('sh', ['-c', script], { detached: true, stdio: 'ignore' });
+    const done = new Promise<number | null>((resolve) => {
+      child.on('exit', (code, signal) => resolve(signal === null ? code : -1));
+    });
+    return { pid: child.pid!, done };
+  };
+
+  const within = <T,>(p: Promise<T>, ms: number): Promise<T | 'timeout'> =>
+    Promise.race([p, new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), ms))]);
+
+  const stop = (pid: number): void => {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  };
+
+  it('ends the command once the heartbeat goes quiet', async () => {
+    const run = start();
+    try {
+      expect(await within(run.done, 8000)).not.toBe('timeout');
+    } finally {
+      stop(run.pid);
+    }
+  }, 15_000);
+
+  it('leaves the command running while the heartbeat keeps coming', async () => {
+    const run = start();
+    const beat = setInterval(() => {
+      const now = new Date();
+      fs.utimesSync(`${claim()}.beat`, now, now);
+    }, 700);
+    try {
+      expect(await within(run.done, 6000)).toBe('timeout');
+    } finally {
+      clearInterval(beat);
+      stop(run.pid);
+    }
+  }, 15_000);
+
+  it('stops watching once the lease is no longer this run\'s', async () => {
+    const run = start();
+    fs.writeFileSync(claim(), 'someone-else laptop 2 t=0\n');
+    try {
+      expect(await within(run.done, 6000)).toBe('timeout');
+    } finally {
+      stop(run.pid);
+    }
+  }, 15_000);
+});

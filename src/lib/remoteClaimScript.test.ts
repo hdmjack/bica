@@ -9,6 +9,7 @@ import {
   buildClaimAcquireScript,
   buildClaimCancelScript,
   buildClaimReleaseScript,
+  buildHeartbeatScript,
   buildRunWatchdogScript,
   claimPathExpr,
   formatOwner,
@@ -520,6 +521,26 @@ describe('the watcher that cancels a killed run', () => {
     } finally {
       process.env.PATH = savedPath;
       process.env.HOME = savedHome;
+    }
+  });
+});
+
+describe('buildHeartbeatScript', () => {
+  it('refreshes the heartbeat only while the lease is this run\'s', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-beat-'));
+    try {
+      const claim = path.join(dir, 'code_repo');
+      const run = (): void => {
+        spawnSync('sh', ['-s'], { input: buildHeartbeatScript(`'${claim}'`, 'run-1') });
+      };
+      fs.writeFileSync(claim, 'someone-else laptop 2 t=0\n');
+      run();
+      expect(fs.existsSync(`${claim}.beat`)).toBe(false);
+      fs.writeFileSync(claim, 'run-1 laptop 1 t=0\n');
+      run();
+      expect(fs.existsSync(`${claim}.beat`)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

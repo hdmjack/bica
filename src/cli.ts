@@ -80,6 +80,7 @@ import {
   describeClaim,
   remoteBreakClaim,
   remoteCancelClaim,
+  startHeartbeat,
   startRunWatchdog,
   remoteReadClaim,
   sshLeaseOps,
@@ -1287,6 +1288,12 @@ async function cmdRun(options: {
   }
   const { owner, release } = acquired;
   process.on('exit', release);
+  // Tells the remote this client is still here; a command whose client goes quiet is ended there.
+  const heartbeat = startHeartbeat({
+    sshHost: baseRemote.sshHost,
+    remoteWorkspacePath: baseRemote.remoteWorkspacePath,
+    runId: owner.runId,
+  });
   // Cancels the remote command if this process is killed outright; disarmed on every exit we control.
   // Not for --detach, whose command is meant to outlive this process.
   const runWatchdog = options.detach
@@ -1319,6 +1326,7 @@ async function cmdRun(options: {
     // ssh afterwards is what stops us waiting on a connection we no longer want.
     remoteCancelClaim(baseRemote.sshHost, baseRemote.remoteWorkspacePath, owner.runId);
     runWatchdog?.disarm();
+    heartbeat.stop();
     terminateLiveRemoteCommand();
     process.removeListener('exit', release);
     process.exit(exitCode);
@@ -1422,6 +1430,7 @@ async function cmdRun(options: {
       });
     }
   } finally {
+    heartbeat.stop();
     const leaseKept = !keepLease && !acquired.releaseAfterRun(code);
     if (leaseKept && runWatchdog !== undefined) {
       // A lost connection, so the remote command may still be running with nobody to read it. Left

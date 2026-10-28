@@ -12,6 +12,13 @@ entries note where a change affects what another version sees.
   whole tree of descendants: the watcher died with the run it was watching. A `pnpm typecheck` ran on
   for fourteen minutes that way, holding its workspace. The watchers are now handed to init as they
   start, so nothing that kills bica's tree reaches them.
+- **A command whose laptop has gone away is ended on the remote.** Everything else that ends an
+  abandoned command runs on the laptop, so a laptop that sleeps, loses its network or is shut does
+  none of it. An attached run now refreshes a heartbeat beside its lease every 30 seconds, and each
+  leased command runs with a small watcher on the remote that ends its process group once the
+  heartbeat has been quiet for five minutes. It stops watching as soon as the lease is no longer that
+  run's. Detached runs and `bica tunnel` are not watched, and a bica older than this sends no heartbeat
+  and so builds scripts without the watcher.
 - **A dropped connection now ends the remote command.** When ssh failed mid-run (exit 95), bica kept
   the workspace leased while the command ran to its end with nobody reading it, and disarmed the
   watcher on its way out. It now leaves the watcher armed, so the command is cancelled from a fresh

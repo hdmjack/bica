@@ -700,6 +700,10 @@ export function buildRemoteRunScript(options: {
   claimPathExpr?: string;
   /** Whether to append this command's exit code to the claim. See the option of the same name. */
   recordExitCode?: boolean;
+  /** End the command when the client's heartbeat stops. See {@link HEARTBEAT_STALE_MINUTES}. */
+  heartbeat?: boolean;
+  /** Shorter intervals for tests; production uses the constants below. */
+  heartbeatTiming?: { checkSeconds: number; staleSeconds: number };
 }): string {
   const { runId, claimPathExpr } = options;
   const leased = runId !== undefined && claimPathExpr !== undefined;
@@ -735,15 +739,71 @@ export function buildRemoteRunScript(options: {
               `printf '%s %s' "$(cat ${claimPathExpr})" "$_bica_ec" > ${claimPathExpr} 2>/dev/null || true`,
             ]),
       );
+  const supervised = leased && options.heartbeat === true;
+  const beat = `${claimPathExpr ?? ''}.beat`;
+  // Each command keeps its own reference file and asks whether the shared heartbeat is newer, so the
+  // several commands of an `--also` run can all watch one heartbeat without consuming it from each
+  // other. `-nt` rather than `find -mmin`, which counts whole minutes and so cannot be tested in less.
+  const ref = `${beat}.$$`;
+  const checkSeconds = options.heartbeatTiming?.checkSeconds ?? HEARTBEAT_CHECK_SECONDS;
+  const staleChecks = Math.ceil(
+    (options.heartbeatTiming?.staleSeconds ?? HEARTBEAT_STALE_MINUTES * 60) / checkSeconds,
+  );
+  // Started after the pid is published and stopped as soon as the command returns. Its own output
+  // goes nowhere, so the ssh session never waits on it.
+  const supervise = !supervised
+    ? ''
+    : shBlock(
+        `touch ${beat} ${ref} 2>/dev/null`,
+        '(',
+        '  _bica_quiet=0',
+        `  while sleep ${String(checkSeconds)}; do`,
+        `    [ "$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)" = ${q} ] || exit 0`,
+        `    if [ ${beat} -nt ${ref} ]; then`,
+        `      touch ${ref}; _bica_quiet=0`,
+        '    else',
+        '      _bica_quiet=$((_bica_quiet + 1))',
+        `      if [ "$_bica_quiet" -ge ${String(staleChecks)} ]; then`,
+        `        rm -f ${ref}`,
+        '        kill -TERM -$$ 2>/dev/null',
+        '        exit 0',
+        '      fi',
+        '    fi',
+        '  done',
+        ') </dev/null >/dev/null 2>&1 &',
+        '_bica_sup=$!',
+      );
   return (
     `${options.preamble}${options.cdExpr} || exit ${String(REMOTE_CD_FAILED_EXIT)}\n` +
     publishPid +
+    supervise +
     `${options.command}\n` +
     shBlock('_bica_ec=$?') +
+    (supervised ? shBlock('kill "$_bica_sup" 2>/dev/null', `rm -f ${ref}`) : '') +
     verify +
     shBlock('exit "$_bica_ec"')
   );
 }
+
+/**
+ * How long a leased command goes on without word from its client before the remote ends it.
+ *
+ * Everything else that ends an abandoned command runs on the laptop -- the signal handlers, the
+ * watcher that cancels after `kill -9` -- and so depends on the laptop being there to do it. A laptop
+ * that sleeps, loses its network or is shut does none of it, and the command runs to its end holding
+ * the workspace. The client refreshes a file beside the lease every {@link HEARTBEAT_EVERY_MS}; the
+ * remote checks it every {@link HEARTBEAT_CHECK_SECONDS} and ends the command's process group once it
+ * has not changed for this long.
+ *
+ * Five minutes rather than one, because a laptop lid closed for a minute should not cost a build whose
+ * connection survives it. Long enough to be sure, short enough that an abandoned typecheck no longer
+ * holds a workspace for a quarter of an hour.
+ */
+export const HEARTBEAT_STALE_MINUTES = 5;
+/** How often the remote looks at the heartbeat. */
+export const HEARTBEAT_CHECK_SECONDS = 15;
+/** How often the client refreshes it. */
+export const HEARTBEAT_EVERY_MS = 30_000;
 
 /**
  * Wrap a command so that losing the ssh connection kills it.
@@ -933,6 +993,7 @@ export function buildRemoteCommandScript(options: {
   assertRunId?: string;
   claimPathExpr?: string;
   recordExitCode?: boolean;
+  heartbeat?: boolean;
 }): string {
   const { remoteWorkspacePath, command, repoRoot } = options;
   const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
@@ -963,6 +1024,7 @@ export function buildRemoteCommandScript(options: {
     runId: options.assertRunId,
     claimPathExpr: options.claimPathExpr,
     recordExitCode: options.recordExitCode ?? true,
+    heartbeat: options.heartbeat,
   });
 }
 
@@ -1021,6 +1083,8 @@ export async function runRemoteCommand(
     assertRunId: options?.assertRunId,
     claimPathExpr: options?.claimPathExpr,
     recordExitCode: options?.recordExitCode,
+    // An attached run's client is refreshing the heartbeat; see startHeartbeat in remoteClaim.ts.
+    heartbeat: options?.assertRunId !== undefined,
   });
   const shell = loginShellFromEnv();
   const flags = loginFlagsFromEnv();
