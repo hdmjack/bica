@@ -736,7 +736,11 @@ export function buildRemoteRunScript(options: {
         ...(options.recordExitCode === false
           ? []
           : [
-              `printf '%s %s' "$(cat ${claimPathExpr})" "$_bica_ec" > ${claimPathExpr} 2>/dev/null || true`,
+              // Only over a claim that is still there and still this run's. Unguarded, a claim removed
+              // between the check above and this line -- by a cancel or a cleanup -- was recreated
+              // holding nothing but the exit code, and that ownerless lease refused every later run.
+              `_bica_line=$(cat ${claimPathExpr} 2>/dev/null)`,
+              `case "$_bica_line" in ${q}' '*) printf '%s %s' "$_bica_line" "$_bica_ec" > ${claimPathExpr} 2>/dev/null || true ;; esac`,
             ]),
       );
   const supervised = leased && options.heartbeat === true;
