@@ -9,8 +9,10 @@ import {
   buildClaimAcquireScript,
   buildClaimCancelScript,
   buildClaimReleaseScript,
+  buildRunWatchdogScript,
   claimPathExpr,
   formatOwner,
+  startRunWatchdog,
 } from './remoteClaim';
 
 /**
@@ -406,5 +408,118 @@ describe('owner formatting guards the release comparison', () => {
 describe('sanity', () => {
   it('runs the shell these tests depend on', () => {
     expect(execFileSync('/bin/sh', ['-c', 'echo ok'], { encoding: 'utf8' }).trim()).toBe('ok');
+  });
+});
+
+/**
+ * A run killed outright used to leave its remote command running and its lease held. The watcher waits
+ * on the run's pid and sends the cancel; these drive the real script with a stand-in `ssh` that runs
+ * what it is sent against a local claim directory.
+ */
+describe('the watcher that cancels a killed run', () => {
+  let dir = '';
+  let bin = '';
+  let env: NodeJS.ProcessEnv = {};
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-run-watchdog-'));
+    bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
+    // Records its arguments, then runs its stdin the way the remote's `sh -s` would, with HOME here so
+    // `~/.bica/claims` is the test's own.
+    fs.writeFileSync(
+      path.join(bin, 'ssh'),
+      `#!/bin/sh\necho "$@" >> '${dir}/ssh-args'\nfor last; do :; done\nexec sh -s\n`,
+      { mode: 0o755 },
+    );
+    env = { ...process.env, HOME: dir, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    fs.mkdirSync(path.join(dir, '.bica', 'claims'), { recursive: true });
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A process that is not this one's child, so once killed it is reaped as bica would be. */
+  const orphanSleep = (): number =>
+    Number(
+      spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim(),
+    );
+
+  /** A claim for run `runId` whose remote command is a real process group. */
+  const claimWithCommand = (runId: string): { claim: string; commandPid: number } => {
+    const commandPid = Number(
+      spawnSync('sh', ['-c', 'set -m; sleep 60 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim(),
+    );
+    const claim = path.join(dir, '.bica', 'claims', 'code_repo');
+    fs.writeFileSync(claim, `${runId} laptop 1 t=0 rpid=${String(commandPid)}\n`);
+    return { claim, commandPid };
+  };
+
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it('cancels the remote command and clears the lease once the run is gone', () => {
+    const run = orphanSleep();
+    const { claim, commandPid } = claimWithCommand(String(run));
+    process.kill(run, 'SIGKILL');
+    const result = spawnSync(
+      'sh',
+      ['-c', buildRunWatchdogScript({ pid: run, sshHost: 'mini', remoteWorkspacePath: '~/code/repo', runId: String(run) })],
+      { env, timeout: 20_000 },
+    );
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(path.join(dir, 'ssh-args'), 'utf8')).toContain('mini sh -s');
+    expect(fs.existsSync(claim)).toBe(false);
+    spawnSync('sleep', ['0.2']);
+    expect(alive(commandPid)).toBe(false);
+  });
+
+  it('leaves a lease another run has taken since', () => {
+    const run = orphanSleep();
+    const { claim, commandPid } = claimWithCommand('someone-else');
+    process.kill(run, 'SIGKILL');
+    spawnSync(
+      'sh',
+      ['-c', buildRunWatchdogScript({ pid: run, sshHost: 'mini', remoteWorkspacePath: '~/code/repo', runId: String(run) })],
+      { env, timeout: 20_000 },
+    );
+    expect(fs.existsSync(claim)).toBe(true);
+    expect(alive(commandPid)).toBe(true);
+    process.kill(-commandPid, 'SIGKILL');
+  });
+
+  it('does nothing once disarmed, as a run that finishes normally disarms it', () => {
+    // The watcher inherits this process's environment, so the stand-in ssh has to be on its PATH.
+    const savedPath = process.env.PATH;
+    const savedHome = process.env.HOME;
+    process.env.PATH = env.PATH;
+    process.env.HOME = dir;
+    try {
+      const armed = orphanSleep();
+      startRunWatchdog({ pid: armed, sshHost: 'mini', remoteWorkspacePath: '~/code/repo', runId: 'x' });
+      const run = orphanSleep();
+      const watchdog = startRunWatchdog({
+        pid: run,
+        sshHost: 'disarmed',
+        remoteWorkspacePath: '~/code/repo',
+        runId: String(run),
+      });
+      watchdog.disarm();
+      process.kill(run, 'SIGKILL');
+      process.kill(armed, 'SIGKILL');
+      spawnSync('sleep', ['4']);
+      // The armed one, killed the same way, shows the stand-in would have been reached.
+      const calls = fs.readFileSync(path.join(dir, 'ssh-args'), 'utf8');
+      expect(calls).toContain('mini sh -s');
+      expect(calls).not.toContain('disarmed');
+    } finally {
+      process.env.PATH = savedPath;
+      process.env.HOME = savedHome;
+    }
   });
 });

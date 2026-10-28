@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 
 import {
@@ -315,6 +316,71 @@ export function buildClaimCancelScript(
     `rm -f ${claimExpr} ${claimExpr}.cmd\n` +
     'echo BICA_CLEARED\n'
   );
+}
+
+/**
+ * The local script that cancels a run's remote command once the run's own process is gone.
+ *
+ * A run ends its remote command by holding the ssh connection: Ctrl-C reaches the ssh through the
+ * process group, and SIGTERM is handled. `kill -9` is neither. The ssh outlives bica holding the
+ * terminal as its stdin, so no end of input ever reaches the remote, and the command ran to its end
+ * with the workspace leased and nobody reading -- a killed `bica run sleep 600` held its lease for ten
+ * minutes. This waits on the pid and then does what `bica cancel` would.
+ *
+ * Guarded by run id inside the cancel script, so a workspace another run has taken since is left alone.
+ */
+export function buildRunWatchdogScript(options: {
+  pid: number;
+  sshHost: string;
+  remoteWorkspacePath: string;
+  runId: string;
+}): string {
+  const cancel = buildClaimCancelScript(
+    claimPathExpr(options.remoteWorkspacePath),
+    options.runId,
+  );
+  return (
+    `while kill -0 ${String(options.pid)} 2>/dev/null; do sleep 2; done\n` +
+    `ssh -T -o BatchMode=yes -o ConnectTimeout=20 ${shellSingleQuoteRemotePathForSh(options.sshHost)} sh -s >/dev/null 2>&1 <<'BICA_CANCEL_EOF'\n` +
+    `${cancel}` +
+    'BICA_CANCEL_EOF\n'
+  );
+}
+
+/**
+ * Start that watcher, detached so it outlives whatever ends this process. The run disarms it on every
+ * way out it controls; the watcher is for the ones it does not.
+ */
+export function startRunWatchdog(options: {
+  sshHost: string;
+  remoteWorkspacePath: string;
+  runId: string;
+  pid?: number;
+}): { disarm: () => void } {
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    child = spawn(
+      'sh',
+      ['-c', buildRunWatchdogScript({ ...options, pid: options.pid ?? process.pid })],
+      { detached: true, stdio: 'ignore' },
+    );
+    child.unref();
+  } catch {
+    child = undefined;
+  }
+  return {
+    disarm: () => {
+      if (child?.pid === undefined) {
+        return;
+      }
+      try {
+        // The whole group, so the `sleep` it is waiting in goes too.
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    },
+  };
 }
 
 /** What a cancel actually did, so the caller can say something true rather than "done". */

@@ -3,6 +3,17 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A run killed outright no longer leaves its command running on the remote.** Ctrl-C and SIGTERM
+  already ended the remote command, and `kill -9` could not: the ssh outlived bica, the command ran to
+  its end with nobody reading, and the workspace stayed leased the whole time, so other runs met 98.
+  Each run now starts a small detached watcher on its own pid. If the run dies without disarming it,
+  the watcher sends the same cancel `bica cancel` does, guarded by the run's id so a workspace another
+  run has taken since is left alone. A detached run (`--detach`) gets none, since its command is meant
+  to outlive the launcher.
+
 ## 0.8.12 — 2026-10-28
 
 ### Fixed

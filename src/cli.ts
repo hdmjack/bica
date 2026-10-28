@@ -80,6 +80,7 @@ import {
   describeClaim,
   remoteBreakClaim,
   remoteCancelClaim,
+  startRunWatchdog,
   remoteReadClaim,
   sshLeaseOps,
 } from './lib/remoteClaim';
@@ -1286,6 +1287,15 @@ async function cmdRun(options: {
   }
   const { owner, release } = acquired;
   process.on('exit', release);
+  // Cancels the remote command if this process is killed outright; disarmed on every exit we control.
+  // Not for --detach, whose command is meant to outlive this process.
+  const runWatchdog = options.detach
+    ? undefined
+    : startRunWatchdog({
+        sshHost: baseRemote.sshHost,
+        remoteWorkspacePath: baseRemote.remoteWorkspacePath,
+        runId: owner.runId,
+      });
 
   // A caller with a command timeout — a CI step, an agent's shell tool — kills the client with
   // SIGTERM part-way through a run. With no handler the client dies at once and the remote command
@@ -1308,6 +1318,7 @@ async function cmdRun(options: {
     // workspace is never advertised as free while the command is still winding down. Killing the local
     // ssh afterwards is what stops us waiting on a connection we no longer want.
     remoteCancelClaim(baseRemote.sshHost, baseRemote.remoteWorkspacePath, owner.runId);
+    runWatchdog?.disarm();
     terminateLiveRemoteCommand();
     process.removeListener('exit', release);
     process.exit(exitCode);
@@ -1411,6 +1422,7 @@ async function cmdRun(options: {
       });
     }
   } finally {
+    runWatchdog?.disarm();
     if (!keepLease && !acquired.releaseAfterRun(code)) {
       process.stderr.write(
         `${warn('[bica]')} The workspace stays leased while anything this run started is still running on ` +
