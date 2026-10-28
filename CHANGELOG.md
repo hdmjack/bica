@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A sync no longer outlives a run that was killed.** A live run ends its Mutagen session in its exit
+  hook, and `kill -9`, an out-of-memory kill or a closed terminal skip that hook. The session then went
+  on mirroring the checkout into the remote until somebody ran bica from that checkout again: one kept
+  watching for twenty minutes after its run died, recreating a workspace folder while it was being
+  deleted. Each live run now starts a small detached watcher on its own pid. When the run is gone, the
+  watcher ends that run's sessions, keyed on the project id Mutagen makes afresh for every start, so
+  a later run from the same checkout is never touched. Any `bica run` or `bica start` also ends
+  sessions, from any checkout and into any workspace, whose recorded run is dead.
+
 ## 0.8.11 — 2026-10-27
 
 ### Fixed

@@ -46,7 +46,7 @@ import {
   pushReturnFlowToRemote,
 } from './returnFlow';
 import { reportArtifactPull } from './reportArtifacts';
-import { settleOtherCheckoutsSyncs } from './ensureSyncReady';
+import { endLeftoverRunSyncs, settleOtherCheckoutsSyncs } from './ensureSyncReady';
 import { exitAfterArtifactPull } from './artifacts';
 import {
   collectWriteBack,
@@ -358,6 +358,7 @@ export async function runPinned(options: {
   );
   // A live sync from another checkout would overwrite the pinned tree under the run.
   {
+    endLeftoverRunSyncs();
     const stop = settleOtherCheckoutsSyncs({
       repoRoot: prep.repoRoot,
       remoteSyncUrl: prep.remoteSyncUrl,

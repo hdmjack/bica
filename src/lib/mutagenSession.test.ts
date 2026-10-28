@@ -1,6 +1,14 @@
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { parseSyncListTemplateLine, waitForSyncReady } from './mutagenSession';
+import {
+  buildSyncWatchdogScript,
+  parseSyncListTemplateLine,
+  waitForSyncReady,
+} from './mutagenSession';
 
 describe('parseSyncListTemplateLine', () => {
   it('parses a 4-field session line', () => {
@@ -95,5 +103,63 @@ describe('a scan is not a stall', () => {
     });
     expect(out.ready).toBe(false);
     expect(out.stalledSeconds).toBe(60);
+  });
+});
+
+describe('the watchdog that ends a dead run\'s sync', () => {
+  /**
+   * Run the real script with a stand-in `mutagen` that records what it was asked, against a process
+   * that is then killed the way the reported run was.
+   */
+  function runWatchdog(lockContent: string): {
+    calls: string;
+    lockLeft: boolean;
+    markerLeft: boolean;
+  } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica watchdog '));
+    try {
+      const bin = path.join(dir, 'bin');
+      fs.mkdirSync(bin);
+      const log = path.join(dir, 'calls');
+      fs.writeFileSync(path.join(bin, 'mutagen'), `#!/bin/sh\necho "$@" >> '${log}'\n`, {
+        mode: 0o755,
+      });
+      // A grandchild, so that once killed it is reaped by init as bica would be by its shell. A
+      // direct child would linger as a zombie, which `kill -0` still counts as alive.
+      const pid = Number(
+        spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim(),
+      );
+      const lockPath = path.join(dir, "project.yml.lock");
+      const markerPath = path.join(dir, 'live-run');
+      fs.writeFileSync(lockPath, lockContent);
+      fs.writeFileSync(markerPath, `${String(pid)}\n`);
+      process.kill(pid, 'SIGKILL');
+      const result = spawnSync(
+        'sh',
+        ['-c', buildSyncWatchdogScript({ pid, projectId: 'proj_abc', lockPath, markerPath })],
+        { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` }, timeout: 20_000 },
+      );
+      expect(result.status).toBe(0);
+      return {
+        calls: fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : '',
+        lockLeft: fs.existsSync(lockPath),
+        markerLeft: fs.existsSync(markerPath),
+      };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('ends the run\'s project and clears its lock and marker once the run is gone', () => {
+    const outcome = runWatchdog('proj_abc');
+    expect(outcome.calls).toBe('sync terminate --label-selector io.mutagen.project=proj_abc\n');
+    expect(outcome.lockLeft).toBe(false);
+    expect(outcome.markerLeft).toBe(false);
+  });
+
+  it('leaves a lock a later run from the same checkout has taken', () => {
+    const outcome = runWatchdog('proj_later');
+    expect(outcome.calls).toContain('io.mutagen.project=proj_abc');
+    expect(outcome.lockLeft).toBe(true);
   });
 });

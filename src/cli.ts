@@ -62,6 +62,8 @@ import {
 import type { TunnelRecord } from './lib/tunnelState';
 import {
   removeLiveRunMarker,
+  endLeftoverRunSyncs,
+  LIVE_RUN_MARKER_RELATIVE,
   settleOtherCheckoutsSyncs,
   terminateConflictingSyncSessions,
   writeLiveRunMarker,
@@ -86,6 +88,7 @@ import {
   assertMutagenInstalled,
   findAllSessionsForRepo,
   mutagenProjectStart,
+  startSyncWatchdog,
   mutagenProjectTerminate,
   mutagenSyncFlush,
   mutagenSyncList,
@@ -407,6 +410,7 @@ async function cmdStart(autoYes: boolean): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const prep = prepareSyncProjectFile({ verbose: false });
   await terminateConflictingSyncSessions(prep, { autoYes });
+  endLeftoverRunSyncs();
   const stop = settleOtherCheckoutsSyncs({
     repoRoot: prep.repoRoot,
     remoteSyncUrl: prep.remoteSyncUrl,
@@ -964,6 +968,7 @@ async function runWithLiveSession(options: {
     mutagenSyncTerminate(s.name);
   }
   {
+    endLeftoverRunSyncs();
     const stop = settleOtherCheckoutsSyncs({ repoRoot, remoteSyncUrl });
     if (stop !== undefined) {
       return stop;
@@ -996,6 +1001,11 @@ async function runWithLiveSession(options: {
   if (!mutagenProjectStart(repoRoot, projectFilePath)) {
     process.exit(1);
   }
+  // Ends the session if this process dies without reaching `cleanup` below -- `kill -9` included.
+  startSyncWatchdog({
+    projectFileAbsolutePath: projectFilePath,
+    markerPath: path.join(repoRoot, LIVE_RUN_MARKER_RELATIVE),
+  });
 
   // Cleanup hook: terminate the project on any exit path (normal, error, SIGINT, SIGTERM).
   let cleanupDone = false;

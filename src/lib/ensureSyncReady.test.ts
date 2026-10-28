@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  endLeftoverRunSyncs,
   LIVE_RUN_MARKER_RELATIVE,
   settleOtherCheckoutsSyncs,
 } from './ensureSyncReady';
@@ -78,5 +79,58 @@ describe('settleOtherCheckoutsSyncs', () => {
 
   it('has nothing to do when no other checkout syncs here', () => {
     expect(settle([], () => false)).toEqual({ code: undefined, ended: [] });
+  });
+});
+
+/**
+ * The net under each run's watchdog: any bica run ends syncs whose run is over, from any checkout and
+ * into any workspace -- not only the ones it is about to share a workspace with.
+ */
+describe('endLeftoverRunSyncs', () => {
+  let root = '';
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-leftover-'));
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const checkout = (name: string, markerPid?: number): string => {
+    const dir = path.join(root, name);
+    fs.mkdirSync(path.join(dir, '.bica'), { recursive: true });
+    if (markerPid !== undefined) {
+      fs.writeFileSync(path.join(dir, LIVE_RUN_MARKER_RELATIVE), `${String(markerPid)}\n`);
+    }
+    return dir;
+  };
+  const session = (name: string, alpha: string, beta: string): SyncSessionSummary => ({
+    name,
+    identifier: `sync_${name}`,
+    alpha,
+    beta,
+  });
+
+  it('ends only sessions whose run is dead, whatever workspace they sync into', () => {
+    // As reported: a killed run's session into a per-worktree folder nobody else used kept writing
+    // there for twenty minutes.
+    const dead = checkout('dead', 111);
+    const live = checkout('live', 222);
+    const started = checkout('started');
+    const ended: string[] = [];
+    const result = endLeftoverRunSyncs({
+      list: () => [
+        session('a', dead, 'mini:~/code/objective-wiles'),
+        session('b', live, 'mini:~/code/x'),
+        session('c', started, 'mini:~/code/y'),
+      ],
+      alive: (pid) => pid === 222,
+      terminate: (name) => ended.push(name),
+    });
+    expect(ended).toEqual(['a']);
+    expect(result).toEqual(['a']);
+    expect(fs.existsSync(path.join(dead, LIVE_RUN_MARKER_RELATIVE))).toBe(false);
+    expect(fs.existsSync(path.join(live, LIVE_RUN_MARKER_RELATIVE))).toBe(true);
   });
 });

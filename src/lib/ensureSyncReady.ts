@@ -6,6 +6,7 @@ import { isProcessAlive } from './fileLock';
 import {
   findConflictingSessions,
   findSessionsFromOtherCheckouts,
+  listAllSyncSessions,
   mutagenSyncTerminate,
 } from './mutagenSession';
 import type { SyncSessionSummary } from './mutagenSession';
@@ -90,6 +91,40 @@ export function sessionIsLeftoverOfRun(
   }
   const pid = Number(raw.trim());
   return Number.isInteger(pid) && pid > 0 && !alive(pid);
+}
+
+/**
+ * End every sync on this machine whose `bica run` is over, whichever checkout and workspace it is for.
+ *
+ * The watchdog each run starts does this the moment the run dies; this is the net under it, for a
+ * watchdog that never started or was killed with its run. Before it, a leftover was only noticed by a
+ * later run from the same checkout or into the same workspace, so one into a workspace nobody used
+ * again went on writing there for as long as it pleased.
+ *
+ * Only sessions with a marker naming a dead pid: a `bica start` sync and a run still going are left.
+ */
+export function endLeftoverRunSyncs(
+  options: {
+    list?: () => SyncSessionSummary[];
+    alive?: (pid: number) => boolean;
+    terminate?: (name: string) => void;
+  } = {},
+): string[] {
+  const list = options.list ?? listAllSyncSessions;
+  const terminate = options.terminate ?? ((name: string) => void mutagenSyncTerminate(name));
+  const ended: string[] = [];
+  for (const s of list()) {
+    if (!sessionIsLeftoverOfRun(s, options.alive)) {
+      continue;
+    }
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`Ending sync session ${s.name} from ${s.alpha} to ${s.beta}: the run that started it has ended.`)}\n`,
+    );
+    terminate(s.name);
+    removeLiveRunMarker(s.alpha);
+    ended.push(s.name);
+  }
+  return ended;
 }
 
 /** Exit code for a workspace somebody else is syncing into; the lease's own "in use". */

@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 import {
   SYNC_QUIET_PHASE_STALL_SECONDS,
@@ -196,7 +196,7 @@ function writeMutagenStreams(
  * removes the file. "project already running" means only that the file is non-empty: Mutagen does
  * not look for the sessions, so the file outlives them whenever they end some other way.
  */
-function readProjectLockId(projectFileAbsolutePath: string): string | null {
+export function readProjectLockId(projectFileAbsolutePath: string): string | null {
   try {
     const id = fs.readFileSync(`${projectFileAbsolutePath}.lock`, 'utf8').trim();
     return id === '' ? null : id;
@@ -293,6 +293,76 @@ export function mutagenProjectStart(
 
   writeMutagenStreams(result.stdout, result.stderr);
   return false;
+}
+
+/** Single-quoted for `sh`, so a path with a space or a quote in it stays one word. */
+function shQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * The script that ends a run's sync once the run's process is gone.
+ *
+ * The exit hook is the normal way a run's session ends, and `kill -9`, an OOM kill or a closed
+ * terminal skip it. The session then went on mirroring that checkout into the remote for as long as
+ * nobody ran bica from it again: one watched for twenty minutes after its run died, recreating a
+ * workspace folder while somebody deleted it. This waits on the pid instead, so nothing the run
+ * failed to do depends on anybody coming back.
+ *
+ * Keyed on the project identifier, which Mutagen makes afresh on every start, so a later run from the
+ * same checkout -- a new project id -- is never touched. The lock file and the live-run marker are
+ * removed only while they still name this run, for the same reason.
+ */
+export function buildSyncWatchdogScript(options: {
+  pid: number;
+  projectId: string;
+  lockPath: string;
+  markerPath: string;
+}): string {
+  const { pid, projectId } = options;
+  const id = shQuote(projectId);
+  return [
+    `while kill -0 ${String(pid)} 2>/dev/null; do sleep 2; done`,
+    `mutagen sync terminate --label-selector io.mutagen.project=${id} >/dev/null 2>&1`,
+    `[ "$(cat ${shQuote(options.lockPath)} 2>/dev/null)" = ${id} ] && rm -f ${shQuote(options.lockPath)}`,
+    `[ "$(cat ${shQuote(options.markerPath)} 2>/dev/null)" = '${String(pid)}' ] && rm -f ${shQuote(options.markerPath)}`,
+    'exit 0',
+  ].join('\n');
+}
+
+/**
+ * Start the watcher for this process's sync, detached so it survives whatever ends this process.
+ * Best effort: without a project id there is nothing safe to key it on, and the sweep in
+ * `endLeftoverRunSyncs` still ends the session the next time anyone runs bica.
+ */
+export function startSyncWatchdog(options: {
+  projectFileAbsolutePath: string;
+  markerPath: string;
+  pid?: number;
+}): boolean {
+  const projectId = readProjectLockId(options.projectFileAbsolutePath);
+  if (projectId === null) {
+    return false;
+  }
+  try {
+    const child = spawn(
+      'sh',
+      [
+        '-c',
+        buildSyncWatchdogScript({
+          pid: options.pid ?? process.pid,
+          projectId,
+          lockPath: `${options.projectFileAbsolutePath}.lock`,
+          markerPath: options.markerPath,
+        }),
+      ],
+      { detached: true, stdio: 'ignore' },
+    );
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function mutagenProjectTerminate(
