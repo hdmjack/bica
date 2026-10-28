@@ -768,8 +768,16 @@ export function buildRemoteRunScript(options: {
         '    else',
         '      _bica_quiet=$((_bica_quiet + 1))',
         `      if [ "$_bica_quiet" -ge ${String(staleChecks)} ]; then`,
-        `        rm -f ${ref}`,
+        // Ignores the TERM it is about to send its own group, so it is still here to give the
+        // workspace back once the command has had a moment to stop. Signal first and release after,
+        // as `bica cancel` does, so the workspace is never free while anything is still in it.
+        "        trap '' TERM",
         '        kill -TERM -$$ 2>/dev/null',
+        '        sleep 2',
+        `        if [ "$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)" = ${q} ]; then`,
+        `          rm -f ${claimPathExpr} ${claimPathExpr}.cmd ${beat} ${ref}`,
+        '        fi',
+        `        rm -f ${ref}`,
         '        exit 0',
         '      fi',
         '    fi',

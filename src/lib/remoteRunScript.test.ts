@@ -386,10 +386,13 @@ describe('buildRemoteRunScript — heartbeat', () => {
     }
   };
 
-  it('ends the command once the heartbeat goes quiet', async () => {
+  it('ends the command once the heartbeat goes quiet, and gives the workspace back', async () => {
     const run = start();
     try {
       expect(await within(run.done, 8000)).not.toBe('timeout');
+      // The release follows the signal by a couple of seconds.
+      await new Promise((r) => setTimeout(r, 3000));
+      expect(fs.existsSync(claim())).toBe(false);
     } finally {
       stop(run.pid);
     }
