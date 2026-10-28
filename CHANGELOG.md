@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.13 — 2026-10-28
 
 ### Fixed
 - **A run killed outright no longer leaves its command running on the remote.** Ctrl-C and SIGTERM
