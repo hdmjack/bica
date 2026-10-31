@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.17 — 2026-10-31
 
 ### Changed
 - **A run's short ssh calls share one connection.** A no-op `bica run true` opened about seventeen
