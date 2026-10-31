@@ -422,3 +422,61 @@ command's listed).
 **Trap while testing:** `git checkout a.txt` between runs refreshes the file's local mtime. A first
 version that allowed five seconds of slack before the marker swallowed a real write in the run that
 followed, for that reason. The cutoff is the flush, which bica already waits for, and needs no slack.
+
+### A sync session that outlived its run, and a `local.yml` nobody in bica wrote
+
+Reported 2026-10-27: a checkout's `.bica/local.yml` named the shared remote folder, `.bica/project.yml`
+had been written two minutes earlier for the checkout's own folder, and the Mutagen session for the
+latter went on mirroring for 20 minutes after its run was gone, recreating a folder somebody was
+deleting. The `local.yml` rewrite looked like bica misbehaving mid-run. It was not. Reconstructed from
+the Claude session transcripts of the three parties involved (local time):
+
+| time | who | what |
+|---|---|---|
+| 17:57:11 | the checkout's own session | starts `bica run`, with `BICA_REMOTE_PATH=~/code/<own folder>` set for that one command |
+| 17:57:13 | bica | writes `.bica/project.yml` for that folder |
+| 17:57:52 | a coordinating session in the main checkout | `printf 'sshHost: mini\nremotePath: ~/code/shared\n' > .claude/worktrees/*/.bica/local.yml`, for three worktrees, after the lead agreed to share one build folder |
+| 17:57:56 | — | `local.yml` modified (the rewrite) |
+| 17:58:22 | the checkout's own session | stops its first run, told to use the shared folder, and starts `bica run` again with no override |
+
+bica writes `local.yml` in two places only, `bica init` and the ssh-host prompt, and neither can change
+`remotePath` during a run. **Before assuming bica rewrote a file, find who else had write access to it;**
+here that was another agent, and the transcripts named it in a minute.
+
+**The leaked session was the first run's, and the second run did not replace it.** A checkout has one
+project file and one lock. When the second run started, the first's session was still alive: its
+process had been stopped without running its exit hook, which in 0.8.11 left nothing to end the
+session. The second run's `mutagen project start` was refused with "project already running", the
+session list for the lock's project was not empty, so the stale-lock path correctly left it alone, and
+bica printed "Remote sync is already running (nothing to start)" and returned success. The session it
+then waited on and ran against was the first one, aimed at the old folder.
+
+Reproduced against Mutagen 0.18.1 on 2026-10-30: start a project to `mini:/tmp/a`, rewrite the project
+file's beta to `mini:/tmp/b`, call `mutagenProjectStart` again. It returns `true`; `mutagen sync list`
+still shows the session pointed at `/tmp/a`.
+
+Since 0.8.12 the sweep before every run ends a session whose run's pid is dead, so the reported
+sequence no longer reaches that path. **It is still reachable while the first run is alive**: two runs
+from one checkout into different workspaces (`BICA_REMOTE_PATH` per command, which is supported) pass
+the lease, because the workspaces differ, and then share one project file and one lock. The second run
+reports a sync that is not the one its project file describes.
+
+### Mutagen keeps a session's cache after `terminate`, on both ends
+
+Measured 2026-10-30, Mutagen 0.18.1, macOS laptop and mini.
+
+| | |
+|---|---|
+| `~/.mutagen/caches` on the laptop, no session running | 1,702 files, about 3.6 GB |
+| files per session | two: `<identifier>_alpha` on the alpha's machine, `<identifier>_beta` on the beta's |
+| after `mutagen sync terminate`, bare session, no bica | both still there |
+| for a local-to-remote session | the laptop holds only `_alpha`; the remote's own `~/.mutagen/caches` holds `_beta` |
+
+The identifier Mutagen prints already begins with `sync_`, so the file is `sync_<id>_alpha`, not
+`sync_sync_…`. The remote's folder is shared by every machine that syncs into it, so a sweep by age or
+by "not in my own session list" would delete another machine's live cache; bica removes only the two
+exact names of a session it has just ended, after the terminate has succeeded. Verified against `mini`
+for a bare session, a project ended normally, and a project whose run was killed with `SIGKILL`
+(0.8.15).
+
+**Trap:** a test that tears a probe down with raw `mutagen project terminate` leaks a pair itself.
