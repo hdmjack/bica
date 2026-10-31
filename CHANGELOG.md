@@ -3,6 +3,19 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A signal sent to `bica` now reaches the run.** The `bica` command is a small launcher that starts
+  the real CLI as a child process, and it waited for it with a call that blocks the launcher, so a
+  SIGTERM sent to `bica` (a local `timeout 900 bica run ...`, an agent tool's cleanup, `kill`) ended the
+  launcher alone. The CLI kept running with the remote command and the workspace lease, orphaned, until
+  the remote's idle watcher ended it about eleven minutes later. The launcher now passes SIGINT, SIGTERM
+  and SIGHUP on to the CLI, whose handlers end the remote command and release the lease, and exits with
+  the CLI's status, or 128 plus the signal number if the CLI died of one. Checked against the mini with
+  `timeout 150 sleep 7777`: signalling the old launcher left the command and the lease; signalling this
+  one printed "SIGTERM received" and left nothing.
+
 ## 0.9.2 — 2026-10-31
 
 ### Fixed
