@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 
 import { startOrphanedWatcher, stopOrphanedWatcher } from './orphanedWatcher';
+import { sharedSshOptions } from './sshShare';
 import {
   HEARTBEAT_EVERY_MS,
   runRemoteScriptOverStdin,
@@ -395,7 +396,17 @@ export function startHeartbeat(options: {
     try {
       const child = spawn(
         'ssh',
-        ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', options.sshHost, 'sh', '-s'],
+        [
+          ...sharedSshOptions(),
+          '-T',
+          '-o',
+          'BatchMode=yes',
+          '-o',
+          'ConnectTimeout=20',
+          options.sshHost,
+          'sh',
+          '-s',
+        ],
         { stdio: ['pipe', 'ignore', 'ignore'] },
       );
       child.on('error', () => {

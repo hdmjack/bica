@@ -1056,6 +1056,7 @@ taken over, with a line saying so, because otherwise every hard kill would need 
 | `BICA_REMOTE_PATH` | Remote workspace path (default `~/code/<repo folder name>`) |
 | `BICA_LOGIN_SHELL` | Remote shell for non-interactive commands (default `zsh`) |
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
+| `BICA_SSH_SHARE` | `0` = give every short ssh call and rsync its own connection, as before. By default they share one connection per host, kept for 60 s after the last use, in a folder under `/tmp` only you can read. The command's own connection is never shared |
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
 | `BICA_TUNNEL_DEAD_AFTER` | Seconds a tunnel's forward may go unanswered before ssh gives up (default `60`). Raise it on a link that stalls legitimately |
 | `BICA_SYNC_FLUSH` | `1` = before `bica run`, run `mutagen sync flush` on the primary session so the **remote** finishes catching up to **local** (slower; use if you hit brief sync lag) |

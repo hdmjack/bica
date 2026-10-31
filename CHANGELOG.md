@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Changed
+- **A run's short ssh calls share one connection.** A no-op `bica run true` opened about seventeen
+  ssh connections one after another, the lease probes, the rsyncs, the heartbeat and the artifact
+  checks, and each paid a full handshake of 0.3 s to 1.2 s. They now reuse one connection per host
+  (`ControlMaster=auto`, kept for 60 s after its last use, in a private folder under `/tmp`), and so do
+  the rsyncs, through `RSYNC_RSH`. On the same tree against the same host, the no-op took 3.5 to 6.3 s
+  where the previous build took 9.6 to 10.4 s. **The command's own connection is not shared**, nor are
+  `bica logs --follow` and `bica tunnel`: bica reads a dropped link from that ssh's own debug output,
+  which a client on a shared connection does not print, and the command's remote process lives and dies
+  with its connection. `BICA_SSH_SHARE=0` turns sharing off, and an `RSYNC_RSH` you set yourself is
+  left alone. A master that dies, or leaves its socket behind, is replaced by the next call.
+
 ## 0.8.16 — 2026-10-31
 
 ### Fixed

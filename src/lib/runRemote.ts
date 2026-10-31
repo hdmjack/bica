@@ -15,6 +15,7 @@ import {
 } from './connectionLoss';
 import { resolveActiveRemoteShellPlugins } from '../resolveActivePlugins';
 import { dim } from '../terminalStyle';
+import { sharedSshOptions } from './sshShare';
 import type { RemoteShellPlugin } from '../plugins/types';
 
 export function loginShellFromEnv(): string {
@@ -128,7 +129,7 @@ export function sanitizeRemotePosixAbsolutePath(p: string): string {
 }
 
 function sshTArgv(sshHost: string, ...remote: string[]): string[] {
-  return ['ssh', '-T', sshHost, ...remote];
+  return ['ssh', ...sharedSshOptions(), '-T', sshHost, ...remote];
 }
 
 /**
@@ -231,7 +232,7 @@ function getRemoteHomeDir(sshHost: string): string | null {
   }
   // Avoid `printf %s "$HOME"`: on macOS/BSD, printf with a missing or empty argument can exit 2
   // with "printf: usage: …". POSIX `cd` with no operands changes to $HOME; `pwd` prints it.
-  const result = spawnSync('ssh', ['-T', sshHost, 'sh', '-c', 'cd && pwd'], {
+  const result = spawnSync('ssh', [...sharedSshOptions(), '-T', sshHost, 'sh', '-c', 'cd && pwd'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -321,7 +322,7 @@ export function runRemoteScriptOverStdin(
   // `sh` is the one shell POSIX guarantees.
   const shell = login ? loginShellFromEnv() : 'sh';
   const runner = login ? [shell, '-l', '-s'] : [shell, '-s'];
-  const result = spawnSync('ssh', ['-T', sshHost, ...runner], {
+  const result = spawnSync('ssh', [...sharedSshOptions(), '-T', sshHost, ...runner], {
     input: script,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -344,7 +345,7 @@ export function buildRemoteProbeSshArgv(sshHost: string, script: string): string
   } else {
     runner = [shell, '-c', script];
   }
-  return ['ssh', '-T', sshHost, ...runner];
+  return ['ssh', ...sharedSshOptions(), '-T', sshHost, ...runner];
 }
 
 function resolvedAbsoluteDirExists(sshHost: string, clean: string): boolean {

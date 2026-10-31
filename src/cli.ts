@@ -99,6 +99,7 @@ import {
   waitForSyncReady,
 } from './lib/mutagenSession';
 import { confirm, ensureRemoteSshHostFromEnvOrPrompt } from './lib/prompt';
+import { shareSshWithRsync } from './lib/sshShare';
 import {
   pullReturnFlow,
   gitSyncStopsRun,
@@ -1472,6 +1473,7 @@ async function cmdRun(options: {
 }
 
 async function main(): Promise<void> {
+  shareSshWithRsync();
   const raw = process.argv.slice(2);
   let globals: ParsedGlobals;
   try {

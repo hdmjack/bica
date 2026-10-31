@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { SyncSessionSummary } from './mutagenSession';
+import { sharedSshOptions } from './sshShare';
 
 /**
  * Removing the cache files Mutagen leaves behind when a session ends.
@@ -94,7 +95,18 @@ export type RunRemoteScript = (
 function runOverSsh(sshHost: string, script: string): { status: number | null; stderr: string } {
   const result = spawnSync(
     'ssh',
-    ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '--', sshHost, 'sh', '-s'],
+    [
+      ...sharedSshOptions(),
+      '-T',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      'ConnectTimeout=5',
+      '--',
+      sshHost,
+      'sh',
+      '-s',
+    ],
     {
       input: script,
       encoding: 'utf8',

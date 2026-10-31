@@ -480,3 +480,36 @@ for a bare session, a project ended normally, and a project whose run was killed
 (0.8.15).
 
 **Trap:** a test that tears a probe down with raw `mutagen project terminate` leaks a pair itself.
+
+### Seventeen connections per run, and what sharing them does and does not buy
+
+Reported 2026-10-31 and reproduced the same day, bica 0.8.15, laptop to a mini on the LAN: a no-op
+`bica run true` took 15.7 s and opened 17 ssh connections strictly one after another, each 0.4 s to
+1.2 s (an rsync counts twice in a PATH-shim log, because rsync starts its own ssh). The remote was
+idle apart from other people's runs.
+
+| 3 no-op runs, same tree and host | seconds |
+|---|---|
+| 0.8.15, one connection per call | 10.4, 9.8, 9.6 |
+| shared connection, command's own excluded | 5.5, 6.3, 3.5 |
+
+What is left is about 0.2 s per call, which is sshd starting a session and a shell, not a handshake;
+only merging calls would remove it.
+
+**The command's connection must stay its own.** bica classifies a dropped link from that ssh's own `-v`
+output (`connectionLoss.ts`), and a client riding a shared connection prints none of it. Its remote
+process also lives and dies with that one connection, which the lease's liveness checks rely on. So the
+split is: short and stateless shares, the command, the log tail and the tunnel do not.
+
+**rsync is shared through `RSYNC_RSH`, not a `-e` at each call site**, so none of the eight call sites
+or their tests change. A value the caller already set is left alone.
+
+**Checked on the real remote:** a master killed with `kill -9` leaves its socket behind, and the next
+call makes a new master (4 s run); a master killed in the middle of a run left the command and its exit
+code correct and every later call at its normal 0.2 s, three times over. One run in that series took
+50 s against 18 s for the others, with the mini's load average at 16 to 21 from other people's builds;
+it did not reproduce, and no call in the three timed repeats stalled, but it is not proven to be load.
+
+**Trap:** `ps | grep` did not find the master (`ssh -O check -o ControlPath=<socket> host` prints its
+pid), and a first reading of "no masters running" was wrong; the socket file existing and no process
+being listed are not evidence the master is gone.
