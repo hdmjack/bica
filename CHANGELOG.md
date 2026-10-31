@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.15 — 2026-10-30
 
 ### Fixed
 - **Ending a sync now removes its Mutagen cache, on the laptop and on the remote.** Mutagen 0.18.1
