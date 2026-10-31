@@ -513,3 +513,30 @@ it did not reproduce, and no call in the three timed repeats stalled, but it is 
 **Trap:** `ps | grep` did not find the master (`ssh -O check -o ControlPath=<socket> host` prints its
 pid), and a first reading of "no masters running" was wrong; the socket file existing and no process
 being listed are not evidence the master is gone.
+
+### `bica run CMD > f.log 2>&1` ran the command and lost the log
+
+Reported 2026-10-31 as "runs nothing and exits 0". The command did run (a probe file it wrote was on
+the mini); what vanished was the output. Narrowed by changing one thing at a time against the real
+remote:
+
+| redirect | result |
+|---|---|
+| `2>&1` into a pipe | everything there |
+| `> f.log 2>&1`, inside the checkout | two opening lines of Mutagen's, nothing else, exit 0 |
+| `> $outside/out.log 2>&1` | everything there |
+| `> f.txt 2>&1`, inside | everything there |
+| `> g.log 2>&1` with `BICA_RETURN_FLOW=0` | everything there |
+
+Only a file **inside the checkout whose name matches a return-flow pattern** failed, and `*.log` is one of
+the defaults. The post-run pull is `rsync -az --delete` of the remote's matching files over the local
+tree; rsync writes a temporary file and renames it over the target, so the shell's redirect, still open
+on the old inode, went on writing into a file with no name. The remote's copy, pushed before the run,
+held only what the log held then. The earlier report that stdout alone "works" was judged by the
+probe file on the mini, not by the log's contents.
+
+The fix leaves out of the pull the file stdout and stderr are open on (`/proc/self/fd` on Linux, `lsof`
+on macOS, looked up only when an output is a regular file inside the checkout, and checked to still be
+the same inode). Not done: warning about any other matching file edited locally during a run, which the
+pull still replaces. That is return-flow's contract, but it is the same trap for anyone who keeps notes
+in a `.log` in the tree.

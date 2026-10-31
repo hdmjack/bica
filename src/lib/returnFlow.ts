@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   buildSubmodulePointerScript,
   readSubmodulePointers,
@@ -113,6 +115,101 @@ function rsyncAvailable(): boolean {
   return result.error == null && result.status === 0;
 }
 
+/** Keeps a file name literal in an rsync filter rule, where `*`, `?` and `[` are patterns. */
+export function escapeRsyncPattern(p: string): string {
+  return p.replaceAll(/[\\*?[]/g, (c) => `\\${c}`);
+}
+
+/** The file names in `lsof -Fn` output: lines `n<name>`, of which only the absolute paths are files. */
+export function parseLsofNames(stdout: string): string[] {
+  return stdout
+    .split('\n')
+    .filter((line) => line.startsWith('n/'))
+    .map((line) => line.slice(1));
+}
+
+interface FdStat {
+  isFile: boolean;
+  dev: number;
+  ino: number;
+}
+
+/** Where a file descriptor of this process points, or null when that cannot be told. */
+function pathOfOwnFd(fd: number): string | null {
+  try {
+    // Linux names it outright; macOS has no such link, and `lsof` is how it is asked.
+    return fs.readlinkSync(`/proc/self/fd/${String(fd)}`);
+  } catch {
+    // Fall through.
+  }
+  const out = spawnSync('lsof', ['-nP', '-a', '-p', String(process.pid), '-d', String(fd), '-Fn'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 5000,
+  });
+  return parseLsofNames(out.stdout ?? '')[0] ?? null;
+}
+
+/**
+ * The files, as paths inside the checkout, that this process's stdout and stderr are open on.
+ *
+ * Return-flow owns whatever matches its patterns, `*.log` among them, and the pull after a run replaces
+ * the local copy with the remote's. `bica run CMD > run.log 2>&1` from inside the checkout made the
+ * log one of those: rsync renames its copy over the file, the shell goes on writing into the old one
+ * that no longer has a name, and the run's output vanishes while the exit code stays 0. A file the run
+ * itself is writing is nobody's to replace, so the pull is told to leave it.
+ *
+ * Nothing is looked up unless an output is a regular file, which is the only time this matters.
+ */
+export function outputFilesInside(
+  repoRoot: string,
+  deps: {
+    statFd?: (fd: number) => FdStat;
+    pathOfFd?: (fd: number) => string | null;
+  } = {},
+): string[] {
+  const statFd =
+    deps.statFd ??
+    ((fd: number): FdStat => {
+      const s = fs.fstatSync(fd);
+      return { isFile: s.isFile(), dev: s.dev, ino: s.ino };
+    });
+  const pathOfFd = deps.pathOfFd ?? pathOfOwnFd;
+  let root: string;
+  try {
+    root = fs.realpathSync(repoRoot);
+  } catch {
+    return [];
+  }
+  const found = new Set<string>();
+  for (const fd of [1, 2]) {
+    try {
+      const stat = statFd(fd);
+      if (!stat.isFile) {
+        continue;
+      }
+      const named = pathOfFd(fd);
+      if (named === null) {
+        continue;
+      }
+      const real = fs.realpathSync(named);
+      const onDisk = fs.statSync(real);
+      // The name must still be this very file; a path read after a rename or delete would protect a
+      // stranger.
+      if (onDisk.ino !== stat.ino || onDisk.dev !== stat.dev) {
+        continue;
+      }
+      const rel = path.relative(root, real);
+      if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+        found.add(rel.split(path.sep).join('/'));
+      }
+    } catch {
+      // An output that cannot be examined cannot be protected; the pull then runs as it always did.
+    }
+  }
+  return [...found];
+}
+
 export interface PullResult {
   /** Whether rsync ran. False = skipped (no patterns, rsync missing, or disabled). */
   ran: boolean;
@@ -151,7 +248,11 @@ export function pullReturnFlow(prep: PrepareResult): PullResult {
     prep.returnFlowPaths,
     remoteSource,
     localDest,
-    buildReturnFlowExcludes(prep.syncIgnorePaths),
+    [
+      ...buildReturnFlowExcludes(prep.syncIgnorePaths),
+      // Anchored with a leading slash, so only that file at that place.
+      ...outputFilesInside(prep.repoRoot).map((rel) => `/${escapeRsyncPattern(rel)}`),
+    ],
   );
 
   const result = spawnSync('rsync', args, {

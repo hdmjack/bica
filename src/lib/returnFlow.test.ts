@@ -13,6 +13,9 @@ import {
   gitSyncStopsRun,
   pushGitToRemote,
   rsyncGit,
+  escapeRsyncPattern,
+  outputFilesInside,
+  parseLsofNames,
 } from './returnFlow';
 import { SYNC_NOT_READY_EXIT } from './syncProgress';
 
@@ -243,3 +246,100 @@ describe('pushGitToRemote, against a repository in use', () => {
   });
 });
 
+
+describe('a log the run is writing is not the remote\'s to replace', () => {
+  // The reported failure: `bica run CMD > f.log 2>&1` exited 0 with the command's output and bica's own
+  // lines missing. `*.log` is a default return-flow pattern, so the pull after the run replaced the
+  // local f.log with the remote's copy -- rsync writes a temporary file and renames it over the
+  // original -- and the shell went on writing into the old file, which no longer had a name.
+  const rsync = spawnSync('rsync', ['--version']);
+
+  it.runIf(rsync.status === 0)('replaces a matching local log with the remote\'s, and spares one that is excluded', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica redirect '));
+    try {
+      const remote = path.join(dir, 'remote');
+      const local = path.join(dir, 'local');
+      fs.mkdirSync(remote);
+      fs.mkdirSync(local);
+      fs.writeFileSync(path.join(remote, 'run.log'), 'the remote\'s older copy\n');
+      fs.writeFileSync(path.join(remote, 'other.log'), 'the remote\'s older copy\n');
+      fs.writeFileSync(path.join(local, 'run.log'), 'everything the run printed\n');
+      fs.writeFileSync(path.join(local, 'other.log'), 'everything the run printed\n');
+      const pull = (excludes: string[]): void => {
+        const args = buildReturnFlowMirrorArgs(['*.log'], `${remote}/`, `${local}/`, excludes);
+        expect(spawnSync('rsync', args).status).toBe(0);
+      };
+      pull([]);
+      expect(fs.readFileSync(path.join(local, 'run.log'), 'utf8')).toBe("the remote's older copy\n");
+
+      fs.writeFileSync(path.join(local, 'run.log'), 'everything the run printed\n');
+      pull(['/run.log']);
+      expect(fs.readFileSync(path.join(local, 'run.log'), 'utf8')).toBe('everything the run printed\n');
+      // The rule names one file; the pull still does its job on the rest.
+      expect(fs.readFileSync(path.join(local, 'other.log'), 'utf8')).toBe("the remote's older copy\n");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('escapeRsyncPattern', () => {
+  it('keeps a file name literal in a filter rule', () => {
+    expect(escapeRsyncPattern('/logs/a*b[1]?.log')).toBe('/logs/a\\*b\\[1]\\?.log');
+    expect(escapeRsyncPattern('/plain name.log')).toBe('/plain name.log');
+  });
+});
+
+describe('parseLsofNames', () => {
+  it('reads the file names out of `lsof -Fn` output, ignoring the rest', () => {
+    expect(parseLsofNames('p123\nf1\nn/tmp/repo/run.log\nf2\nn/tmp/repo/run.log\nn->0x1234\n')).toEqual([
+      '/tmp/repo/run.log',
+      '/tmp/repo/run.log',
+    ]);
+  });
+});
+
+describe('outputFilesInside', () => {
+  it('names the files stdout and stderr are open on inside the checkout, once each, and nothing else', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica outputs '));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'bica elsewhere '));
+    try {
+      const repo = fs.realpathSync(dir);
+      fs.mkdirSync(path.join(repo, 'logs'));
+      const inside = path.join(repo, 'logs', 'run.log');
+      const outside = path.join(elsewhere, 'outside.log');
+      fs.writeFileSync(inside, '');
+      fs.writeFileSync(outside, '');
+      const stat = (p: string): { isFile: boolean; dev: number; ino: number } => {
+        const s = fs.statSync(p);
+        return { isFile: s.isFile(), dev: s.dev, ino: s.ino };
+      };
+      const fds: Record<number, string> = { 1: inside, 2: inside };
+      expect(
+        outputFilesInside(repo, {
+          statFd: (fd) => stat(fds[fd]),
+          pathOfFd: (fd) => fds[fd],
+        }),
+      ).toEqual(['logs/run.log']);
+
+      fds[1] = outside;
+      fds[2] = outside;
+      expect(
+        outputFilesInside(repo, { statFd: (fd) => stat(fds[fd]), pathOfFd: (fd) => fds[fd] }),
+      ).toEqual([]);
+
+      // A pipe or a terminal is not a file, and is not looked up at all.
+      expect(
+        outputFilesInside(repo, {
+          statFd: () => ({ isFile: false, dev: 0, ino: 0 }),
+          pathOfFd: () => {
+            throw new Error('must not be asked');
+          },
+        }),
+      ).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+});

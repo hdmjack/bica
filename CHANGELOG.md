@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **`bica run CMD > run.log 2>&1` no longer loses its output.** From inside the checkout, `run.log`
+  matches the default return-flow pattern `*.log`, so the pull after the run replaced it with the
+  remote's copy, which held only what was there when the run began. rsync writes a temporary file and
+  renames it over the original, and the shell went on writing into the old file, which no longer had a
+  name. The log held a couple of opening lines, the command's output and `remote command exited` were
+  gone, and the exit code was 0. The command had run. A file bica's own stdout or stderr is open on is
+  now left out of the pull; every other matching file is replaced as before, and a log outside the
+  checkout was never affected.
+
 ## 0.8.17 — 2026-10-31
 
 ### Changed

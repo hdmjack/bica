@@ -450,6 +450,11 @@ returnFlow:
     - "test-results/**"     # Playwright traces
 ```
 
+**Logging a run to a file inside the checkout is safe.** `bica run CMD > run.log 2>&1` from the repository
+matches the default `*.log`, and the pull would otherwise replace your local `run.log` with the remote's
+copy, so the run's output vanished while the exit code stayed 0. bica now leaves whatever file its own
+stdout and stderr are open on out of the pull. Any other matching file is still the remote's to replace.
+
 Set `paths: []` to disable. Whitelisted patterns are also auto-added to the forward session's `sync.ignore.paths`, so a stale local snapshot will not overwrite the fresh remote one. Disable per-run with `BICA_RETURN_FLOW=0`. Requires `rsync` on PATH; if missing, bica prints a warning and skips the pull.
 
 ### Commands that write files (`--write-back`)
