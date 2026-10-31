@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.9.1 — 2026-10-31
 
 ### Fixed
 - **A long run no longer undoes what you did to your `*.log` files while it was going.** The pull at
