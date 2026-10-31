@@ -5,10 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   endLeftoverRunSyncs,
-  LIVE_RUN_MARKER_RELATIVE,
   settleOtherCheckoutsSyncs,
 } from './ensureSyncReady';
 import type { SyncSessionSummary } from './mutagenSession';
+import {
+  LEGACY_LIVE_RUN_MARKER_RELATIVE,
+  liveRunMarkerRelative,
+  workspaceKey,
+} from './workspaceKey';
+
+/** The marker a run into `beta` leaves, relative to its checkout. */
+const marker = (beta: string): string => liveRunMarkerRelative(workspaceKey(beta));
 
 /**
  * Another checkout's sync into this run's workspace. The question is whose it is: a finished run's
@@ -35,7 +42,7 @@ describe('settleOtherCheckoutsSyncs', () => {
     const alpha = path.join(root, name);
     fs.mkdirSync(path.join(alpha, '.bica'), { recursive: true });
     if (pid !== undefined) {
-      fs.writeFileSync(path.join(alpha, LIVE_RUN_MARKER_RELATIVE), `${String(pid)}\n`);
+      fs.writeFileSync(path.join(alpha, marker('mini:~/code/shared')), `${String(pid)}\n`);
     }
     return { name: `${name}-session`, alpha, beta: 'mini:~/code/shared' } as SyncSessionSummary;
   };
@@ -97,11 +104,11 @@ describe('endLeftoverRunSyncs', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  const checkout = (name: string, markerPid?: number): string => {
+  const checkout = (name: string, marked?: { beta: string; pid: number }): string => {
     const dir = path.join(root, name);
     fs.mkdirSync(path.join(dir, '.bica'), { recursive: true });
-    if (markerPid !== undefined) {
-      fs.writeFileSync(path.join(dir, LIVE_RUN_MARKER_RELATIVE), `${String(markerPid)}\n`);
+    if (marked !== undefined) {
+      fs.writeFileSync(path.join(dir, marker(marked.beta)), `${String(marked.pid)}\n`);
     }
     return dir;
   };
@@ -115,13 +122,14 @@ describe('endLeftoverRunSyncs', () => {
   it('ends only sessions whose run is dead, whatever workspace they sync into', () => {
     // As reported: a killed run's session into a per-worktree folder nobody else used kept writing
     // there for twenty minutes.
-    const dead = checkout('dead', 111);
-    const live = checkout('live', 222);
+    const wiles = 'mini:~/code/objective-wiles';
+    const dead = checkout('dead', { beta: wiles, pid: 111 });
+    const live = checkout('live', { beta: 'mini:~/code/x', pid: 222 });
     const started = checkout('started');
     const ended: string[] = [];
     const result = endLeftoverRunSyncs({
       list: () => [
-        session('a', dead, 'mini:~/code/objective-wiles'),
+        session('a', dead, wiles),
         session('b', live, 'mini:~/code/x'),
         session('c', started, 'mini:~/code/y'),
       ],
@@ -130,7 +138,39 @@ describe('endLeftoverRunSyncs', () => {
     });
     expect(ended).toEqual(['a']);
     expect(result).toEqual(['a']);
-    expect(fs.existsSync(path.join(dead, LIVE_RUN_MARKER_RELATIVE))).toBe(false);
-    expect(fs.existsSync(path.join(live, LIVE_RUN_MARKER_RELATIVE))).toBe(true);
+    expect(fs.existsSync(path.join(dead, marker(wiles)))).toBe(false);
+    expect(fs.existsSync(path.join(live, marker('mini:~/code/x')))).toBe(true);
+  });
+
+  it('keeps one checkout\'s two runs apart: a dead run does not end the live one beside it', () => {
+    // Two runs from one checkout into different workspaces. The one into `a` died; the one into `b`
+    // is going. With one marker per checkout the second run's pid decided the fate of both.
+    const a = 'mini:~/code/a';
+    const b = 'mini:~/code/b';
+    const dir = checkout('both', { beta: a, pid: 111 });
+    fs.writeFileSync(path.join(dir, marker(b)), '222\n');
+    const ended: string[] = [];
+    endLeftoverRunSyncs({
+      list: () => [session(`both-${workspaceKey(a)}`, dir, a), session(`both-${workspaceKey(b)}`, dir, b)],
+      alive: (pid) => pid === 222,
+      terminate: (name) => ended.push(name),
+    });
+    expect(ended).toEqual([`both-${workspaceKey(a)}`]);
+    expect(fs.existsSync(path.join(dir, marker(a)))).toBe(false);
+    expect(fs.existsSync(path.join(dir, marker(b)))).toBe(true);
+  });
+
+  it('reads the checkout-wide marker of an older bica, but only for a session with no key in its name', () => {
+    const beta = 'mini:~/code/old';
+    const dir = checkout('old');
+    fs.writeFileSync(path.join(dir, LEGACY_LIVE_RUN_MARKER_RELATIVE), '333\n');
+    const ended: string[] = [];
+    endLeftoverRunSyncs({
+      list: () => [session('old', dir, beta), session(`old-${workspaceKey(beta)}`, dir, beta)],
+      alive: () => false,
+      terminate: (name) => ended.push(name),
+    });
+    expect(ended).toEqual(['old']);
+    expect(fs.existsSync(path.join(dir, LEGACY_LIVE_RUN_MARKER_RELATIVE))).toBe(false);
   });
 });

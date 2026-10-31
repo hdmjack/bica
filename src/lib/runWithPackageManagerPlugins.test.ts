@@ -116,8 +116,9 @@ function fakeRemoteCommand(
 function makePrep(repoRoot: string): PrepareResult {
   return {
     repoRoot,
-    projectFilePath: path.join(repoRoot, '.bica', 'project.yml'),
+    projectFilePath: path.join(repoRoot, '.bica', 'project-test.yml'),
     sessionName: 'test-session',
+    workspaceKey: 'test',
     remoteSyncUrl: 'test-host:/remote/repo',
     returnFlowPaths: [],
     generatedPaths: [],

@@ -12,6 +12,11 @@ import {
 import type { SyncSessionSummary } from './mutagenSession';
 import { confirm } from './prompt';
 import type { PrepareResult } from '../syncProject';
+import {
+  LEGACY_LIVE_RUN_MARKER_RELATIVE,
+  liveRunMarkerRelative,
+  workspaceKey,
+} from './workspaceKey';
 
 /**
  * Detect and terminate Mutagen sessions that bind the same alpha+beta as `prep` but under a
@@ -48,29 +53,60 @@ export async function terminateConflictingSyncSessions(
 }
 
 /**
- * Where a `bica run` records that it started this checkout's sync, as its pid.
+ * Where a `bica run` records that it started this workspace's sync, as its pid.
  *
  * The only way to tell another checkout's sync that a finished run left behind from one somebody
  * started on purpose with `bica start`. Mutagen cannot say: its project files take no labels, and both
  * kinds of session are made from the same project file. Ending a leftover is housekeeping; ending a
  * deliberate one takes away a sync somebody is working against, without asking.
+ *
+ * One marker per workspace, not per checkout: two runs from one checkout into different workspaces
+ * would otherwise share it, and the first to finish would delete the other's, or the other's dead pid
+ * would get the first's live sync ended as a leftover.
  */
-export const LIVE_RUN_MARKER_RELATIVE = path.join('.bica', 'live-run');
-
-export function writeLiveRunMarker(repoRoot: string): void {
+export function writeLiveRunMarker(repoRoot: string, key: string): void {
   try {
-    fs.writeFileSync(path.join(repoRoot, LIVE_RUN_MARKER_RELATIVE), `${String(process.pid)}\n`);
+    fs.writeFileSync(path.join(repoRoot, liveRunMarkerRelative(key)), `${String(process.pid)}\n`);
   } catch {
     // Without it, a session this run leaves behind reads as deliberate: refused, never ended. The safe way round.
   }
 }
 
-export function removeLiveRunMarker(repoRoot: string): void {
+export function removeLiveRunMarker(repoRoot: string, key: string): void {
   try {
-    fs.rmSync(path.join(repoRoot, LIVE_RUN_MARKER_RELATIVE), { force: true });
+    fs.rmSync(path.join(repoRoot, liveRunMarkerRelative(key)), { force: true });
   } catch {
     // Same: a marker that stays only ever makes its sessions look more deliberate than they are.
   }
+}
+
+/**
+ * The marker that belongs to `session`, as a path and the pid in it. A session from a bica older than
+ * the per-workspace marker has the checkout-wide one, so that is looked for when this workspace's is
+ * missing.
+ */
+function readLiveRunMarker(
+  session: SyncSessionSummary,
+): { markerPath: string; pid: number } | null {
+  const key = workspaceKey(session.beta);
+  const candidates = [liveRunMarkerRelative(key)];
+  // Only a session that predates the key in its name can own the checkout-wide marker. One from this
+  // version with no marker of its own is `bica start`'s, and a dead pid left by an old run in some other
+  // workspace must not make it look like a leftover.
+  if (!session.name.endsWith(`-${key}`)) {
+    candidates.push(LEGACY_LIVE_RUN_MARKER_RELATIVE);
+  }
+  for (const relative of candidates) {
+    const markerPath = path.join(session.alpha, relative);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(markerPath, 'utf8');
+    } catch {
+      continue;
+    }
+    return { markerPath, pid: Number(raw.trim()) };
+  }
+  return null;
 }
 
 /**
@@ -83,14 +119,11 @@ export function sessionIsLeftoverOfRun(
   session: SyncSessionSummary,
   alive: (pid: number) => boolean = isProcessAlive,
 ): boolean {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(path.join(session.alpha, LIVE_RUN_MARKER_RELATIVE), 'utf8');
-  } catch {
+  const marker = readLiveRunMarker(session);
+  if (marker === null) {
     return false;
   }
-  const pid = Number(raw.trim());
-  return Number.isInteger(pid) && pid > 0 && !alive(pid);
+  return Number.isInteger(marker.pid) && marker.pid > 0 && !alive(marker.pid);
 }
 
 /**
@@ -121,7 +154,10 @@ export function endLeftoverRunSyncs(
       `${warn('[bica]')} ${dim(`Ending sync session ${s.name} from ${s.alpha} to ${s.beta}: the run that started it has ended.`)}\n`,
     );
     terminate(s.name);
-    removeLiveRunMarker(s.alpha);
+    const marker = readLiveRunMarker(s);
+    if (marker !== null) {
+      fs.rmSync(marker.markerPath, { force: true });
+    }
     ended.push(s.name);
   }
   return ended;

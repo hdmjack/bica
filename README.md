@@ -268,7 +268,7 @@ output of `BICA_DEBUG=1 bica run <your command>`, which prints the script bica s
 | Windows, via WSL2 | Yes, as Linux. Keep the clone inside the Linux filesystem rather than `/mnt/c`, or sync is slow and file watching unreliable. `bica tunnel` sockets are reachable from WSL-side clients only |
 
 
-`bica prepare` writes your **local** repository root and **remote** `host:path` from env into `.bica/project.yml`.
+`bica prepare` writes your **local** repository root and **remote** `host:path` from env into `.bica/project-<key>.yml`, one file per remote workspace, so runs from one checkout into different workspaces keep separate syncs.
 
 ### Sync ignores and TypeScript `dist/`
 

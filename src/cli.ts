@@ -63,7 +63,6 @@ import type { TunnelRecord } from './lib/tunnelState';
 import {
   removeLiveRunMarker,
   endLeftoverRunSyncs,
-  LIVE_RUN_MARKER_RELATIVE,
   settleOtherCheckoutsSyncs,
   terminateConflictingSyncSessions,
   writeLiveRunMarker,
@@ -136,13 +135,18 @@ import { cmdInit, ensureBicaWorkspaceOrInteractiveSetup } from './setupWizard';
 import {
   getRepoRoot,
   loadRemoteEnvConfig,
-  MUTAGEN_PROJECT_RELATIVE,
   prepareSyncProjectFile,
   readPrimarySessionNameFromSpec,
 } from './syncProject';
 import type { ParsedGlobals } from './cliArgs';
 import type { PrepareResult } from './syncProject';
 import { dotGitIsAFile } from './lib/gitLayout';
+import {
+  LEGACY_PROJECT_FILE_RELATIVE,
+  liveRunMarkerRelative,
+  projectFileRelative,
+  workspaceKey,
+} from './lib/workspaceKey';
 
 /** Commands that require bica.yml (or legacy bica-workspace.yml) at the Git root. */
 const COMMANDS_NEEDING_BICA_SPEC = new Set([
@@ -422,7 +426,7 @@ async function cmdStart(autoYes: boolean): Promise<void> {
     process.exit(stop);
   }
   // A marker a crashed run left here would make this deliberate session look like its leftover.
-  removeLiveRunMarker(prep.repoRoot);
+  removeLiveRunMarker(prep.repoRoot, prep.workspaceKey);
   if (!mutagenProjectStart(prep.repoRoot, prep.projectFilePath)) {
     process.exit(1);
   }
@@ -430,7 +434,15 @@ async function cmdStart(autoYes: boolean): Promise<void> {
 
 function cmdStop(): void {
   const repoRoot = getRepoRoot();
-  const projectFilePath = path.join(repoRoot, MUTAGEN_PROJECT_RELATIVE);
+  // This workspace's project file. A sync an older bica started wrote the checkout-wide one, and
+  // `bica stop` still has to be able to end it.
+  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  const keyed = path.join(
+    repoRoot,
+    projectFileRelative(workspaceKey(`${sshHost}:${remoteWorkspacePath}`)),
+  );
+  const legacy = path.join(repoRoot, LEGACY_PROJECT_FILE_RELATIVE);
+  const projectFilePath = fs.existsSync(keyed) ? keyed : legacy;
   if (!fs.existsSync(projectFilePath)) {
     console.error(
       'No sync project file found. Run `bica prepare` or `bica start` first.',
@@ -957,7 +969,13 @@ async function runWithLiveSession(options: {
   chrome: (text: string) => void;
 }): Promise<number> {
   const { prep, pm, tail, captured, chrome } = options;
-  const { repoRoot, projectFilePath, sessionName, remoteSyncUrl } = prep;
+  const {
+    repoRoot,
+    projectFilePath,
+    sessionName,
+    remoteSyncUrl,
+    workspaceKey: key,
+  } = prep;
 
   // Ephemeral session: terminate anything bound to this repo *and this remote workspace* (any name),
   // start fresh from the current project file, run the command, pull return-flow, terminate.
@@ -1000,14 +1018,14 @@ async function runWithLiveSession(options: {
   // Before the start, so the window where a session exists without it is as short as it can be: a
   // session with no marker reads as `bica start`'s, which is refused rather than ended -- safe, but
   // a nuisance.
-  writeLiveRunMarker(repoRoot);
+  writeLiveRunMarker(repoRoot, key);
   if (!mutagenProjectStart(repoRoot, projectFilePath)) {
     process.exit(1);
   }
   // Ends the session if this process dies without reaching `cleanup` below -- `kill -9` included.
   startSyncWatchdog({
     projectFileAbsolutePath: projectFilePath,
-    markerPath: path.join(repoRoot, LIVE_RUN_MARKER_RELATIVE),
+    markerPath: path.join(repoRoot, liveRunMarkerRelative(key)),
   });
 
   // Cleanup hook: terminate the project on any exit path (normal, error, SIGINT, SIGTERM).
@@ -1018,7 +1036,7 @@ async function runWithLiveSession(options: {
     }
     cleanupDone = true;
     mutagenProjectTerminate(repoRoot, projectFilePath, captured);
-    removeLiveRunMarker(repoRoot);
+    removeLiveRunMarker(repoRoot, key);
   };
   process.on('exit', cleanup);
 

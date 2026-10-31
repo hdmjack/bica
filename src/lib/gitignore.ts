@@ -5,7 +5,7 @@ import * as path from 'node:path';
 /**
  * Keeping one person's settings out of everyone's repository.
  *
- * `.bica/local.yml` holds an ssh host and a remote path, and `.bica/project.yml` an absolute
+ * `.bica/local.yml` holds an ssh host and a remote path, and `.bica/project-*.yml` an absolute
  * local path. Both are per person, and both were only ever ignored because the repository bica
  * grew up in happened to carry the rule already.
  */
@@ -56,7 +56,7 @@ export function bicaIsGitignored(repoRoot: string): boolean {
 /**
  * Make sure `.bica/` is ignored by the repository it was just written into.
  *
- * `.bica/local.yml` holds one person's ssh host and remote path, and `.bica/project.yml` holds their
+ * `.bica/local.yml` holds one person's ssh host and remote path, and `.bica/project-*.yml` holds their
  * absolute local path. Both are described everywhere as gitignored, which was true only because the
  * one repository bica grew up in happened to have the line already. In any other repository the
  * first `bica init` left them to be committed, and the next person to clone would inherit somebody

@@ -8,6 +8,11 @@ import { isPlainObject } from 'es-toolkit';
 import YAML from 'yaml';
 
 import { validateGeneratedPath } from './lib/generatedPaths';
+import {
+  projectFileRelative,
+  syncSessionName,
+  workspaceKey,
+} from './lib/workspaceKey';
 
 import { readLocalBicaSettings } from './localBicaSettings';
 import type { LocalBicaSettings } from './localBicaSettings';
@@ -17,8 +22,6 @@ export const BICA_SPEC_FILE = 'bica.yml';
 
 /** Legacy filename; still read if bica.yml is absent. */
 export const BICA_WORKSPACE_SPEC_FILE = 'bica-workspace.yml';
-
-export const MUTAGEN_PROJECT_RELATIVE = path.join('.bica', 'project.yml');
 
 /**
  * One Mutagen sync session (written to `.bica/project.yml`). Property names are Mutagen’s sync schema.
@@ -485,14 +488,21 @@ export function getPrimarySessionName(
   return keys[0];
 }
 
-/** Session name from the sync spec only (no env vars). For list/monitor-style commands. */
+/**
+ * Name of the Mutagen session for this checkout's current workspace, for list/monitor-style commands.
+ * Needs the remote workspace, since the name carries its key; throws when no host is configured.
+ */
 export function readPrimarySessionNameFromSpec(): string {
   const repoRoot = getRepoRoot();
   const { absolutePath, displayName } = resolveSyncSpecPath(repoRoot);
   const raw = fs.readFileSync(absolutePath, 'utf8');
   const docUnknown: unknown = YAML.parse(raw);
   const normalized = normalizeToSyncSpecYaml(docUnknown, repoRoot, displayName);
-  return getPrimarySessionName(normalized, displayName);
+  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  return syncSessionName(
+    getPrimarySessionName(normalized, displayName),
+    `${sshHost}:${remoteWorkspacePath}`,
+  );
 }
 
 export interface RemoteEnvConfig {
@@ -631,8 +641,12 @@ function isSshHostSafe(sshHost: string): boolean {
 
 export interface PrepareResult {
   repoRoot: string;
+  /** This workspace's own project file; another workspace of the same checkout has another. */
   projectFilePath: string;
+  /** Unique to the workspace, so Mutagen can hold one session per workspace from one checkout. */
   sessionName: string;
+  /** `workspaceKey(remoteSyncUrl)`: names this workspace's project file, session and marker. */
+  workspaceKey: string;
   /** Remote sync target: `sshHost:remotePath`. */
   remoteSyncUrl: string;
   /** Glob patterns to rsync remote→local after `bica run`. Empty list = disabled. */
@@ -717,7 +731,7 @@ export function prepareSyncProjectFile(options: {
     );
   }
   const session = sessionUnknown as WorkspaceSyncSession;
-  const sessionName = specSessionName;
+  const sessionName = syncSessionName(specSessionName, remoteSyncUrl);
 
   const mergedSync: SyncSpecYaml['sync'] = {
     [sessionName]: {
@@ -728,7 +742,8 @@ export function prepareSyncProjectFile(options: {
     },
   };
 
-  const projectFilePath = path.join(repoRoot, MUTAGEN_PROJECT_RELATIVE);
+  const key = workspaceKey(remoteSyncUrl);
+  const projectFilePath = path.join(repoRoot, projectFileRelative(key));
   fs.mkdirSync(path.dirname(projectFilePath), { recursive: true });
   const mutagenDoc = { sync: mergedSync };
   fs.writeFileSync(
@@ -747,6 +762,7 @@ export function prepareSyncProjectFile(options: {
     repoRoot,
     projectFilePath,
     sessionName,
+    workspaceKey: key,
     remoteSyncUrl,
     returnFlowPaths: doc.returnFlow?.paths ?? [],
     generatedPaths: doc.generated?.paths ?? [],

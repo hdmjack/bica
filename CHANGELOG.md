@@ -3,6 +3,27 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **Two live runs from one checkout into different workspaces no longer share one sync.** Both wrote
+  `.bica/project.yml` and took one lock, so with the first run still going the second was told
+  "Remote sync is already running (nothing to start)" and went on to wait for, flush and run against a
+  sync that pointed at the first run's workspace. Each workspace now has its own project file
+  (`.bica/project-<key>.yml`, with its own lock), its own Mutagen session name (`<name>-<key>`) and its
+  own live-run marker (`.bica/live-run-<key>`), where `<key>` is a short hash of `host:path`. The
+  marker matters as much as the file: with one per checkout, a dead run's pid could get the live run
+  beside it ended as a leftover. Runs into the *same* workspace are still kept apart by the lease.
+
+### Changed
+- `bica stop` and `bica monitor` act on the workspace the checkout currently points at, so they need
+  the ssh host configured, as `bica start` does. A sync an older bica started is still found:
+  `bica stop` falls back to `.bica/project.yml`, and a session without a key in its name is still
+  judged by the old `.bica/live-run` marker.
+- A sync an older bica left running under the old session name is ended by the next run into the same
+  workspace (and by `bica start`, after asking), as any session with another name on the same paths
+  is. The old `.bica/project.yml` is left in place and can be deleted.
+
 ## 0.8.18 — 2026-10-31
 
 ### Fixed
