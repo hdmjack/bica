@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.16 — 2026-10-31
 
 ### Fixed
 - **A file you edited during a live run is no longer listed as one the command wrote.** The live
