@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.8.18 — 2026-10-31
 
 ### Fixed
 - **`bica run CMD > run.log 2>&1` no longer loses its output.** From inside the checkout, `run.log`
