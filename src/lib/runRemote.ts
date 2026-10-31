@@ -791,7 +791,15 @@ export function buildRemoteRunScript(options: {
     supervise +
     `${options.command}\n` +
     shBlock('_bica_ec=$?') +
-    (supervised ? shBlock('kill "$_bica_sup" 2>/dev/null', `rm -f ${ref}`) : '') +
+    (supervised
+      ? shBlock(
+          // The watcher's current `sleep` is a child of its subshell and outlives it, in the process
+          // group the leftovers check reads; ending it ends the loop too, which is `while sleep`.
+          'pkill -P "$_bica_sup" 2>/dev/null',
+          'kill "$_bica_sup" 2>/dev/null',
+          `rm -f ${ref}`,
+        )
+      : '') +
     verify +
     shBlock('exit "$_bica_ec"')
   );

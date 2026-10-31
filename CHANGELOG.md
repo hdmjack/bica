@@ -3,6 +3,15 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A finished run no longer says it "left a process running" when the process is its own.** The
+  heartbeat watcher that ends an abandoned command sits in the run's process group on purpose. When
+  the command returned, bica stopped the watcher but not the `sleep` it was in the middle of, which
+  outlived it in that group, and the leftovers check blamed the command: `This run left 1 process
+  running on mini: 27690 sleep 15`. The `sleep` is ended with the watcher now.
+
 ## 0.8.15 — 2026-10-30
 
 ### Fixed

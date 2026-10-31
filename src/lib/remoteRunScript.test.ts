@@ -412,6 +412,35 @@ describe('buildRemoteRunScript — heartbeat', () => {
     }
   }, 15_000);
 
+  it('leaves nothing of its own in the run\'s process group once the command returns', async () => {
+    // The reported warning: "This run left 1 process running: sleep 15". Stopping the watcher's
+    // subshell does not stop the `sleep` it is in the middle of, and that sleep is in the group the
+    // leftovers check reads, so bica blamed the command for its own heartbeat.
+    fs.writeFileSync(claim(), 'run-1 laptop 1 t=0\n');
+    const script = buildRemoteRunScript({
+      preamble: '',
+      cdExpr: `cd '${dir}'`,
+      command: 'sleep 1',
+      runId: 'run-1',
+      claimPathExpr: `'${claim()}'`,
+      heartbeat: true,
+      heartbeatTiming: { checkSeconds: 41, staleSeconds: 4100 },
+    });
+    const child = spawn('sh', ['-c', script], { detached: true, stdio: 'ignore' });
+    const gone = new Promise<void>((resolve) => child.on('exit', () => resolve()));
+    try {
+      await gone;
+      await new Promise((r) => setTimeout(r, 300));
+      const ps = spawnSync('ps', ['-A', '-o', 'pgid=,command='], { encoding: 'utf8' }).stdout;
+      const left = ps
+        .split('\n')
+        .filter((l) => l.trim().startsWith(`${String(child.pid)} `));
+      expect(left).toEqual([]);
+    } finally {
+      stop(child.pid!);
+    }
+  }, 15_000);
+
   it('stops watching once the lease is no longer this run\'s', async () => {
     const run = start();
     fs.writeFileSync(claim(), 'someone-else laptop 2 t=0\n');
