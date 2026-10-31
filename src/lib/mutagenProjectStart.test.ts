@@ -36,7 +36,14 @@ function fakeMutagen(projectFile: string, alpha: string, beta: string) {
     list.map((s) => `${s.name}|id-${s.name}|${s.alpha}|${s.beta}\n`).join('');
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 
-  spawnSync.mockImplementation((_cmd: string, args: string[]) => {
+  const sshCalls: { args: string[]; input: string }[] = [];
+
+  spawnSync.mockImplementation((cmd: string, args: string[], options?: { input?: string }) => {
+    // The cache cleanup after a terminate: recorded, not run.
+    if (cmd === 'ssh') {
+      sshCalls.push({ args, input: options?.input ?? '' });
+      return ok();
+    }
     const [group, verb] = args;
     if (group === 'project' && verb === 'start') {
       if (fs.existsSync(lockFile) && fs.readFileSync(lockFile, 'utf8') !== '') {
@@ -74,13 +81,16 @@ function fakeMutagen(projectFile: string, alpha: string, beta: string) {
         const project = args[selector + 1].replace('io.mutagen.project=', '');
         return ok(rows(sessions.filter((s) => s.project === project)));
       }
-      return ok(rows(sessions));
+      // `sync list <name>` narrows to that session, as Mutagen does.
+      const named = args[2] !== undefined && !args[2].startsWith('--') ? args[2] : undefined;
+      return ok(rows(sessions.filter((s) => named === undefined || s.name === named)));
     }
     throw new Error(`fake mutagen: unexpected ${args.join(' ')}`);
   });
 
   return {
     sessions,
+    sshCalls,
     breakListing: () => {
       listingWorks = false;
     },
@@ -116,6 +126,10 @@ describe('mutagenProjectStart with a lock file left behind', () => {
     // The previous run dies here, and the next one's sweep ends its session.
     mutagenSyncTerminate('repo');
     expect(mutagen.sessions).toEqual([]);
+    // Mutagen keeps the ended session's cache on the remote; bica asks the remote to drop it.
+    expect(mutagen.sshCalls).toHaveLength(1);
+    expect(mutagen.sshCalls[0].args).toContain('mini');
+    expect(mutagen.sshCalls[0].input).toContain('"$d/id-repo_alpha" "$d/id-repo_beta"');
 
     expect(mutagenProjectStart(dir, projectFile)).toBe(true);
     expect(mutagen.sessions.map((s) => s.alpha)).toEqual([dir]);

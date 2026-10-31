@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **Ending a sync now removes its Mutagen cache, on the laptop and on the remote.** Mutagen 0.18.1
+  keeps `<identifier>_alpha` on the alpha's machine and `<identifier>_beta` on the beta's, in
+  `~/.mutagen/caches`, and does not delete either when a session is terminated. Every `bica run`
+  started a session, so every run left a pair: about 1,700 files and 3.5 GB on a laptop in a few
+  weeks, and the same on the remote. bica reads the session's identifier before it terminates it,
+  and once the terminate has succeeded removes those two files here and, over ssh, on the remote.
+  The watcher that ends a killed run's sync does the same. It removes only the two files of a session
+  it has just ended, never by age, because the remote's cache folder is shared by every machine that
+  syncs into it. `MUTAGEN_DATA_DIRECTORY` is honoured on both ends. Caches left by earlier versions are
+  not touched.
+
 ## 0.8.14 — 2026-10-28
 
 ### Fixed

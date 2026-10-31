@@ -11,6 +11,7 @@ import {
 } from './syncProgress';
 import type { ReadProgress, SyncProgress } from './syncProgress';
 import { startOrphanedWatcher } from './orphanedWatcher';
+import { removeSessionCaches } from './mutagenCaches';
 
 /** How often to say where a long first sync has got to. */
 const PROGRESS_EVERY_MS = 10_000;
@@ -207,20 +208,13 @@ export function readProjectLockId(projectFileAbsolutePath: string): string | nul
 }
 
 /**
- * Sessions Mutagen started for project `projectId`, found by the label it puts on each of them.
+ * Sessions `mutagen sync list` finds for `selector` (empty: all of them).
  * Returns null when the listing fails, which is "cannot tell", not "there are none".
  */
-function listProjectSessions(projectId: string): SyncSessionSummary[] | null {
+function listSessionsMatching(selector: string[]): SyncSessionSummary[] | null {
   const result = spawnSync(
     'mutagen',
-    [
-      'sync',
-      'list',
-      '--label-selector',
-      `io.mutagen.project=${projectId}`,
-      '--template',
-      SYNC_LIST_TEMPLATE,
-    ],
+    ['sync', 'list', ...selector, '--template', SYNC_LIST_TEMPLATE],
     {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -234,6 +228,14 @@ function listProjectSessions(projectId: string): SyncSessionSummary[] | null {
     .split('\n')
     .map((line) => parseSyncListTemplateLine(line.trim()))
     .filter((s): s is SyncSessionSummary => s !== null);
+}
+
+/**
+ * Sessions Mutagen started for project `projectId`, found by the label it puts on each of them.
+ * Returns null when the listing fails, which is "cannot tell", not "there are none".
+ */
+function listProjectSessions(projectId: string): SyncSessionSummary[] | null {
+  return listSessionsMatching(['--label-selector', `io.mutagen.project=${projectId}`]);
 }
 
 function spawnProjectStart(repoRoot: string, projectFileAbsolutePath: string) {
@@ -302,6 +304,22 @@ function shQuote(s: string): string {
 }
 
 /**
+ * The watcher's share of `removeSessionCaches`: the same two files per session, on both ends, from
+ * the `identifier|beta host` lines `_ended` holds. Each identifier is checked before it reaches a path
+ * or a command, and the remote is reached with a bound so a silent host cannot keep the watcher alive.
+ */
+const WATCHDOG_CACHE_CLEANUP = [
+  'printf \'%s\\n\' "$_ended" | while IFS=\'|\' read -r _id _host; do',
+  '  case "$_id" in ""|*[!A-Za-z0-9_-]*) continue ;; esac',
+  '  _d="${MUTAGEN_DATA_DIRECTORY:-$HOME/.mutagen}/caches"',
+  '  rm -f "$_d/${_id}_alpha" "$_d/${_id}_beta"',
+  '  [ -n "$_host" ] && ssh -T -o BatchMode=yes -o ConnectTimeout=5 -- "$_host" ' +
+    '\'d="${MUTAGEN_DATA_DIRECTORY:-$HOME/.mutagen}/caches"; rm -f "$d/\'"$_id"\'_alpha" "$d/\'"$_id"\'_beta"\' ' +
+    '</dev/null >/dev/null 2>&1',
+  'done',
+];
+
+/**
  * The script that ends a run's sync once the run's process is gone.
  *
  * The exit hook is the normal way a run's session ends, and `kill -9`, an OOM kill or a closed
@@ -324,7 +342,10 @@ export function buildSyncWatchdogScript(options: {
   const id = shQuote(projectId);
   return [
     `while kill -0 ${String(pid)} 2>/dev/null; do sleep 2; done`,
+    // Read before the terminate: afterwards the sessions, and with them the identifiers, are gone.
+    `_ended=$(mutagen sync list --label-selector io.mutagen.project=${id} --template '{{range .}}{{.Identifier}}|{{.Beta.Host}}{{"\\n"}}{{end}}' 2>/dev/null)`,
     `mutagen sync terminate --label-selector io.mutagen.project=${id} >/dev/null 2>&1`,
+    ...WATCHDOG_CACHE_CLEANUP,
     `[ "$(cat ${shQuote(options.lockPath)} 2>/dev/null)" = ${id} ] && rm -f ${shQuote(options.lockPath)}`,
     `[ "$(cat ${shQuote(options.markerPath)} 2>/dev/null)" = '${String(pid)}' ] && rm -f ${shQuote(options.markerPath)}`,
     'exit 0',
@@ -362,6 +383,9 @@ export function mutagenProjectTerminate(
   projectFileAbsolutePath: string,
   quiet = false,
 ): boolean {
+  // Read now: once the project is terminated its sessions, and their identifiers, are gone.
+  const projectId = readProjectLockId(projectFileAbsolutePath);
+  const ending = projectId === null ? [] : (listProjectSessions(projectId) ?? []);
   // Quiet mode (captured / non-TTY): pipe instead of inherit so Mutagen's `\r`-based
   // "Terminating session …" progress line cannot clobber the last real output line.
   const result = spawnSync(
@@ -375,6 +399,9 @@ export function mutagenProjectTerminate(
     },
   );
   const ok = result.status === 0;
+  if (ok) {
+    removeSessionCaches(ending);
+  }
   // Surface stderr only on failure so quiet teardown stays silent on the happy path.
   if (quiet && !ok && typeof result.stderr === 'string' && result.stderr.trim().length > 0) {
     process.stderr.write(result.stderr);
@@ -505,12 +532,15 @@ export function findSessionsFromOtherCheckouts(
 }
 
 export function mutagenSyncTerminate(sessionName: string): boolean {
+  // Read now: once the session is terminated its identifier, and with it its cache files, are lost.
+  const ending = listSessionsMatching([sessionName]) ?? [];
   const result = spawnSync('mutagen', ['sync', 'terminate', sessionName], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,
   });
   if (result.status === 0) {
+    removeSessionCaches(ending);
     return true;
   }
   const err = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();

@@ -152,7 +152,7 @@ describe('the watchdog that ends a dead run\'s sync', () => {
 
   it('ends the run\'s project and clears its lock and marker once the run is gone', () => {
     const outcome = runWatchdog('proj_abc');
-    expect(outcome.calls).toBe('sync terminate --label-selector io.mutagen.project=proj_abc\n');
+    expect(outcome.calls).toContain('sync terminate --label-selector io.mutagen.project=proj_abc\n');
     expect(outcome.lockLeft).toBe(false);
     expect(outcome.markerLeft).toBe(false);
   });
@@ -161,5 +161,82 @@ describe('the watchdog that ends a dead run\'s sync', () => {
     const outcome = runWatchdog('proj_later');
     expect(outcome.calls).toContain('io.mutagen.project=proj_abc');
     expect(outcome.lockLeft).toBe(true);
+  });
+});
+
+describe('the watchdog removes the session caches it leaves behind', () => {
+  /**
+   * The real script, with a stand-in `mutagen` that lists one session and a stand-in `ssh` that
+   * records what it was asked to run, in a data directory of its own.
+   */
+  function runWatchdogWithCaches(betaHost: string): {
+    localLeft: string[];
+    sshCalls: string;
+  } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica watchdog caches '));
+    try {
+      const bin = path.join(dir, 'bin');
+      fs.mkdirSync(bin);
+      const data = path.join(dir, 'mutagen data');
+      const caches = path.join(data, 'caches');
+      fs.mkdirSync(caches, { recursive: true });
+      for (const name of ['sync_AAA_alpha', 'sync_AAA_beta', 'sync_BBB_alpha']) {
+        fs.writeFileSync(path.join(caches, name), '');
+      }
+      const sshLog = path.join(dir, 'ssh calls');
+      fs.writeFileSync(
+        path.join(bin, 'mutagen'),
+        `#!/bin/sh\n[ "$2" = list ] && printf '%s\\n' 'sync_AAA|${betaHost}' 'bad id;rm -rf /|${betaHost}'\nexit 0\n`,
+        { mode: 0o755 },
+      );
+      fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\necho "$@" >> '${sshLog}'\n`, {
+        mode: 0o755,
+      });
+      const pid = Number(
+        spawnSync('sh', ['-c', 'sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' }).stdout.trim(),
+      );
+      process.kill(pid, 'SIGKILL');
+      const result = spawnSync(
+        'sh',
+        [
+          '-c',
+          buildSyncWatchdogScript({
+            pid,
+            projectId: 'proj_abc',
+            lockPath: path.join(dir, 'project.yml.lock'),
+            markerPath: path.join(dir, 'live-run'),
+          }),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH ?? ''}`,
+            MUTAGEN_DATA_DIRECTORY: data,
+          },
+          timeout: 20_000,
+        },
+      );
+      expect(result.status).toBe(0);
+      return {
+        localLeft: fs.readdirSync(caches).sort(),
+        sshCalls: fs.existsSync(sshLog) ? fs.readFileSync(sshLog, 'utf8') : '',
+      };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('deletes the ended session\'s two files here and asks the remote to delete its own', () => {
+    const outcome = runWatchdogWithCaches('mini');
+    // Only the ended session's files: another session's cache is not this run's to remove.
+    expect(outcome.localLeft).toEqual(['sync_BBB_alpha']);
+    expect(outcome.sshCalls).toContain('-- mini d="${MUTAGEN_DATA_DIRECTORY:-$HOME/.mutagen}/caches"');
+    expect(outcome.sshCalls).toContain('"$d/sync_AAA_alpha" "$d/sync_AAA_beta"');
+    // The malformed identifier never reached a command.
+    expect(outcome.sshCalls).not.toContain('rm -rf');
+  });
+
+  it('does not reach for ssh when the session\'s other end is a local folder', () => {
+    expect(runWatchdogWithCaches('').sshCalls).toBe('');
   });
 });
