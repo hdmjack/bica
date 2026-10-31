@@ -16,6 +16,10 @@ import {
   escapeRsyncPattern,
   outputFilesInside,
   parseLsofNames,
+  parseRsyncListing,
+  pathsChangedBetween,
+  pullReturnFlow,
+  snapshotReturnFlowFiles,
 } from './returnFlow';
 import { SYNC_NOT_READY_EXIT } from './syncProgress';
 
@@ -340,6 +344,122 @@ describe('outputFilesInside', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('parseRsyncListing', () => {
+  it('reads files with their size and time, keeps spaces in names, and skips directories', () => {
+    const listing = [
+      'drwx------          160 2026/10/31 13:45:27 .',
+      '-rw-r--r--            2 2026/10/31 13:45:27 a b.log',
+      'drwxr-xr-x           96 2026/10/31 13:45:27 sub',
+      '-rw-r--r--          940 2026/10/31 13:45:28 sub/c.log',
+      '',
+    ].join('\n');
+    expect([...parseRsyncListing(listing)]).toEqual([
+      ['a b.log', '2:2026/10/31 13:45:27'],
+      ['sub/c.log', '940:2026/10/31 13:45:28'],
+    ]);
+  });
+
+  it('turns the octal escapes rsync prints for awkward bytes back into the name', () => {
+    const listing = '-rw-r--r--            2 2026/10/31 13:45:27 tab\\#011here.log\n';
+    expect([...parseRsyncListing(listing).keys()]).toEqual(['tab\there.log']);
+  });
+});
+
+describe('pathsChangedBetween', () => {
+  it('names files that were created, deleted or rewritten, and not the ones that were left alone', () => {
+    const before = new Map([
+      ['kept.log', '1:t1'],
+      ['deleted.log', '1:t1'],
+      ['rewritten.log', '1:t1'],
+    ]);
+    const after = new Map([
+      ['kept.log', '1:t1'],
+      ['rewritten.log', '9:t2'],
+      ['created.log', '1:t3'],
+    ]);
+    expect(pathsChangedBetween(before, after)).toEqual(['created.log', 'deleted.log', 'rewritten.log']);
+  });
+});
+
+/**
+ * As reported against 0.8.18: during a long `bica run`, logs were deleted and another was created in
+ * the checkout. The pull at the end mirrored the remote's copy from when the run began, which brought
+ * the deleted ones back and removed the new one, a log that existed nowhere else.
+ */
+describe('pullReturnFlow and what changed locally while the run was going', () => {
+  const rsync = spawnSync('rsync', ['--version']);
+
+  it.runIf(rsync.status === 0)('leaves alone a local log that was deleted, created or rewritten during the run', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica pull during run '));
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const remote = path.join(dir, 'remote');
+      const local = path.join(dir, 'local');
+      fs.mkdirSync(remote);
+      fs.mkdirSync(local);
+      // What the push at the start of the run put on the remote, and what the run then wrote there.
+      for (const name of ['deleted.log', 'rewritten.log', 'untouched.log']) {
+        fs.writeFileSync(path.join(local, name), 'as it was when the run began\n');
+        fs.writeFileSync(path.join(remote, name), 'as it was when the run began\n');
+      }
+      fs.writeFileSync(path.join(remote, 'untouched.log'), 'the run wrote this on the remote\n');
+      fs.writeFileSync(path.join(remote, 'only-the-run-made-this.log'), 'from the remote\n');
+      const prep = {
+        repoRoot: local,
+        remoteSyncUrl: remote,
+        returnFlowPaths: ['*.log'],
+        syncIgnorePaths: [],
+      } as unknown as PrepareResult;
+
+      const before = snapshotReturnFlowFiles(prep);
+      expect(before).not.toBeNull();
+
+      fs.rmSync(path.join(local, 'deleted.log'));
+      fs.writeFileSync(path.join(local, 'rewritten.log'), 'edited here during the run, longer than before\n');
+      fs.writeFileSync(path.join(local, 'created.log'), 'created here during the run\n');
+
+      expect(pullReturnFlow(prep, before).exitCode).toBe(0);
+
+      expect(fs.existsSync(path.join(local, 'deleted.log'))).toBe(false);
+      expect(fs.readFileSync(path.join(local, 'rewritten.log'), 'utf8')).toBe(
+        'edited here during the run, longer than before\n',
+      );
+      expect(fs.readFileSync(path.join(local, 'created.log'), 'utf8')).toBe('created here during the run\n');
+      // The pull still does its job for what only the run touched.
+      expect(fs.readFileSync(path.join(local, 'untouched.log'), 'utf8')).toBe('the run wrote this on the remote\n');
+      expect(fs.readFileSync(path.join(local, 'only-the-run-made-this.log'), 'utf8')).toBe('from the remote\n');
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(rsync.status === 0)('still mirrors everything when there is no snapshot to compare with', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica pull no snapshot '));
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const remote = path.join(dir, 'remote');
+      const local = path.join(dir, 'local');
+      fs.mkdirSync(remote);
+      fs.mkdirSync(local);
+      fs.writeFileSync(path.join(remote, 'a.log'), 'remote\n');
+      fs.writeFileSync(path.join(local, 'b.log'), 'local only\n');
+      const prep = {
+        repoRoot: local,
+        remoteSyncUrl: remote,
+        returnFlowPaths: ['*.log'],
+        syncIgnorePaths: [],
+      } as unknown as PrepareResult;
+      pullReturnFlow(prep);
+      expect(fs.existsSync(path.join(local, 'a.log'))).toBe(true);
+      expect(fs.existsSync(path.join(local, 'b.log'))).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

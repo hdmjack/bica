@@ -540,3 +540,25 @@ on macOS, looked up only when an output is a regular file inside the checkout, a
 the same inode). Not done: warning about any other matching file edited locally during a run, which the
 pull still replaces. That is return-flow's contract, but it is the same trap for anyone who keeps notes
 in a `.log` in the tree.
+
+### A long run's pull undid local deletes and removed a new log
+
+Reported 2026-10-31 from a worktree whose build ran for minutes: six `*.log` files deleted during it came
+back with their old times, and a 1,180-line log created during it was gone. `git status` showed tracked
+files untouched. Not a Mutagen effect (the patterns are in the session's ignore list), and nothing had
+been running when it was noticed, because the pull had already finished.
+
+Reproduced against the mini with a run that sleeps 30 s: delete two `*.log` and create one at 15 s in.
+After the run both deleted ones were back and the new one was gone. The cause is the contract the 0.8.18
+section ends on, one step further: the pull is `rsync --delete` of the remote's matching files over the
+local tree, and the remote's copies are from the push at the start. Anything that moved locally since
+is reverted to that, and a local-only file matching the patterns is deleted as obsolete.
+
+Fix: list the local matching files with `rsync -a --list-only` and the same filter rules, once as the
+push starts and once as the pull starts, and exclude every path that differs (created, deleted, size or
+second-granular time changed). Reusing rsync's own matching avoids evaluating its globs in JS. Same
+scenario afterwards: deleted stay deleted, created and edited stay, a file the command wrote on the
+remote still arrives. Checked on both the live and the pinned (`--also --return-flow`) paths. A rewrite
+within the same second with the same size would not be seen; the output file the run itself writes is
+handled separately and not reported.
+

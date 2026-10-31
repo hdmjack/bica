@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A long run no longer undoes what you did to your `*.log` files while it was going.** The pull at
+  the end of a run mirrors the remote's copies of the return-flow files over the local tree, and those
+  copies were made when the run began. Logs deleted during a long build came back, and a log created
+  during it was removed, with no copy anywhere else (reported: a 1,180-line comparison log, gone). The
+  pull now compares the local files with a snapshot taken as they were sent, and leaves alone any that
+  were created, deleted or rewritten since; it says which. Files only the run touched on the remote
+  still come home as before. Applies to live runs and to `--return-flow` on pinned runs, including
+  `--also`.
+
 ## 0.9.0 — 2026-10-31
 
 ### Fixed

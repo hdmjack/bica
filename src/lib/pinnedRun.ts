@@ -44,6 +44,7 @@ import {
   pullReturnFlow,
   pushGitToRemote,
   pushReturnFlowToRemote,
+  snapshotReturnFlowFiles,
 } from './returnFlow';
 import { reportArtifactPull } from './reportArtifacts';
 import { endLeftoverRunSyncs, settleOtherCheckoutsSyncs } from './ensureSyncReady';
@@ -449,6 +450,8 @@ export async function runPinned(options: {
     process.stderr.write(`${warn('[bica]')} ${staleGit}\n`);
   }
 
+  // Taken as the files go over; the pull at the end leaves alone whatever changed here since.
+  const returnFlowBefore = returnFlow ? snapshotReturnFlowFiles(prep) : null;
   if (returnFlow && prep.returnFlowPaths.length > 0) {
     chrome(
       `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
@@ -586,7 +589,7 @@ export async function runPinned(options: {
         chrome(
           `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
         );
-        pullReturnFlow(prep);
+        pullReturnFlow(prep, returnFlowBefore);
       } finally {
         rfLock.release();
       }

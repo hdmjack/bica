@@ -104,6 +104,7 @@ import {
   gitSyncStopsRun,
   pushGitToRemote,
   pushReturnFlowToRemote,
+  snapshotReturnFlowFiles,
 } from './lib/returnFlow';
 import {
   collectWriteBack,
@@ -1114,6 +1115,9 @@ async function runWithLiveSession(options: {
   // snapshots, which then flow back locally. Mirror the current branch's artifacts onto the remote
   // (local → remote, --delete) before the run so it starts clean and can't leak stale cross-branch
   // snapshots back via return-flow.
+  // What the local files look like as they go over. The pull at the end leaves alone whatever has
+  // changed since, so a log deleted or created while a long run is going is not undone by it.
+  const returnFlowBefore = snapshotReturnFlowFiles(prep);
   if (prep.returnFlowPaths.length > 0) {
     chrome(
       `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
@@ -1237,7 +1241,7 @@ async function runWithLiveSession(options: {
         `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
       );
     }
-    const pull = pullReturnFlow(prep);
+    const pull = pullReturnFlow(prep, returnFlowBefore);
     if (pull.ran && pull.exitCode === 0) {
       chrome(`${dim('[bica]')} ${dim('Return-flow pull done.')}\n`);
     }

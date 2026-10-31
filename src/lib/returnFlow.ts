@@ -210,11 +210,123 @@ export function outputFilesInside(
   return [...found];
 }
 
+/**
+ * The local files return-flow owns, as of one moment: path inside the checkout to `size:mtime`.
+ * Compared with a later one to find what somebody touched in between.
+ */
+export type ReturnFlowSnapshot = ReadonlyMap<string, string>;
+
+const LISTING_LINE = /^([-dl])\S{9}\s+(\d+)\s+(\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d) (.+)$/;
+
+/** rsync prints an awkward byte in a listed name as `\#NNN`, octal; this turns those back into bytes. */
+function decodeListedName(name: string): string {
+  const bytes = Buffer.from(name, 'utf8');
+  const out: number[] = [];
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0x5c && bytes[i + 1] === 0x23) {
+      const octal = bytes.subarray(i + 2, i + 5).toString('latin1');
+      if (/^[0-7]{3}$/.test(octal)) {
+        out.push(Number.parseInt(octal, 8));
+        i += 4;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+  }
+  return Buffer.from(out).toString('utf8');
+}
+
+/** The files in `rsync --list-only` output; directories are not files and say nothing about contents. */
+export function parseRsyncListing(stdout: string): Map<string, string> {
+  const files = new Map<string, string>();
+  for (const line of stdout.split('\n')) {
+    const m = LISTING_LINE.exec(line);
+    if (m === null || m[1] === 'd') {
+      continue;
+    }
+    files.set(decodeListedName(m[4]), `${m[2]}:${m[3]}`);
+  }
+  return files;
+}
+
+/** Paths present in only one of the two snapshots, or present in both with different contents. */
+export function pathsChangedBetween(
+  before: ReturnFlowSnapshot,
+  after: ReturnFlowSnapshot,
+): string[] {
+  const changed = new Set<string>();
+  for (const [file, state] of before) {
+    if (after.get(file) !== state) {
+      changed.add(file);
+    }
+  }
+  for (const file of after.keys()) {
+    if (!before.has(file)) {
+      changed.add(file);
+    }
+  }
+  return [...changed].sort();
+}
+
+/**
+ * What the local return-flow files look like now, listed by rsync itself so that the patterns and the
+ * excluded trees mean here exactly what they mean to the push and the pull. Null when it cannot be
+ * told, which the pull reads as "no baseline" and handles as it always did.
+ */
+export function snapshotReturnFlowFiles(
+  prep: PrepareResult,
+): ReturnFlowSnapshot | null {
+  if (prep.returnFlowPaths.length === 0 || process.env.BICA_RETURN_FLOW?.trim() === '0') {
+    return null;
+  }
+  if (!rsyncAvailable()) {
+    return null;
+  }
+  const listed = spawnSync(
+    'rsync',
+    [
+      '-a',
+      '--list-only',
+      ...buildReturnFlowRsyncArgs(
+        prep.returnFlowPaths,
+        buildReturnFlowExcludes(prep.syncIgnorePaths),
+      ),
+      ensureTrailingSlash(prep.repoRoot),
+    ],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: SUBPROCESS_MAX_BUFFER,
+      shell: false,
+    },
+  );
+  return listed.status === 0 ? parseRsyncListing(listed.stdout ?? '') : null;
+}
+
 export interface PullResult {
   /** Whether rsync ran. False = skipped (no patterns, rsync missing, or disabled). */
   ran: boolean;
   /** rsync exit code, when ran. */
   exitCode?: number;
+}
+
+/**
+ * Local return-flow files that differ from the `before` snapshot taken when the run began.
+ *
+ * The remote's copies of these were made at that moment, so they say nothing about what somebody did
+ * here since. Mirroring them anyway brought back logs that had been deleted during a long build and
+ * removed a log created during it, which existed nowhere else. The pull is for what the run changed on
+ * the remote; a local file that moved while the run was going is not the run's to undo.
+ */
+function filesTouchedDuringRun(
+  prep: PrepareResult,
+  before: ReturnFlowSnapshot | null,
+): string[] {
+  if (before === null) {
+    return [];
+  }
+  const now = snapshotReturnFlowFiles(prep);
+  return now === null ? [] : pathsChangedBetween(before, now);
 }
 
 /**
@@ -228,7 +340,10 @@ export interface PullResult {
  * Best-effort — failures emit a warning and return non-zero but do not throw, so they don't mask
  * the remote command's exit code.
  */
-export function pullReturnFlow(prep: PrepareResult): PullResult {
+export function pullReturnFlow(
+  prep: PrepareResult,
+  before: ReturnFlowSnapshot | null = null,
+): PullResult {
   if (prep.returnFlowPaths.length === 0) {
     return { ran: false };
   }
@@ -242,6 +357,17 @@ export function pullReturnFlow(prep: PrepareResult): PullResult {
     return { ran: false };
   }
 
+  // The run's own output grows while it runs and is protected below; it is not something to report.
+  const outputs = outputFilesInside(prep.repoRoot);
+  const touched = filesTouchedDuringRun(prep, before).filter((f) => !outputs.includes(f));
+  if (touched.length > 0) {
+    const shown = touched.slice(0, 8).join(', ');
+    const more = touched.length > 8 ? ` and ${String(touched.length - 8)} more` : '';
+    process.stderr.write(
+      `${warn('[bica]')} ${dim(`Left ${String(touched.length)} local return-flow file${touched.length === 1 ? '' : 's'} alone because ${touched.length === 1 ? 'it was' : 'they were'} changed, created or deleted here while the run was going: ${shown}${more}.`)}\n`,
+    );
+  }
+
   const remoteSource = ensureTrailingSlash(prep.remoteSyncUrl);
   const localDest = ensureTrailingSlash(prep.repoRoot);
   const args = buildReturnFlowMirrorArgs(
@@ -251,7 +377,9 @@ export function pullReturnFlow(prep: PrepareResult): PullResult {
     [
       ...buildReturnFlowExcludes(prep.syncIgnorePaths),
       // Anchored with a leading slash, so only that file at that place.
-      ...outputFilesInside(prep.repoRoot).map((rel) => `/${escapeRsyncPattern(rel)}`),
+      ...[...outputs, ...touched].map(
+        (rel) => `/${escapeRsyncPattern(rel)}`,
+      ),
     ],
   );
 
