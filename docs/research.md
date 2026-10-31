@@ -399,3 +399,26 @@ was killed four seconds in. It looked like a connection fault rather than a kill
 `Exit status -1` for a command that died of a signal, and the classifier's `Exit status ` prefix
 match read that as the command answering for itself.
 
+
+### A live run's write notice: do not decide by content
+
+Reported 2026-10-31: after a long live `bica run`, `This command wrote 4 files on the remote` named
+exactly the four files edited on the laptop during it. The probe lists what is newer than a marker
+placed before the command, and the live session pushes local edits to the remote throughout, so a
+pushed file is newer than the marker too.
+
+The tidy fix, dropping files whose remote content equals the local copy, is wrong, and was written and
+measured before it was thrown away. Against `mini`, a command that appended to `a.txt` and created
+`cmd-wrote.txt` in a live run: the session had already **reverted `a.txt` and deleted the new file**
+by the time the probe asked, because a live session is `one-way-replica`. Their content then equals
+the local tree's, so a content check goes silent for exactly the case the notice exists for, a
+formatter run through a live session. The old timestamp rule still sees them, since a revert moves the
+mtime. What distinguishes a push from a command's write is where the edit began, not what the file now
+holds: a file whose *local* mtime is later than the flush before the command started was edited on the
+laptop. That is on one clock, needs no hashing and no extra ssh call, and the live run's three cases
+checked out on `mini`: a local edit alone (not listed), a command write alone (listed), both (only the
+command's listed).
+
+**Trap while testing:** `git checkout a.txt` between runs refreshes the file's local mtime. A first
+version that allowed five seconds of slack before the marker swallowed a real write in the run that
+followed, for that reason. The cutoff is the flush, which bica already waits for, and needs no slack.

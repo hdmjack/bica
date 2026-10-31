@@ -1056,6 +1056,9 @@ async function runWithLiveSession(options: {
     return SYNC_NOT_READY_EXIT;
   }
   // Force one flush so any pending alpha→beta changes finish before the remote command runs.
+  // Whatever was edited here before it began is on the remote before the command starts; whatever is
+  // edited after it reaches the remote through the live session, which `syncedEditsSince` accounts for.
+  const flushStartedAt = Date.now();
   mutagenSyncFlush(repoRoot, sessionName);
 
   // When git.sync is enabled, mirror local .git to the remote so git-dependent commands
@@ -1201,6 +1204,8 @@ async function runWithLiveSession(options: {
           ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
           pushedTreeOid: undefined,
           pull: false,
+          // This run's session keeps pushing local edits while the command runs.
+          syncedEditsSince: flushStartedAt,
           run: runRemoteScriptOverStdin,
         }),
         false,

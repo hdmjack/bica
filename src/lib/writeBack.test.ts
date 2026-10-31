@@ -11,6 +11,7 @@ import {
   buildWriteBackPullArgs,
   collectWriteBack,
   describePaths,
+  dropFilesEditedLocallySince,
   dropIgnoredPaths,
   parseChangedPaths,
   parseLsTreeZ,
@@ -126,6 +127,30 @@ describe('parseChangedPaths', () => {
       'pkg/m.ts',
       'src/a.ts',
       'src/z.ts',
+    ]);
+  });
+});
+
+describe('dropFilesEditedLocallySince', () => {
+  const at = (rel: string, ms: number): void => {
+    const t = new Date(ms);
+    fs.utimesSync(path.join(repoRoot, rel), t, t);
+  };
+
+  it('drops what was edited here since the cutoff, and keeps what was last touched before it', () => {
+    const marker = Date.now();
+    write('src/edited.ts', 'edited during the run\n');
+    write('src/old.ts', 'untouched\n');
+    at('src/edited.ts', marker + 20_000);
+    at('src/old.ts', marker - 600_000);
+    expect(dropFilesEditedLocallySince(repoRoot, ['src/edited.ts', 'src/old.ts'], marker)).toEqual([
+      'src/old.ts',
+    ]);
+  });
+
+  it('keeps a file that does not exist here, since only the command could have made it', () => {
+    expect(dropFilesEditedLocallySince(repoRoot, ['made/by/the/command.txt'], Date.now())).toEqual([
+      'made/by/the/command.txt',
     ]);
   });
 });
@@ -265,6 +290,41 @@ describe('collectWriteBack', () => {
     expect(fs.readFileSync(path.join(repoRoot, 'src/a.ts'), 'utf8')).toBe(
       'export const a = 1;\n',
     );
+  });
+
+  it('does not list a file edited locally during a live run, but still lists what the command wrote', () => {
+    // The reported run: four files edited on the laptop reached the remote through the live sync, so
+    // they were newer than the marker there, and were listed as "wrote on the remote".
+    const marker = Date.now() - 60_000;
+    write('src/edited.ts', 'edited during the run\n');
+    // The fixture's own files were last touched long before this run began.
+    const before = new Date(marker - 3_600_000);
+    fs.utimesSync(path.join(repoRoot, 'src/a.ts'), before, before);
+    const outcome = collectWriteBack({
+      ...remote,
+      repoRoot,
+      pushedTreeOid: undefined,
+      pull: false,
+      syncedEditsSince: marker,
+      run: () => ({
+        status: 0,
+        stdout: './src/edited.ts\n./src/a.ts\n./src/new.ts\n',
+        stderr: '',
+      }),
+    });
+    expect(outcome.changed).toEqual(['src/a.ts', 'src/new.ts']);
+  });
+
+  it('lists a locally edited file when the run is not live, where nothing is pushed mid-run', () => {
+    write('src/edited.ts', 'edited during the run\n');
+    const outcome = collectWriteBack({
+      ...remote,
+      repoRoot,
+      pushedTreeOid: undefined,
+      pull: false,
+      run: () => ({ status: 0, stdout: './src/edited.ts\n', stderr: '' }),
+    });
+    expect(outcome.changed).toEqual(['src/edited.ts']);
   });
 
   it('reports nothing when the probe could not run, rather than guessing', () => {

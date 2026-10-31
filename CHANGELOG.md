@@ -6,6 +6,13 @@ entries note where a change affects what another version sees.
 ## Unreleased
 
 ### Fixed
+- **A file you edited during a live run is no longer listed as one the command wrote.** The live
+  session keeps pushing local edits to the remote while the command runs, so those files were newer
+  than the run's marker there, and the notice named them: `This command wrote 4 files on the remote`,
+  with advice to `--write-back` what was already at home. A live run now leaves out files whose local
+  modification time is after its last flush before the command started, which is when the laptop's own
+  edits begin to arrive by push. The command's writes are still named, including ones the session has
+  already reverted, and `--write-back` and `--detach` runs, which push once, are unchanged.
 - **A finished run no longer says it "left a process running" when the process is its own.** The
   heartbeat watcher that ends an abandoned command sits in the run's process group on purpose. When
   the command returned, bica stopped the watcher but not the `sleep` it was in the middle of, which

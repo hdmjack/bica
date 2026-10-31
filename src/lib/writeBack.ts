@@ -150,6 +150,33 @@ export type RemoteScriptRunner = (
 ) => { status: number; stdout: string; stderr: string };
 
 /**
+ * Drop the files that were edited on this machine since `sinceMs`.
+ *
+ * Only for a live run, where the session keeps pushing local edits to the remote while the command
+ * runs. Whatever it pushes is newer than the marker there, and the remote cannot tell it from the
+ * command's own output by time, so a file edited locally during the run was listed as one the command
+ * wrote. The local modification time can say so, on this machine's clock alone.
+ *
+ * Not a comparison of content, which looks tidier and is wrong: the session also reverts the command's
+ * own writes on the remote to what the laptop holds, so a formatter's output matches the local file
+ * again by the time it is asked, and the notice would go quiet in the case it exists for.
+ */
+export function dropFilesEditedLocallySince(
+  repoRoot: string,
+  paths: readonly string[],
+  sinceMs: number,
+): string[] {
+  return paths.filter((p) => {
+    try {
+      return fs.statSync(path.join(repoRoot, p)).mtimeMs < sinceMs;
+    } catch {
+      // No local file: the command made it, or it was deleted here, and either way it is not a push.
+      return true;
+    }
+  });
+}
+
+/**
  * Parse the probe's stdout into workspace-relative paths, sorted.
  *
  * `find` emits in traversal order, which puts a directory's files next to each other but is otherwise
@@ -388,6 +415,11 @@ export function collectWriteBack(options: {
   pushedTreeOid: string | undefined;
   /** Whether to copy the safe files back, as opposed to only naming them. */
   pull: boolean;
+  /**
+   * Set for a live run: when, on this machine's clock, the last flush before the command began. Files
+   * edited locally since then reached the remote through the live session and are not the command's.
+   */
+  syncedEditsSince?: number;
   run: RemoteScriptRunner;
 }): WriteBackOutcome {
   const probe = options.run(
@@ -401,10 +433,14 @@ export function collectWriteBack(options: {
   if (probe.status !== 0) {
     return { changed: [], pulled: [], conflicted: [] };
   }
-  const changed = dropIgnoredPaths(
+  const notIgnored = dropIgnoredPaths(
     options.repoRoot,
     parseChangedPaths(probe.stdout),
   );
+  const changed =
+    options.syncedEditsSince === undefined
+      ? notIgnored
+      : dropFilesEditedLocallySince(options.repoRoot, notIgnored, options.syncedEditsSince);
   if (changed.length === 0 || !options.pull) {
     return { changed, pulled: [], conflicted: [] };
   }
