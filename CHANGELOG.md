@@ -3,6 +3,21 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A cancelled run no longer leaves `timeout`-wrapped commands running on the remote.** Every way
+  bica ends a remote command (a run killed with SIGTERM, `bica cancel`, a dropped connection, the idle
+  heartbeat) signalled the shell's process group. GNU `timeout` moves itself and its child into a group
+  of its own unless given `--foreground`, so `bica run timeout 900 ./viewer` reported the command ended
+  and left the viewer running, holding the GPU, after the workspace had been released. The same
+  applies to anything else that makes its own group (`setsid`, a shell with job control). Teardown now
+  also signals the shell's descendants, found by parent pid before anything is signalled, since after
+  that nothing links them to the run. Checked against the mini with `timeout` from Homebrew coreutils:
+  the installed 0.9.1 left `timeout` and `sleep` running after SIGTERM; this build left nothing, and the
+  same held for `bica cancel --force` and for killing the local ssh. Not covered: a child that
+  double-forks and detaches from its parent.
+
 ## 0.9.1 — 2026-10-31
 
 ### Fixed

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import * as os from 'node:os';
 
 import { startOrphanedWatcher, stopOrphanedWatcher } from './orphanedWatcher';
+import { PROCESS_TREE_SH } from './remoteProcessTree';
 import { sharedSshOptions } from './sshShare';
 import {
   HEARTBEAT_EVERY_MS,
@@ -287,7 +288,8 @@ export function buildClaimReleaseScript(
  *
  * The signal goes to the *group* (`kill -TERM -$p`), for the reason {@link remoteRunIsAlive} checks
  * the group: the recorded pid is the remote shell, and signalling it alone leaves its children running
- * in the workspace.
+ * in the workspace. And to the shell's descendants, found by parent pid, because a child that made a
+ * group of its own -- GNU `timeout` does -- is in none of the group's signals; see `remoteProcessTree.ts`.
  *
  * `runId` narrows it to one run when the caller knows which it is tearing down. Passing `null` cancels
  * whatever holds the claim, which is what `bica cancel` needs when the run it is clearing up belongs
@@ -304,13 +306,14 @@ export function buildClaimCancelScript(
   return (
     `[ -f ${claimExpr} ] || { echo BICA_NO_CLAIM; exit 0; }\n` +
     guard +
+    PROCESS_TREE_SH +
     // Looped, because a claim can name several process groups -- one per command of a concurrent run.
     // The previous single-value form put a multi-line string into one `kill`, which signalled nothing.
     `_p=$(tr ' ' '\\n' < ${claimExpr} 2>/dev/null | grep '^rpid=' | cut -d= -f2)\n` +
     'if [ -n "$_p" ]; then\n' +
     '  _any=0\n' +
     '  for _g in $_p; do\n' +
-    '    if kill -TERM -"$_g" 2>/dev/null; then _any=1; fi\n' +
+    '    if _bica_end_tree "$_g"; then _any=1; fi\n' +
     '  done\n' +
     '  if [ "$_any" -eq 1 ]; then echo BICA_SIGNALLED; else echo BICA_GROUP_GONE; fi\n' +
     'else\n' +

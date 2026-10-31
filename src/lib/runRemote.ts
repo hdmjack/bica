@@ -15,6 +15,7 @@ import {
 } from './connectionLoss';
 import { resolveActiveRemoteShellPlugins } from '../resolveActivePlugins';
 import { dim } from '../terminalStyle';
+import { PROCESS_TREE_SH } from './remoteProcessTree';
 import { sharedSshOptions } from './sshShare';
 import type { RemoteShellPlugin } from '../plugins/types';
 
@@ -759,6 +760,7 @@ export function buildRemoteRunScript(options: {
   const supervise = !supervised
     ? ''
     : shBlock(
+        PROCESS_TREE_SH,
         `touch ${beat} ${ref} 2>/dev/null`,
         '(',
         '  _bica_quiet=0',
@@ -773,7 +775,7 @@ export function buildRemoteRunScript(options: {
         // workspace back once the command has had a moment to stop. Signal first and release after,
         // as `bica cancel` does, so the workspace is never free while anything is still in it.
         "        trap '' TERM",
-        '        kill -TERM -$$ 2>/dev/null',
+        '        _bica_end_tree "$$" 2>/dev/null',
         '        sleep 2',
         `        if [ "$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)" = ${q} ]; then`,
         `          rm -f ${claimPathExpr} ${claimPathExpr}.cmd ${beat} ${ref}`,
@@ -862,7 +864,7 @@ export const HEARTBEAT_EVERY_MS = 30_000;
  * rather than taking any non-zero exit as the connection ending: `cat` exits 0 at end-of-file and
  * only then, so anything else that leaves the pipe non-blocking costs a poll a second, not the run.
  *
- * It signals the process group, not the pid it started. That pid is usually a package manager whose
+ * It signals the process group, not the pid it started, and then whatever left the group. That pid is usually a package manager whose
  * work is done by grandchildren, and `pnpm` does not reliably pass a `SIGTERM` on: killing it alone
  * left the node processes under it running. sshd starts each session in a group of its own, so the
  * group is exactly this command and everything it started, and nothing else -- the commands of one
@@ -873,10 +875,13 @@ export const HEARTBEAT_EVERY_MS = 30_000;
  */
 export function wrapCommandToDieWithConnection(command: string): string {
   return shBlock(
+    PROCESS_TREE_SH,
     'exec 3<&0',
     `${command} < /dev/null &`,
     '_bica_cmd=$!',
-    '( until cat <&3 > /dev/null 2>&1; do sleep 1; done; kill -TERM 0 2>/dev/null ) &',
+    // Collected before the group is signalled, and `trap` first so that this subshell, which is in the
+    // group, outlives its own TERM long enough to signal what had left it (`timeout`, `setsid`).
+    "( until cat <&3 > /dev/null 2>&1; do sleep 1; done; trap '' TERM; _bica_found=$(_bica_descendants \"$$\"); kill -TERM 0 2>/dev/null; [ -n \"$_bica_found\" ] && kill -TERM $_bica_found 2>/dev/null ) &",
     '_bica_watch=$!',
     'wait "$_bica_cmd"',
     '_bica_ec=$?',
