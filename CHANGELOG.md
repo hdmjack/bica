@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.9.3 — 2026-11-01
 
 ### Fixed
 - **A signal sent to `bica` now reaches the run.** The `bica` command is a small launcher that starts
