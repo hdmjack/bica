@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.9.4 — 2026-11-02
 
 ### Fixed
 - **A command whose connection drops is now ended on the remote, under the shell it really runs in.**
