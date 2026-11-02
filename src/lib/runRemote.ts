@@ -15,6 +15,13 @@ import {
 } from './connectionLoss';
 import { resolveActiveRemoteShellPlugins } from '../resolveActivePlugins';
 import { dim } from '../terminalStyle';
+import {
+  buildCommandEndScript,
+  commandPidFileExpr,
+  commandTagFor,
+  parseCommandEndOutcome,
+} from './remoteCommandEnd';
+import type { CommandEndOutcome } from './remoteCommandEnd';
 import { PROCESS_TREE_SH } from './remoteProcessTree';
 import { sharedSshOptions } from './sshShare';
 import type { RemoteShellPlugin } from '../plugins/types';
@@ -310,6 +317,8 @@ export function runRemoteScriptOverStdin(
      * only exists on PATH once the login shell has activated it.
      */
     login?: boolean;
+    /** Give up on the remote after this long, connecting included. A failure then has a non-zero status. */
+    timeoutSeconds?: number;
   },
 ): { status: number; stdout: string; stderr: string } {
   const login = options?.login === true;
@@ -323,12 +332,26 @@ export function runRemoteScriptOverStdin(
   // `sh` is the one shell POSIX guarantees.
   const shell = login ? loginShellFromEnv() : 'sh';
   const runner = login ? [shell, '-l', '-s'] : [shell, '-s'];
-  const result = spawnSync('ssh', [...sharedSshOptions(), '-T', sshHost, ...runner], {
-    input: script,
-    encoding: 'utf8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    shell: false,
-  });
+  const timeoutSeconds = options?.timeoutSeconds;
+  const result = spawnSync(
+    'ssh',
+    [
+      ...sharedSshOptions(),
+      ...(timeoutSeconds === undefined
+        ? []
+        : ['-o', `ConnectTimeout=${String(timeoutSeconds)}`]),
+      '-T',
+      sshHost,
+      ...runner,
+    ],
+    {
+      input: script,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
+      ...(timeoutSeconds === undefined ? {} : { timeout: timeoutSeconds * 1000 }),
+    },
+  );
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? '',
@@ -702,6 +725,11 @@ export function buildRemoteRunScript(options: {
   claimPathExpr?: string;
   /** Whether to append this command's exit code to the claim. See the option of the same name. */
   recordExitCode?: boolean;
+  /**
+   * Names the file this command keeps its process group's pid in, beside the claim, so the client can
+   * end this command alone if its connection is lost. See remoteCommandEnd.ts.
+   */
+  commandTag?: string;
   /** End the command when the client's heartbeat stops. See {@link HEARTBEAT_STALE_MINUTES}. */
   heartbeat?: boolean;
   /** Shorter intervals for tests; production uses the constants below. */
@@ -725,6 +753,11 @@ export function buildRemoteRunScript(options: {
         `_bica_pre=$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)`,
         `if [ "$_bica_pre" = ${q} ]; then`,
         `  printf ' rpid=%s' "$$" >> ${claimPathExpr} 2>/dev/null || true`,
+        ...(options.commandTag === undefined
+          ? []
+          : [
+              `  printf '%s' "$$" > ${commandPidFileExpr(claimPathExpr, options.commandTag)} 2>/dev/null || true`,
+            ]),
         'fi',
       );
   const verify = !leased
@@ -778,7 +811,7 @@ export function buildRemoteRunScript(options: {
         '        _bica_end_tree "$$" 2>/dev/null',
         '        sleep 2',
         `        if [ "$(cut -d' ' -f1 ${claimPathExpr} 2>/dev/null)" = ${q} ]; then`,
-        `          rm -f ${claimPathExpr} ${claimPathExpr}.cmd ${beat} ${ref}`,
+        `          rm -f ${claimPathExpr} ${claimPathExpr}.cmd ${claimPathExpr}.pid.* ${beat} ${ref}`,
         '        fi',
         `        rm -f ${ref}`,
         '        exit 0',
@@ -881,7 +914,7 @@ export function wrapCommandToDieWithConnection(command: string): string {
     '_bica_cmd=$!',
     // Collected before the group is signalled, and `trap` first so that this subshell, which is in the
     // group, outlives its own TERM long enough to signal what had left it (`timeout`, `setsid`).
-    "( until cat <&3 > /dev/null 2>&1; do sleep 1; done; trap '' TERM; _bica_found=$(_bica_descendants \"$$\"); kill -TERM 0 2>/dev/null; [ -n \"$_bica_found\" ] && kill -TERM $_bica_found 2>/dev/null ) &",
+    "( until cat <&3 > /dev/null 2>&1; do sleep 1; done; trap '' TERM; _bica_found=$(_bica_descendants \"$$\"); kill -TERM 0 2>/dev/null; _bica_term_each \"$_bica_found\" ) &",
     '_bica_watch=$!',
     'wait "$_bica_cmd"',
     '_bica_ec=$?',
@@ -1022,6 +1055,7 @@ export function buildRemoteCommandScript(options: {
   assertRunId?: string;
   claimPathExpr?: string;
   recordExitCode?: boolean;
+  commandTag?: string;
   heartbeat?: boolean;
 }): string {
   const { remoteWorkspacePath, command, repoRoot } = options;
@@ -1053,6 +1087,7 @@ export function buildRemoteCommandScript(options: {
     runId: options.assertRunId,
     claimPathExpr: options.claimPathExpr,
     recordExitCode: options.recordExitCode ?? true,
+    commandTag: options.commandTag,
     heartbeat: options.heartbeat,
   });
 }
@@ -1112,6 +1147,7 @@ export async function runRemoteCommand(
     assertRunId: options?.assertRunId,
     claimPathExpr: options?.claimPathExpr,
     recordExitCode: options?.recordExitCode,
+    commandTag: commandTagFor(options?.label),
     // An attached run's client is refreshing the heartbeat; see startHeartbeat in remoteClaim.ts.
     heartbeat: options?.assertRunId !== undefined,
   });
@@ -1179,11 +1215,57 @@ export async function runRemoteCommand(
         resolve(closed ?? 1);
       });
     });
-    return reportSshFailure({ code, sshHost, label, diagnostics: diagnostics.read() });
+    const runId = options?.assertRunId;
+    const claim = options?.claimPathExpr;
+    return reportSshFailure({
+      code,
+      sshHost,
+      label,
+      diagnostics: diagnostics.read(),
+      // Only for a command that holds a lease it can name. Also when the command has a watchdog of its own: that is the first way it ends, and this is the one that does not depend on it.
+      endCommand:
+        runId === undefined || claim === undefined
+          ? undefined
+          : () =>
+              endCommandOnRemote({
+                sshHost,
+                claimPathExpr: claim,
+                runId,
+                tag: commandTagFor(label),
+              }),
+    });
   } finally {
     liveRemotes.delete(child);
     diagnostics.remove();
   }
+}
+
+/** How long to wait for the remote when asking it to end a command whose connection was lost. */
+const END_COMMAND_TIMEOUT_SECONDS = 15;
+
+/**
+ * End one command's processes on the remote, over a connection of their own.
+ *
+ * Its connection is gone, so nothing is reading its output and nothing it does can become a result;
+ * leaving it running only loads a machine other people share. Only that command: the others of a run
+ * have connections of their own and may still be reporting.
+ */
+function endCommandOnRemote(options: {
+  sshHost: string;
+  claimPathExpr: string;
+  runId: string;
+  tag: string;
+}): CommandEndOutcome {
+  const result = runRemoteScriptOverStdin(
+    options.sshHost,
+    buildCommandEndScript(
+      options.claimPathExpr,
+      shellSingleQuoteRemotePathForSh(options.runId),
+      options.tag,
+    ),
+    { timeoutSeconds: END_COMMAND_TIMEOUT_SECONDS },
+  );
+  return parseCommandEndOutcome(result.status, result.stdout);
 }
 
 /**
@@ -1202,6 +1284,8 @@ function reportSshFailure(options: {
   sshHost: string;
   label: string | undefined;
   diagnostics: string;
+  /** Ends this command's processes on the remote; called when the connection to it is lost. */
+  endCommand?: () => CommandEndOutcome;
 }): number {
   const { code, diagnostics } = options;
   if (code === 0) {
@@ -1216,6 +1300,7 @@ function reportSshFailure(options: {
       sshHost: options.sshHost,
       label: options.label,
       diagnostics,
+      outcome: options.endCommand?.(),
     });
     for (const line of message.split('\n')) {
       process.stderr.write(`${chalk.bold.yellow('[bica]')} ${line}\n`);

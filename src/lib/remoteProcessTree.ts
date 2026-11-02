@@ -13,7 +13,10 @@
  * report one.
  *
  * Plain `sh`: it is sent over ssh to whatever shell the remote has, and runs under both `sh` and the
- * login shell the command itself uses.
+ * login shell the command itself uses. That is `zsh` by default, which does not split an unquoted
+ * variable into words the way `sh` does -- `kill -TERM $pids` was one invalid pid there, so the
+ * watchdog that runs under the login shell ended nothing while the same code under `sh` worked. The
+ * list is therefore split by a command substitution, which every shell splits.
  */
 export const PROCESS_TREE_SH = [
   // Every descendant of pid $1, one per line, not including $1.
@@ -31,13 +34,20 @@ export const PROCESS_TREE_SH = [
   '      }',
   '    }\'',
   '}',
+  // TERM each pid in the newline-separated list $1. One at a time, from a command substitution, because
+  // an unquoted variable is not split into words by zsh; see above.
+  '_bica_term_each() {',
+  '  for _bica_p in $(printf \'%s\\n\' "$1"); do',
+  '    kill -TERM "$_bica_p" 2>/dev/null',
+  '  done',
+  '}',
   // TERM the process group led by $1, as before, then whatever left it. Returns the group's result,
   // which is how a caller tells "signalled" from "already gone".
   '_bica_end_tree() {',
   '  _bica_found=$(_bica_descendants "$1")',
   '  kill -TERM -"$1" 2>/dev/null',
   '  _bica_rc=$?',
-  '  [ -n "$_bica_found" ] && kill -TERM $_bica_found 2>/dev/null',
+  '  _bica_term_each "$_bica_found"',
   '  return $_bica_rc',
   '}',
   '',

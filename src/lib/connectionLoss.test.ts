@@ -6,6 +6,7 @@ import {
   classifySshFailure,
   describeConnectionLoss,
   describeKilledBySignal,
+  describePartialWriteBack,
   openSshDiagnosticsLog,
   sshDiagnosticSummary,
 } from './connectionLoss';
@@ -252,3 +253,35 @@ describe('a remote command killed by a signal', () => {
   });
 });
 
+
+describe('describeConnectionLoss after ending the command', () => {
+  const base = { sshHost: 'mini', label: 'pnpm-test-ci-changed', diagnostics: 'Killed by signal 15.' };
+
+  it('says the processes were ended rather than leaving it unknown whether they run', () => {
+    const message = describeConnectionLoss({ ...base, outcome: 'ended' });
+    expect(message).toContain('ended its processes on mini');
+    expect(message).not.toContain('still running on mini is unknown');
+    expect(message).toContain('partial');
+    expect(message).toContain('not a verdict');
+  });
+
+  it('says so when nothing was left to end', () => {
+    expect(describeConnectionLoss({ ...base, outcome: 'gone' })).toContain('Nothing of it was still running');
+  });
+
+  it('names bica cancel when the remote could not be reached', () => {
+    const message = describeConnectionLoss({ ...base, outcome: 'unreachable' });
+    expect(message).toContain('could not reach mini');
+    expect(message).toContain('bica cancel');
+  });
+
+  it('keeps the old wording when no attempt was made', () => {
+    expect(describeConnectionLoss(base)).toContain('is unknown');
+  });
+});
+
+describe('describePartialWriteBack', () => {
+  it('names what the copied files might be', () => {
+    expect(describePartialWriteBack()).toContain('partial output');
+  });
+});

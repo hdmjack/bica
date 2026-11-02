@@ -3,6 +3,33 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A command whose connection drops is now ended on the remote, under the shell it really runs in.**
+  Reported against 0.9.3: one command of a six-command `--also` run lost its ssh to a SIGTERM, and its
+  `timeout`-wrapped `pnpm test:ci:changed` went on running on the shared mini (twenty processes, load
+  27 on 10 cores). 0.9.2's teardown walked the run's descendants and signalled them with
+  `kill -TERM $pids`, which `sh` splits into one argument per pid and `zsh`, the login shell bica runs
+  commands under, does not: under `zsh` it was one invalid pid, so the watchdog that ends a command
+  when its connection closes signalled nothing beyond its own group. 0.9.2's tests and its check on the
+  mini ran that code under `sh` (and a single command, whose cleanup goes through `sh` too), which is
+  why they passed. The list is now split by a command substitution, and the tests run the watchdog
+  and the teardown under both shells. Checked against the mini: a six-line `--also` run with
+  `timeout 150 sleep` killed at its ssh left the processes running on 0.9.3 and left nothing here.
+- **A dropped connection also ends that command from the client.** The remote watchdog is the first
+  line; as a second, bica now asks the remote to end the dropped command's processes over a connection
+  of its own (15 s limit), guarded on the run id, and only that command: each command records its
+  process group beside the lease in `<claim>.pid.<label>`, so the other `--also` commands are left
+  alone. The message then says what happened (ended, nothing left, or could not reach the host and
+  `bica cancel` ends it) in place of "unknown whether it is still running". Files named
+  `<claim>.pid.*` are removed with the lease; an older bica leaves them for the next claim to
+  overwrite, harmlessly.
+- **`--write-back` after a lost connection says some files may be partial.** The files come from the
+  whole workspace, so a half-written coverage folder from the dropped command arrives with the finished
+  commands' output. It cannot be told apart, so the run now says so rather than letting it look like a
+  result.
+
 ## 0.9.3 — 2026-11-01
 
 ### Fixed

@@ -275,7 +275,7 @@ export function buildClaimReleaseScript(
   runId: string,
 ): string {
   const q = shellSingleQuoteRemotePathForSh(runId);
-  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr} ${claimExpr}.cmd ${claimExpr}.beat ${claimExpr}.beat.*\nexit 0\n`;
+  return `[ "$(cut -d' ' -f1 ${claimExpr} 2>/dev/null)" = ${q} ] && rm -f ${claimExpr} ${claimExpr}.cmd ${claimExpr}.pid.* ${claimExpr}.beat ${claimExpr}.beat.*\nexit 0\n`;
 }
 
 /**
@@ -319,7 +319,7 @@ export function buildClaimCancelScript(
     'else\n' +
     '  echo BICA_NEVER_RAN\n' +
     'fi\n' +
-    `rm -f ${claimExpr} ${claimExpr}.cmd ${claimExpr}.beat ${claimExpr}.beat.*\n` +
+    `rm -f ${claimExpr} ${claimExpr}.cmd ${claimExpr}.pid.* ${claimExpr}.beat ${claimExpr}.beat.*\n` +
     'echo BICA_CLEARED\n'
   );
 }

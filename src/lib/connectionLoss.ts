@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import type { CommandEndOutcome } from './remoteCommandEnd';
+
 /**
  * Telling a lost connection apart from a failed command.
  *
@@ -250,13 +252,46 @@ export function describeConnectionLoss(options: {
   sshHost: string;
   label?: string;
   diagnostics: string;
+  /** What came of ending the command's processes on the remote, when that was tried. */
+  outcome?: CommandEndOutcome;
 }): string {
   const who = options.label === undefined ? '' : `${options.label}: `;
   const said = sshDiagnosticSummary(options.diagnostics);
   const quoted = said === undefined ? '' : ` ssh said: ${said}`;
+  const head = `${who}the connection to ${options.sshHost} dropped part-way through.${quoted}\n`;
+  const verdict = `Exit ${String(CONNECTION_LOST_EXIT)} is not a verdict on your code. Re-run it.`;
+  if (options.outcome === 'ended') {
+    return (
+      `${head}bica ended its processes on ${options.sshHost}, so nothing of it is left running there. ` +
+      `Whether it would have passed is unknown, and any files it wrote are partial. ${verdict}`
+    );
+  }
+  if (options.outcome === 'gone') {
+    return (
+      `${head}Nothing of it was still running on ${options.sshHost}, but its result never came back, ` +
+      `so whether it passed is unknown. ${verdict}`
+    );
+  }
+  const unreachable =
+    options.outcome === 'unreachable'
+      ? ` bica could not reach ${options.sshHost} to end it; \`bica cancel\` ends whatever is left.`
+      : '';
   return (
-    `${who}the connection to ${options.sshHost} dropped part-way through.${quoted}\n` +
-    `Whether the command passed, failed, or is still running on ${options.sshHost} is unknown, ` +
-    `so exit ${String(CONNECTION_LOST_EXIT)} is not a verdict on your code. Re-run it.`
+    `${head}Whether the command passed, failed, or is still running on ${options.sshHost} is unknown, ` +
+    `so exit ${String(CONNECTION_LOST_EXIT)} is not a verdict on your code.${unreachable} Re-run it.`
+  );
+}
+
+/**
+ * What to say about files copied home after a run in which a command's connection was lost.
+ *
+ * The files come from the workspace as a whole, so those the lost command had written so far arrive
+ * with the ones the other commands finished writing, and nothing in them says which are which. A
+ * half-written coverage folder looks like a result unless it is named as what it might be.
+ */
+export function describePartialWriteBack(): string {
+  return (
+    `A command's connection was lost, so some of the files above may be partial output of it ` +
+    `rather than a result. Re-run before trusting anything that command was meant to write.`
   );
 }

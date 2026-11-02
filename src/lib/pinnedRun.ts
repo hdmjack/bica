@@ -18,7 +18,7 @@ import {
   describeSelfAsOwner,
 } from './remoteClaim';
 import type { ClaimOwner, ClaimResult } from './remoteClaim';
-import { CONNECTION_LOST_EXIT } from './connectionLoss';
+import { CONNECTION_LOST_EXIT, describePartialWriteBack } from './connectionLoss';
 import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
@@ -573,6 +573,9 @@ export async function runPinned(options: {
       run: runRemoteScriptOverStdin,
     });
     reportWriteBack(outcome, options.writeBackOptIn === true);
+    if (code === CONNECTION_LOST_EXIT && options.writeBackOptIn === true) {
+      process.stderr.write(`${warn('[bica]')} ${describePartialWriteBack()}\n`);
+    }
   }
 
   if (returnFlow && prep.returnFlowPaths.length > 0) {

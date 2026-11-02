@@ -67,6 +67,34 @@ describe('ending a process tree', () => {
     expect(alive(child)).toBe(true);
   });
 
+  // The login shell is `zsh`, and it does not split an unquoted variable into words: 0.9.2 and 0.9.3
+  // ended `timeout`'s child under `sh` in their tests and not under the shell that runs the command.
+  for (const shell of ['sh', 'zsh']) {
+    it(`ends several escaped children when the script runs under ${shell}`, async () => {
+      // Two, because one pid has no list to split: zsh handled that case all along.
+      const leader = spawn('sh', ['-c', `set -m; ${marker} & ${marker} & wait`], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      leader.unref();
+      const pid = leader.pid as number;
+      let children: number[] = [];
+      for (let i = 0; i < 40 && children.length < 2; i++) {
+        await sleep(50);
+        const found = spawnSync('pgrep', ['-P', String(pid)], { encoding: 'utf8' }).stdout.trim();
+        children = found === '' ? [] : found.split('\n').map(Number);
+      }
+      expect(children).toHaveLength(2);
+      const ended = spawnSync(shell, ['-c', `${PROCESS_TREE_SH}_bica_end_tree ${String(pid)}`]);
+      expect(ended.status).toBe(0);
+      await sleep(300);
+      expect(alive(pid)).toBe(false);
+      for (const child of children) {
+        expect(alive(child)).toBe(false);
+      }
+    });
+  }
+
   it('reports the group as gone when it is, so a caller can tell', () => {
     const r = spawnSync('sh', ['-c', `${PROCESS_TREE_SH}_bica_end_tree 2147483000`]);
     expect(r.status).not.toBe(0);
