@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.10.0 — 2026-11-03
 
 ### Added
 - **The remote now limits how many runs execute at once, and the rest wait their turn.** Raised after
