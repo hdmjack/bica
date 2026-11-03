@@ -32,6 +32,7 @@ import { readLocalBicaSettings } from './localBicaSettings';
 import { cmdLogs, cmdRuns, cmdWait } from './lib/detachedCommands';
 import { reportArtifactPull } from './lib/reportArtifacts';
 import { ARTIFACTS_NOT_HOME_EXIT, exitAfterArtifactPull } from './lib/artifacts';
+import { describeEnvNotForwarded } from './lib/envPassthrough';
 import { seedRemoteWorkspace } from './lib/seedWorkspace';
 import {
   SYNC_NOT_READY_EXIT,
@@ -173,6 +174,10 @@ Remote execution
                               every token after it becomes argv on the remote (POSIX-quoted, no
                               shell injection). Do not pass local-only options after "run" unless you
                               intend the remote to see them. Example: bica run pnpm test:run
+                              Environment: variables set in your shell (FOO=bar bica run ...) are
+                              NOT sent to the remote command. Name the ones it needs under 'env:' in
+                              bica.yml, for example 'env: [E2E_TARGET]'; a named variable that is not
+                              set locally stays unset remotely.
   run --detach <command>      Start it on the remote and return once it is running, printing a run
                               id. For work that outlasts the caller: an agent's tool call times out
                               after ten minutes and a 50-minute build cannot be started from one at
@@ -1486,6 +1491,10 @@ async function cmdRun(options: {
     process.removeListener('SIGHUP', onSighup);
   }
 
+  const envNotForwarded = describeEnvNotForwarded(prep.env, code);
+  if (envNotForwarded !== undefined) {
+    process.stderr.write(`${dim('[bica]')} ${dim(envNotForwarded)}\n`);
+  }
   process.stderr.write(
     code === ARTIFACTS_NOT_HOME_EXIT
       ? `${warn(`[bica] remote command exited 0, but not every artifact came home, so exit ${String(code)}`)}\n`

@@ -95,3 +95,31 @@ export function describeEnvForwarding(
   }
   return parts.length === 0 ? undefined : parts.join(' ');
 }
+
+/** Exit codes that say something about the connection or the workspace, not about the command. */
+const NOT_A_VERDICT_EXITS = new Set([93, 94, 95, 96, 97, 98]);
+
+/**
+ * What to say when a run failed and nothing is declared in `env:`.
+ *
+ * A variable set in the shell for the occasion (`E2E_TARGET=preview bica run ...`) is read by bica and
+ * goes no further, and the command then runs with the defaults. That produced an error about a local
+ * backend that said nothing about the real cause. bica cannot tell which of the shell's variables were
+ * meant for the remote, so it says so once the run has failed, when somebody is looking for a reason.
+ */
+export function describeEnvNotForwarded(
+  declared: readonly string[] | undefined,
+  exitCode: number,
+): string | undefined {
+  if (
+    (declared?.length ?? 0) > 0 ||
+    exitCode === 0 ||
+    NOT_A_VERDICT_EXITS.has(exitCode)
+  ) {
+    return undefined;
+  }
+  return (
+    'Variables set in your shell are not sent to the remote command. A variable it needs has to be named ' +
+    'under `env:` in bica.yml (for example `env: [E2E_TARGET]`); if this failure depends on one, that is why.'
+  );
+}

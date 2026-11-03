@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Changed
+- **bica now says that environment variables set in the shell are not sent to the remote.** Reported
+  against 0.9.4: `E2E_PW_DEPLOYMENT=develop-preview bica run ...` never reached the command, the suite
+  fell back to a local backend, and the only symptom was `connect ECONNREFUSED 127.0.0.1:8444`. Not
+  forwarding is deliberate (copying the environment would carry credentials, `PATH` and `HOME`), and
+  `env: [NAME, ...]` in `bica.yml` has always been the way to send a variable, but only the README said
+  so. `bica run --help` now does, and a failed run in a project with no `env:` list ends with one line
+  naming it. Nothing is forwarded differently. An assignment inside the command
+  (`bica run FOO=bar env`) is still run as a program called `FOO=bar` and exits 127.
+
 ## 0.9.4 — 2026-11-02
 
 ### Fixed

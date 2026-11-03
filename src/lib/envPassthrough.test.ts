@@ -1,6 +1,11 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
-import { buildEnvForwarding, describeEnvForwarding } from './envPassthrough';
+import {
+  buildEnvForwarding,
+  describeEnvForwarding,
+  describeEnvNotForwarded,
+} from './envPassthrough';
 
 /**
  * `env:` from the feature request: "CMAKE_*, CARGO_*, RUSTFLAGS and CCACHE_DIR set locally for a
@@ -64,5 +69,44 @@ describe('describeEnvForwarding', () => {
 
   it('has nothing to say when nothing was declared', () => {
     expect(describeEnvForwarding(buildEnvForwarding([], {}))).toBeUndefined();
+  });
+});
+
+/**
+ * As reported against 0.9.4: `E2E_PW_DEPLOYMENT=... bica run ...` never reached the command, the suite
+ * fell back to a local backend, and the only symptom was `connect ECONNREFUSED 127.0.0.1:8444`.
+ */
+describe('describeEnvNotForwarded', () => {
+  it('says how to forward a variable when a run fails and nothing is declared', () => {
+    const said = describeEnvNotForwarded(undefined, 1);
+    expect(said).toContain('env:');
+    expect(said).toContain('bica.yml');
+    expect(describeEnvNotForwarded([], 1)).toBe(said);
+  });
+
+  it('stays quiet when something is declared, or the run passed', () => {
+    expect(describeEnvNotForwarded(['RUSTFLAGS'], 1)).toBeUndefined();
+    expect(describeEnvNotForwarded(undefined, 0)).toBeUndefined();
+  });
+
+  it('stays quiet when the exit says nothing about the command', () => {
+    for (const code of [93, 94, 95, 96, 97, 98]) {
+      expect(describeEnvNotForwarded(undefined, code)).toBeUndefined();
+    }
+  });
+});
+
+describe('a declared variable reaches a command run by a shell', () => {
+  it.each(['sh', 'zsh'])('under %s, and an undeclared one does not', (shell) => {
+    const f = buildEnvForwarding(['E2E_PW_DEPLOYMENT'], {
+      E2E_PW_DEPLOYMENT: 'develop-preview',
+      NOT_DECLARED_HERE: 'x',
+    });
+    const out = spawnSync(shell, ['-c', `${f.script}env`], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '' },
+    }).stdout;
+    expect(out).toContain('E2E_PW_DEPLOYMENT=develop-preview');
+    expect(out).not.toContain('NOT_DECLARED_HERE');
   });
 });
