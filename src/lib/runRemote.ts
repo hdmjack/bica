@@ -23,6 +23,8 @@ import {
 } from './remoteCommandEnd';
 import type { CommandEndOutcome } from './remoteCommandEnd';
 import { PROCESS_TREE_SH } from './remoteProcessTree';
+import { buildQueueGate, resolveQueueLimit } from './runQueue';
+import type { QueueLimit } from './runQueue';
 import { sharedSshOptions } from './sshShare';
 import type { RemoteShellPlugin } from '../plugins/types';
 
@@ -734,6 +736,12 @@ export function buildRemoteRunScript(options: {
   heartbeat?: boolean;
   /** Shorter intervals for tests; production uses the constants below. */
   heartbeatTiming?: { checkSeconds: number; staleSeconds: number };
+  /**
+   * Wait for a free slot before running the command. Only meaningful for a leased run: the slot is
+   * held under the run's id, and everything that ends a leased command ends a queued one. See
+   * runQueue.ts.
+   */
+  queueLimit?: QueueLimit;
 }): string {
   const { runId, claimPathExpr } = options;
   const leased = runId !== undefined && claimPathExpr !== undefined;
@@ -821,10 +829,22 @@ export function buildRemoteRunScript(options: {
         ') </dev/null >/dev/null 2>&1 &',
         '_bica_sup=$!',
       );
+  // After the pid is published and the heartbeat is watching, so a run waiting here can be signalled,
+  // cancelled and ended for a silent client like one that is executing; before the command, so the
+  // wait costs nothing that has already happened -- the lease is held and the files are synced.
+  const gate =
+    !leased || options.queueLimit === undefined
+      ? ''
+      : buildQueueGate({
+          runId,
+          limit: options.queueLimit,
+          claimName: claimPathExpr.slice(claimPathExpr.lastIndexOf('/') + 1),
+        });
   return (
     `${options.preamble}${options.cdExpr} || exit ${String(REMOTE_CD_FAILED_EXIT)}\n` +
     publishPid +
     supervise +
+    gate +
     `${options.command}\n` +
     shBlock('_bica_ec=$?') +
     (supervised
@@ -1057,6 +1077,7 @@ export function buildRemoteCommandScript(options: {
   recordExitCode?: boolean;
   commandTag?: string;
   heartbeat?: boolean;
+  queueLimit?: QueueLimit;
 }): string {
   const { remoteWorkspacePath, command, repoRoot } = options;
   const cd = `cd ${remotePathExprForCd(remoteWorkspacePath)}`;
@@ -1089,6 +1110,7 @@ export function buildRemoteCommandScript(options: {
     recordExitCode: options.recordExitCode ?? true,
     commandTag: options.commandTag,
     heartbeat: options.heartbeat,
+    queueLimit: options.queueLimit,
   });
 }
 
@@ -1135,9 +1157,20 @@ export async function runRemoteCommand(
      * several exit codes in it, or none. The orchestrator records one result for the run instead.
      */
     recordExitCode?: boolean;
+    /**
+     * Whether this command waits its turn. On by default for a leased command, because the limit is
+     * about load and every leased command is load; off for the steps that belong to a run already in
+     * the queue -- the install, the generated-output repair -- which would otherwise give the slot up
+     * between steps and rejoin at the back.
+     */
+    queue?: boolean;
   },
 ): Promise<number> {
   const dieWithConnection = options?.dieWithConnection === true;
+  const queueLimit =
+    options?.assertRunId === undefined || options.queue === false
+      ? null
+      : resolveQueueLimit(repoRoot);
   const remoteScript = buildRemoteCommandScript({
     remoteWorkspacePath,
     command,
@@ -1150,6 +1183,7 @@ export async function runRemoteCommand(
     commandTag: commandTagFor(options?.label),
     // An attached run's client is refreshing the heartbeat; see startHeartbeat in remoteClaim.ts.
     heartbeat: options?.assertRunId !== undefined,
+    queueLimit: queueLimit ?? undefined,
   });
   const shell = loginShellFromEnv();
   const flags = loginFlagsFromEnv();

@@ -3,6 +3,25 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Added
+- **The remote now limits how many runs execute at once, and the rest wait their turn.** Raised after
+  five checkouts ran vitest and eslint on one ten-core mini at a load of fifty: nothing was broken, but
+  runs that take seconds alone took ten minutes, and agents whose tool calls time out at ten minutes
+  read that as failure. The workspace lease is per directory and cannot see this. The limit is a third of
+  the remote's cores (at least one), first come first served, counted per run (the commands of an
+  `--also` run share a slot) and across every checkout and machine using the remote. A queued run says
+  where it stands, holds its workspace (a busy workspace is still refused with 98 at once) and has its
+  files synced already; Ctrl-C, SIGTERM, the heartbeat, `bica cancel` and `--detach` all work on it
+  as on a running one, because the wait is in the run's own script. A slot is held while the run's
+  process group exists, so a killed run or a reboot gives it back with no cleanup. `bica queue` lists
+  who is running and who is waiting. `BICA_MAX_RUNS=<n>` or `maxRuns: <n>` in `.bica/local.yml` sets
+  the limit; `0` or `off` removes it. Only the user's command waits: the install and the
+  generated-output repair do not take a slot.
+  A bica older than this neither waits nor is counted, so the limit holds for the runs that know about
+  it. The state is `~/.bica/queue` on the remote, which older versions never read.
+
 ## 0.9.5 — 2026-11-03
 
 ### Changed

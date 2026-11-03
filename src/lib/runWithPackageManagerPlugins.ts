@@ -294,6 +294,7 @@ async function repairGeneratedOutput(options: {
     {
       assertRunId: options.assertRunId,
       claimPathExpr: options.claimPathExpr,
+      queue: false,
     },
   );
   if (code !== 0) {
@@ -448,6 +449,7 @@ export async function runRemoteCommandWithPmHooks(options: {
         {
           assertRunId: options.assertRunId,
           claimPathExpr: options.claimPathExpr,
+          queue: false,
         },
       );
       if (installCode !== 0) {

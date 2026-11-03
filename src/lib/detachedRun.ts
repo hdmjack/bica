@@ -8,6 +8,7 @@ import {
   runRemoteScriptOverStdin,
   shellSingleQuoteRemotePathForSh,
 } from './runRemote';
+import { resolveQueueLimit } from './runQueue';
 
 /**
  * Runs that outlive the thing that started them.
@@ -344,6 +345,9 @@ export function launchDetachedRun(options: {
     assertRunId: options.runId,
     claimPathExpr: options.claimPathExpr,
     recordExitCode: true,
+    // A detached run waits its turn like any other, and does it with no client at all: the wait is in
+    // the script, so `bica logs` shows the queue messages and `bica cancel` ends it.
+    queueLimit: resolveQueueLimit(options.repoRoot) ?? undefined,
   });
   const outcome = startDetachedRun({
     sshHost: options.sshHost,

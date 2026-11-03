@@ -19,6 +19,12 @@ export interface LocalBicaSettings {
    * because it is a fact about this machine's layout, not about the repository.
    */
   buildDir?: string;
+  /**
+   * How many runs may execute on the remote at once: a number, `auto` or `off`. Kept here because
+   * the limit is about the machine the person uses, not the repository; `BICA_MAX_RUNS` overrides it.
+   * Read as text so the parser that handles the environment variable handles this too. See runQueue.ts.
+   */
+  maxRuns?: string;
 }
 
 export function readLocalBicaSettings(repoRoot: string): LocalBicaSettings {
@@ -38,7 +44,12 @@ export function readLocalBicaSettings(repoRoot: string): LocalBicaSettings {
       typeof doc.remotePath === 'string' ? doc.remotePath.trim() : undefined;
     const buildDir =
       typeof doc.buildDir === 'string' ? doc.buildDir.trim() : undefined;
+    const maxRuns =
+      typeof doc.maxRuns === 'string' || typeof doc.maxRuns === 'number'
+        ? String(doc.maxRuns).trim()
+        : undefined;
     return {
+      maxRuns: maxRuns !== undefined && maxRuns.length > 0 ? maxRuns : undefined,
       buildDir:
         buildDir !== undefined && buildDir.length > 0 ? buildDir : undefined,
       sshHost:
@@ -69,6 +80,9 @@ export function writeLocalBicaSettings(
   }
   if (settings.buildDir !== undefined && settings.buildDir.trim() !== '') {
     payload.buildDir = settings.buildDir.trim();
+  }
+  if (settings.maxRuns !== undefined && settings.maxRuns.trim() !== '') {
+    payload.maxRuns = settings.maxRuns.trim();
   }
   fs.writeFileSync(abs, `${YAML.stringify(payload, { indent: 2 })}\n`, 'utf8');
 }

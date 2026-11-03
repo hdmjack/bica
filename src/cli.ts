@@ -119,6 +119,12 @@ import {
   runRemoteScriptOverStdin,
   terminateLiveRemoteCommand,
 } from './lib/runRemote';
+import {
+  buildQueueStatusScript,
+  describeQueue,
+  parseQueueStatus,
+  resolveQueueLimit,
+} from './lib/runQueue';
 import { runRemoteCommandWithPmHooks } from './lib/runWithPackageManagerPlugins';
 import type { DetachOutcomeSink } from './lib/runWithPackageManagerPlugins';
 import { dim, remoteExitStatusLine, syncRemoteTarget, warn } from './terminalStyle';
@@ -162,6 +168,7 @@ const COMMANDS_NEEDING_BICA_SPEC = new Set([
   'run',
   'tunnel',
   'cancel',
+  'queue',
 ]);
 
 function printHelp(): void {
@@ -194,6 +201,16 @@ Remote execution
                               honoured, so every later run is refused until the orphan finishes.
                               Refuses when the holder's client is still alive, or when it belongs to
                               another machine; --force overrides both.
+  queue                       Who is running on the remote and who is waiting. The remote runs only
+                              as many runs at once as it has room for (a third of its cores, at least
+                              one), and the rest wait their turn, first come first served, with a
+                              line saying where they are. Counted per run, so the commands of one
+                              --also run share a slot; counted across every checkout and every
+                              machine that uses the remote, which is what the workspace lease cannot
+                              see. Change the limit with BICA_MAX_RUNS=<n> or 'maxRuns: <n>' in
+                              .bica/local.yml; 0 or 'off' removes it. A run that is queued holds
+                              its workspace and has its files synced already; Ctrl-C, a timeout,
+                              'bica cancel' and --detach all work on it as on one that is running.
 
 Running several commands at once
   Separate them with --also. They run concurrently in one remote workspace, against one copy of the
@@ -873,6 +890,22 @@ async function cmdTunnel(
  * knowable from the claim, so they refuse and say what to do instead. `--force` is for when the caller
  * means it.
  */
+async function cmdQueue(): Promise<void> {
+  await ensureRemoteSshHostFromEnvOrPrompt();
+  const repoRoot = getRepoRoot();
+  const { sshHost } = loadRemoteEnvConfig(repoRoot);
+  const r = runRemoteScriptOverStdin(sshHost, buildQueueStatusScript());
+  if (r.status !== 0) {
+    die(
+      `Could not read the queue on ${sshHost} (ssh exit ${String(r.status)}). ` +
+        '`bica doctor` says what is wrong with the connection.',
+    );
+  }
+  process.stdout.write(
+    `${describeQueue(parseQueueStatus(r.stdout), resolveQueueLimit(repoRoot))}\n`,
+  );
+}
+
 async function cmdCancel(options: { force: boolean }): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
@@ -1596,6 +1629,12 @@ async function main(): Promise<void> {
         await cmdCancel({ force });
         break;
       }
+      case 'queue':
+        if (tail.length > 0) {
+          die('usage: bica queue');
+        }
+        await cmdQueue();
+        break;
       case 'run':
         await cmdRun({
           pm,

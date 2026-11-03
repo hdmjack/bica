@@ -866,6 +866,54 @@ clearing the claim out from under it.
 and a pattern matching `bica.cjs run` or `cli.ts run` leaves the `ssh` — and so the remote command —
 running. `bica cancel` or a plain `SIGTERM` to the client is the way; a pattern-matched kill is not.
 
+### Too many runs at once: the queue
+
+The lease is per directory, and says nothing about the machine. Seven checkouts have seven leases, so
+seven runs start together, and each one is a test runner that sizes itself to every core. Nothing is
+wrong — every run is live and progressing — but a run that takes seconds alone takes ten minutes at a
+load of fifty, and a caller whose tool call times out at ten minutes reads that as a failure.
+
+So the remote runs only **as many runs at once as it has room for**, and the rest wait their turn, first
+come first served:
+
+```
+[bica] Queued: 3 of 3 run slots busy, 1 ahead of this run (waited 42s). 'bica queue' lists them.
+[bica] Slot free after 118s; starting.
+```
+
+```
+$ bica queue
+Executing: 3 (3 allowed)
+  • run 8431  code_float-javascript-6  4m  pnpm validate
+  • run 9120  code_float-javascript-2  2m  pnpm test:run common/src
+  • run 9377  code_float-javascript    41s  pnpm typecheck
+Waiting: 1
+  1. run 9402  code_float-javascript-4  12s  pnpm lint
+```
+
+- **The limit is a third of the remote's cores, at least one** (3 on a ten-core mini). Set your own with
+  `BICA_MAX_RUNS=<n>` or `maxRuns: <n>` in `.bica/local.yml`; `0` or `off` removes it. The
+  environment wins. It is counted across every checkout and every machine that uses the remote, because
+  that is where the load is.
+- **A run is one slot, however many commands it has.** The commands of an `--also` run share it. Charging
+  each would let a single run take a three-slot limit whole.
+- **A queued run is an ordinary run that has not started its command yet.** It holds its workspace —
+  a second run against that directory still meets 98 at once, not after a wait — and its files are
+  already synced, so nothing is lost by waiting. Ctrl-C, `SIGTERM`, the heartbeat and `bica cancel` end
+  it as they end one that is executing, and `--detach` queues without any client at all.
+- **Only your command waits.** The install and the generated-output repair belong to the same run and
+  are not counted; they would give the slot up between steps and rejoin at the back.
+- **A slot is held while the run's process group exists**, so a run killed with `kill -9`, a dropped
+  connection or a reboot gives its slot back with nothing having cleaned up. The state is a directory,
+  `~/.bica/queue`, on the remote.
+- **A bica older than this one neither waits nor is counted.** Until everyone using a remote has updated,
+  its runs still arrive unqueued; the limit holds for the runs that know about it.
+- The queue never fails a run. If it cannot keep its own books (a directory it cannot create) the command
+  goes ahead, with a line saying so.
+
+A caller that times out should use `bica run --detach` for anything that may wait: a long queue is the
+same problem as a long build.
+
 ### Exit codes
 
 None of these are verdicts on your code:
@@ -1062,6 +1110,7 @@ taken over, with a line saying so, because otherwise every hard kill would need 
 | `BICA_LOGIN_SHELL` | Remote shell for non-interactive commands (default `zsh`) |
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
 | `BICA_SSH_SHARE` | `0` = give every short ssh call and rsync its own connection, as before. By default they share one connection per host, kept for 60 s after the last use, in a folder under `/tmp` only you can read. The command's own connection is never shared |
+| `BICA_MAX_RUNS` | How many runs may execute on the remote at once: a number, `auto` (a third of its cores, at least one; the default) or `off` / `0`. See "Too many runs at once" |
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
 | `BICA_TUNNEL_DEAD_AFTER` | Seconds a tunnel's forward may go unanswered before ssh gives up (default `60`). Raise it on a link that stalls legitimately |
 | `BICA_SYNC_FLUSH` | `1` = before `bica run`, run `mutagen sync flush` on the primary session so the **remote** finishes catching up to **local** (slower; use if you hit brief sync lag) |
