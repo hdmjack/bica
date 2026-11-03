@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.9.5 — 2026-11-03
 
 ### Changed
 - **bica now says that environment variables set in the shell are not sent to the remote.** Reported
