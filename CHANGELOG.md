@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.10.1 — 2026-11-05
 
 ### Changed
 - **A run ended by SIGTERM or SIGHUP now says what it can about where the signal came from.** Raised
