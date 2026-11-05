@@ -5,6 +5,17 @@ entries note where a change affects what another version sees.
 
 ## Unreleased
 
+### Changed
+- **A run ended by SIGTERM or SIGHUP now says what it can about where the signal came from.** Raised
+  against 0.10.0: two `bica run pnpm test:ci:changed` runs, started in the background from an agent's
+  shell, ended part-way through with "SIGTERM received" and exit 144, no test failing, and nothing to say
+  who had sent it. Node does not expose a signal's sender, so bica still cannot name one and does not
+  guess. It now prints how long the run had been going, the chain of processes that started it (nearest
+  first, bica's own launcher layers left out), whether that parent had already gone, and that exit 143 /
+  129 is a stop rather than a test result. The only thing in bica that sends a run SIGTERM is
+  `bica cancel --force`, and the message says so. The 144 in the report is the caller's, not bica's: bica
+  exits 143.
+
 ### Fixed
 - **A run killed by SIGTERM or SIGHUP no longer stands down its backstop when the remote cancel did not
   go through.** Raised against 0.10.0: a multi-command run was sent SIGTERM, printed "ending the remote

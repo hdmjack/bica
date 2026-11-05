@@ -119,6 +119,7 @@ import {
   runRemoteScriptOverStdin,
   terminateLiveRemoteCommand,
 } from './lib/runRemote';
+import { ancestorsOf, describeSignal, isOrphaned, readProcessTable } from './lib/signalOrigin';
 import { tearDownRunOnSignal } from './lib/signalTeardown';
 import {
   buildQueueStatusScript,
@@ -1380,6 +1381,7 @@ async function cmdRun(options: {
   // includes the ssh, so the remote already dies with it — that case was never the broken one, and
   // the live-session path has its own SIGINT handling to unwind mutagen.
   let tearingDown = false;
+  const runStartedAt = Date.now();
   const onFatalSignal = (signal: NodeJS.Signals, exitCode: number) => {
     if (tearingDown) {
       return;
@@ -1387,6 +1389,19 @@ async function cmdRun(options: {
     tearingDown = true;
     process.stderr.write(
       `\n${warn('[bica]')} ${signal} received — ending the remote command and releasing the workspace.\n`,
+    );
+    // Read before the teardown, while the processes that might have sent it are still there to be
+    // listed. It cannot name the sender; see signalOrigin.ts.
+    const table = readProcessTable();
+    process.stderr.write(
+      `${dim(
+        describeSignal({
+          signal,
+          ranForSeconds: (Date.now() - runStartedAt) / 1000,
+          ancestors: table === undefined ? [] : ancestorsOf(table, process.pid),
+          orphaned: table !== undefined && isOrphaned(table, process.pid),
+        }),
+      )}\n`,
     );
     // Remote first, then the local ssh: see signalTeardown.ts. The watchdog stays armed unless the
     // remote confirmed the claim is cleared, because the signal that reached us often reached the
