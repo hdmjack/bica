@@ -119,6 +119,7 @@ import {
   runRemoteScriptOverStdin,
   terminateLiveRemoteCommand,
 } from './lib/runRemote';
+import { tearDownRunOnSignal } from './lib/signalTeardown';
 import {
   buildQueueStatusScript,
   describeQueue,
@@ -1387,13 +1388,28 @@ async function cmdRun(options: {
     process.stderr.write(
       `\n${warn('[bica]')} ${signal} received — ending the remote command and releasing the workspace.\n`,
     );
-    // Remote first: this signals the process group and removes the claim in one round-trip, so the
-    // workspace is never advertised as free while the command is still winding down. Killing the local
-    // ssh afterwards is what stops us waiting on a connection we no longer want.
-    remoteCancelClaim(baseRemote.sshHost, baseRemote.remoteWorkspacePath, owner.runId);
-    runWatchdog?.disarm();
-    heartbeat.stop();
-    terminateLiveRemoteCommand();
+    // Remote first, then the local ssh: see signalTeardown.ts. The watchdog stays armed unless the
+    // remote confirmed the claim is cleared, because the signal that reached us often reached the
+    // cancel's own ssh too.
+    const { confirmed } = tearDownRunOnSignal({
+      cancelClaim: () =>
+        remoteCancelClaim(baseRemote.sshHost, baseRemote.remoteWorkspacePath, owner.runId),
+      disarmWatchdog: () => {
+        runWatchdog?.disarm();
+      },
+      stopHeartbeat: () => {
+        heartbeat.stop();
+      },
+      terminateLocalConnections: () => {
+        terminateLiveRemoteCommand();
+      },
+    });
+    if (!confirmed && runWatchdog !== undefined) {
+      process.stderr.write(
+        `${warn('[bica]')} The remote did not confirm it had ended the command, so bica is finishing the job in the ` +
+          'background after exit. Until it does, a later run is refused (98); `bica cancel` ends it now.\n',
+      );
+    }
     process.removeListener('exit', release);
     process.exit(exitCode);
   };

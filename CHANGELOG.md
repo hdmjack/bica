@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A run killed by SIGTERM or SIGHUP no longer stands down its backstop when the remote cancel did not
+  go through.** Raised against 0.10.0: a multi-command run was sent SIGTERM, printed "ending the remote
+  command and releasing the workspace" and exited, and for more than eight minutes every later run was
+  refused (98) because the remote command and its lease were still there. The run's cancel is one ssh
+  round trip, and the signal that stopped the run usually reaches that ssh too, so the cancel failed; the
+  background watcher that exists to cancel from its own connection had been disarmed regardless. It is
+  now disarmed only once the remote confirms the claim is cleared, gone, or another run's, and the run
+  says when it is leaving the job to the watcher. This is inferred from the code and the report; the
+  incident's own ssh was not captured, so a real run that still leaves the lease behind should be
+  reported with `BICA_DEBUG` output.
+
 ## 0.10.0 — 2026-11-03
 
 ### Added
