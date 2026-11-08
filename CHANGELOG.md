@@ -3,6 +3,16 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A "workspace in use" refusal no longer prints the holder's whole command.** Raised against 0.10.0:
+  a caller that starts its jobs with the job spec on the command line (about 15 KB for a shot list)
+  sent all of it to every run refused while that job held the lease, and a session re-reads its tool
+  output on every later call. The refusal, and the holder's description in `bica cancel`, now carry the
+  first 120 characters of the command and its size, on one line. The full command is still in the
+  claim's sidecar on the remote.
+
 ## 0.10.1 — 2026-11-05
 
 ### Changed

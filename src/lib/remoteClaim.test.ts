@@ -12,6 +12,7 @@ import {
   describeSelfAsOwner,
   formatOwner,
   parseOwner,
+  previewClaimCommand,
   REMOTE_BOOT_REPORT,
 } from './remoteClaim';
 
@@ -215,6 +216,34 @@ describe('describeClaim', () => {
     });
     expect(msg).toContain('for 4m');
     expect(msg).toContain('pnpm test:run common/src');
+  });
+
+  it('shortens a very long command instead of printing all of it', () => {
+    // A caller that puts a whole job spec on the command line (one was ~15 KB) otherwise sent every
+    // refused session those 15 KB, and a session re-reads its tool output on every later call.
+    const command = `python3 queue.py _start '${'x'.repeat(15_000)}'`;
+    const msg = describeClaim({
+      ok: false,
+      heldBy: { runId: 'r1', host: 'mac', pid: 42, startedAt: 1000 },
+      raw: '',
+      now: 1270,
+      command,
+    });
+    expect(msg.length).toBeLessThan(300);
+    expect(msg).toContain('python3 queue.py _start');
+    expect(msg).toContain('shortened');
+    expect(msg).toContain('15 KB');
+    expect(msg).toContain('run r1 from mac for 4m');
+  });
+
+  it('keeps a multi-line command on one line', () => {
+    expect(previewClaimCommand('pnpm lint\n  --fix\n')).not.toContain('\n');
+  });
+
+  it('leaves a short command exactly as it was', () => {
+    expect(previewClaimCommand('pnpm test:run common/src')).toBe(
+      'pnpm test:run common/src',
+    );
   });
 
   it('omits the age rather than guessing when the claim predates the stamp', () => {

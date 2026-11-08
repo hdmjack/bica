@@ -762,6 +762,29 @@ export function describeClaim(result: ClaimResult): string {
       ? ''
       : ` for ${describeAge(result.now - startedAt)}`;
   const doing =
-    result.command === undefined ? '' : ` running \`${result.command}\``;
+    result.command === undefined
+      ? ''
+      : ` running \`${previewClaimCommand(result.command)}\``;
   return `run ${runId} from ${host}${age}${doing} (pid ${String(pid)}${remote})`;
+}
+
+/** How much of the holder's command a message carries; enough to tell what holds the workspace. */
+export const CLAIM_COMMAND_PREVIEW_CHARS = 120;
+
+/**
+ * The holder's command, bounded for a message.
+ *
+ * The command is whatever the holder was started with, and some callers put a whole job spec on the
+ * command line: one was about 15 KB. Every session refused while that run held the lease got all of
+ * it, and a session's tool output is re-read on every later call. The head names the program and its
+ * first arguments, which is what a waiting run needs; the size says how much was left out. Newlines
+ * are flattened so the message stays one line.
+ */
+export function previewClaimCommand(command: string): string {
+  const flat = command.replace(/\s*\n\s*/g, ' ');
+  if (flat.length <= CLAIM_COMMAND_PREVIEW_CHARS) {
+    return flat;
+  }
+  const kb = Math.max(1, Math.round(command.length / 1024));
+  return `${flat.slice(0, CLAIM_COMMAND_PREVIEW_CHARS)}… (${String(kb)} KB, shortened)`;
 }
