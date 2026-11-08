@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.10.2 — 2026-11-08
 
 ### Fixed
 - **A "workspace in use" refusal no longer prints the holder's whole command.** Raised against 0.10.0:
