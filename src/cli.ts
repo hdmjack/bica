@@ -1511,6 +1511,7 @@ async function cmdRun(options: {
         returnFlowOptIn: options.returnFlow,
         writeBackOptIn: options.writeBack,
         owner,
+        releaseLease: (exitCode) => acquired.releaseAfterRun(exitCode),
         chrome,
       });
     } else {

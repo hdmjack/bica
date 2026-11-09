@@ -3,6 +3,20 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Changed
+- **A pinned run gives the workspace lease back before it copies files home.** Raised against 0.10.2:
+  a run that brought 4163 preview files home held the lease for the whole copy, and the run chained
+  after it was refused twice with 98. Releasing first would have let the next run's sync overwrite the
+  files while they were being read, so the run now takes a snapshot of what it is bringing home on the
+  remote (one rsync on the remote's own disk, under the lease), releases, copies from the snapshot and
+  removes it. Covers `--write-back`, `--return-flow` and `artifacts:`. If the snapshot cannot be taken
+  the lease is kept through the copy as before. Live runs and `--detach` runs are unchanged. The
+  snapshots live in `~/.bica/stage` on the remote, one directory per run; one left by a run that died is
+  removed by the next run that takes a snapshot, a day later. Not exercised against a real remote: the
+  script is run under `sh` in the tests, and a run that brings files home should confirm it end to end.
+
 ## 0.10.2 — 2026-11-08
 
 ### Fixed

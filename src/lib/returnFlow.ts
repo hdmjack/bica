@@ -343,6 +343,8 @@ function filesTouchedDuringRun(
 export function pullReturnFlow(
   prep: PrepareResult,
   before: ReturnFlowSnapshot | null = null,
+  /** Where to read from instead of the workspace: a snapshot taken under the lease (stageHome.ts). */
+  sourceUrl: string = prep.remoteSyncUrl,
 ): PullResult {
   if (prep.returnFlowPaths.length === 0) {
     return { ran: false };
@@ -368,7 +370,7 @@ export function pullReturnFlow(
     );
   }
 
-  const remoteSource = ensureTrailingSlash(prep.remoteSyncUrl);
+  const remoteSource = ensureTrailingSlash(sourceUrl);
   const localDest = ensureTrailingSlash(prep.repoRoot);
   const args = buildReturnFlowMirrorArgs(
     prep.returnFlowPaths,

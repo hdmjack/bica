@@ -40,6 +40,7 @@ import {
 } from './syncedMtimes';
 import { remoteTrustMiseWorkspace } from './runRemote';
 import {
+  buildReturnFlowExcludes,
   gitSyncStopsRun,
   pullReturnFlow,
   pushGitToRemote,
@@ -50,13 +51,16 @@ import { reportArtifactPull } from './reportArtifacts';
 import { endLeftoverRunSyncs, settleOtherCheckoutsSyncs } from './ensureSyncReady';
 import { exitAfterArtifactPull } from './artifacts';
 import {
-  collectWriteBack,
   placeWriteBackMarker,
+  probeWriteBack,
+  pullWriteBack,
   reportWriteBack,
   writeBackDisabled,
   writeBackMarkerPath,
 } from './writeBack';
 import { runRemoteScriptOverStdin } from './runRemote';
+import { takeStage } from './stageHome';
+import type { Stage } from './stageHome';
 import {
   ensureRemoteWorkspaceDirectory,
   runRemoteCommandWithPmHooks,
@@ -200,16 +204,26 @@ export function acquireWorkspace(options: {
         howToEndHolder(result, options.sshHost),
     );
   }
+  // Once, because a run can give the workspace back before it is over -- see stageHome.ts -- and the
+  // handlers that give it back at the end must not cost a second round trip to learn it is gone.
+  let released = false;
   return {
     owner,
     release: () => {
+      if (released) {
+        return;
+      }
+      released = true;
       lease.release(remoteWorkspacePath, owner);
     },
     releaseAfterRun: (code) => {
       if (leaseOutlivesRun(code)) {
         return false;
       }
-      lease.release(remoteWorkspacePath, owner);
+      if (!released) {
+        released = true;
+        lease.release(remoteWorkspacePath, owner);
+      }
       return true;
     },
   };
@@ -329,6 +343,11 @@ export async function runPinned(options: {
   detachOutcome?: DetachOutcomeSink;
   /** Lease taken before anything was synced; this run already owns the workspace. */
   owner: ClaimOwner;
+  /**
+   * Give the lease back early, once what the run is bringing home has been copied somewhere the next
+   * run cannot touch. Absent, the caller releases it after everything here, as it always did.
+   */
+  releaseLease?: (code: number) => boolean;
   chrome: (text: string) => void;
 }): Promise<number> {
   const { prep, chrome } = options;
@@ -559,52 +578,108 @@ export async function runPinned(options: {
   // Skipped after a content mismatch on purpose. That workspace was replaced by another run part-way
   // through, so its files describe a mixture of two trees; copying any of them home would put content
   // this run never verified into the local checkout, which is worse than the silence being fixed here.
-  if (watchingWrites && code !== REMOTE_CONTENT_MISMATCH_EXIT) {
-    const outcome = collectWriteBack({
+  const writeBackWanted =
+    watchingWrites && code !== REMOTE_CONTENT_MISMATCH_EXIT;
+  const returnFlowWanted = returnFlow && prep.returnFlowPaths.length > 0;
+
+  // Asked of the workspace, so it happens under the lease; what it names is copied after.
+  const wroteFiles = writeBackWanted
+    ? probeWriteBack({
+        sshHost: prep.config.sshHost,
+        remoteWorkspacePath: prep.config.remoteWorkspacePath,
+        repoRoot: prep.repoRoot,
+        markerPath,
+        // Return-flow paths have their own transport; reporting them here would name the same files twice.
+        ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
+        run: runRemoteScriptOverStdin,
+      })
+    : [];
+
+  // Copying home can take a while, and a run queued behind this one is refused for all of it. Snapshot
+  // on the remote while the lease is still ours, give the lease back, then copy from the snapshot: the
+  // result is the same files, from a place the next run's sync cannot reach. See stageHome.ts.
+  //
+  // Not when the connection was lost (the command may still be running, so the lease outlives the
+  // run) or the workspace was replaced under the run (nothing is being copied home).
+  let stage: Stage | null = null;
+  if (
+    options.releaseLease !== undefined &&
+    !leaseOutlivesRun(code) &&
+    code !== REMOTE_CONTENT_MISMATCH_EXIT
+  ) {
+    stage = takeStage({
       sshHost: prep.config.sshHost,
       remoteWorkspacePath: prep.config.remoteWorkspacePath,
-      remoteSyncUrl: prep.remoteSyncUrl,
-      repoRoot: prep.repoRoot,
-      markerPath,
-      // Return-flow paths have their own transport; reporting them here would name the same files twice.
-      ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
-      pushedTreeOid: push.treeOidBefore,
-      pull: options.writeBackOptIn === true,
-      run: runRemoteScriptOverStdin,
+      runId,
+      plan: {
+        files: options.writeBackOptIn === true ? wroteFiles : [],
+        returnFlow:
+          returnFlowWanted && process.env.BICA_RETURN_FLOW?.trim() !== '0'
+            ? {
+                patterns: prep.returnFlowPaths,
+                excludes: buildReturnFlowExcludes(prep.syncIgnorePaths),
+              }
+            : null,
+        artifacts: prep.artifacts,
+      },
     });
-    reportWriteBack(outcome, options.writeBackOptIn === true);
-    if (code === CONNECTION_LOST_EXIT && options.writeBackOptIn === true) {
-      process.stderr.write(`${warn('[bica]')} ${describePartialWriteBack()}\n`);
+    if (stage !== null && options.releaseLease(code)) {
+      process.stderr.write(
+        `${dim('[bica]')} ${dim('Gave the workspace back before copying files home, so the next run need not wait for the copy; copying from a snapshot taken first.')}\n`,
+      );
+    } else if (stage !== null) {
+      // The lease outlives this run after all, which the check above said it would not.
+      stage.remove();
+      stage = null;
     }
   }
+  const source = stage?.url ?? prep.remoteSyncUrl;
 
-  if (returnFlow && prep.returnFlowPaths.length > 0) {
-    // Serialised: concurrent pulls with `--delete` into one tree would fight over the same files.
-    const rfLock = await acquireLockWithWait(returnFlowLockPath(prep.repoRoot), {
-      timeoutMs: RETURN_FLOW_LOCK_TIMEOUT_MS,
-    });
-    if (rfLock === null) {
-      process.stderr.write(
-        `${warn('[bica]')} ${dim(`Timed out waiting for ${describeLockHolder(returnFlowLockPath(prep.repoRoot))} to finish its return-flow pull; skipping this one.`)}\n`,
-      );
-    } else {
-      try {
-        chrome(
-          `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
-        );
-        pullReturnFlow(prep, returnFlowBefore);
-      } finally {
-        rfLock.release();
+  try {
+    if (writeBackWanted) {
+      const outcome = pullWriteBack({
+        changed: wroteFiles,
+        remoteSyncUrl: source,
+        repoRoot: prep.repoRoot,
+        pushedTreeOid: push.treeOidBefore,
+        pull: options.writeBackOptIn === true,
+      });
+      reportWriteBack(outcome, options.writeBackOptIn === true);
+      if (code === CONNECTION_LOST_EXIT && options.writeBackOptIn === true) {
+        process.stderr.write(`${warn('[bica]')} ${describePartialWriteBack()}\n`);
       }
     }
-  } else if (prep.returnFlowPaths.length > 0) {
-    chrome(
-      `${dim('[bica]')} ${dim('Return-flow is off for pinned runs; pass --return-flow to pull artifacts back.')}\n`,
-    );
-  }
+
+    if (returnFlowWanted) {
+      // Serialised: concurrent pulls with `--delete` into one tree would fight over the same files.
+      const rfLock = await acquireLockWithWait(returnFlowLockPath(prep.repoRoot), {
+        timeoutMs: RETURN_FLOW_LOCK_TIMEOUT_MS,
+      });
+      if (rfLock === null) {
+        process.stderr.write(
+          `${warn('[bica]')} ${dim(`Timed out waiting for ${describeLockHolder(returnFlowLockPath(prep.repoRoot))} to finish its return-flow pull; skipping this one.`)}\n`,
+        );
+      } else {
+        try {
+          chrome(
+            `${dim('[bica]')} ${dim(`Pulling return-flow files (${prep.returnFlowPaths.join(', ')})…`)}\n`,
+          );
+          pullReturnFlow(prep, returnFlowBefore, source);
+        } finally {
+          rfLock.release();
+        }
+      }
+    } else if (prep.returnFlowPaths.length > 0) {
+      chrome(
+        `${dim('[bica]')} ${dim('Return-flow is off for pinned runs; pass --return-flow to pull artifacts back.')}\n`,
+      );
+    }
 
   // Not behind `--return-flow`. That flag guards a pattern-matched pull into the working tree, which
   // is why it is opt-in here; `artifacts:` is a short list of named outputs from a tree the sync does
   // not touch, and somebody who listed `build/bin/llc` wants `build/bin/llc`.
-  return exitAfterArtifactPull(code, reportArtifactPull(prep));
+    return exitAfterArtifactPull(code, reportArtifactPull(prep, source));
+  } finally {
+    stage?.remove();
+  }
 }

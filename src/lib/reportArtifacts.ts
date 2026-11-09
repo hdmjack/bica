@@ -21,6 +21,8 @@ export interface ArtifactPullInput {
 
 export function reportArtifactPull(
   prep: ArtifactPullInput,
+  /** Where to read from instead of the workspace: a snapshot taken under the lease (stageHome.ts). */
+  sourceUrl: string = prep.remoteSyncUrl,
 ): readonly ArtifactOutcome[] {
   if (prep.artifacts.length === 0) {
     return [];
@@ -39,7 +41,7 @@ export function reportArtifactPull(
   }
   const outcomes = pullArtifacts({
     artifacts: prep.artifacts,
-    remoteSyncUrl: prep.remoteSyncUrl,
+    remoteSyncUrl: sourceUrl,
     repoRoot: prep.repoRoot,
   });
   const said = describeArtifactPull(outcomes);

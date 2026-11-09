@@ -835,6 +835,15 @@ The remote workspace is **leased** for the duration of a run. A second run refus
 over the first — including a run launched from a sibling clone that resolves to the same remote path,
 which is the case a lock inside one checkout could never see.
 
+**A pinned run gives the lease back before it copies files home.** What `--write-back`, `--return-flow`
+and `artifacts:` bring home can be thousands of files, and a run queued behind it was refused (98) for
+the whole copy. The run now takes a snapshot of those files on the remote first — one rsync on the
+remote's own disk, still under the lease — gives the lease back, and copies from the snapshot, which it
+then removes. The next run's sync cannot reach the snapshot, so what lands in your tree is still the
+files this run produced and never a mix with the next one's. The run says so when it does this. If the
+snapshot cannot be taken (no rsync on the remote, a full disk) the lease is kept through the copy, as
+before. Live (non-pinned) runs and `--detach` runs still hold the lease through their copy home.
+
 A lease whose owner is gone is broken automatically, so a killed run costs the next one a round-trip
 rather than the workspace. "Gone" means both halves of the run: the local client *and* the remote
 shell executing the command, whose pid the run script publishes into the claim. They have different

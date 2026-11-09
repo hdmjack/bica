@@ -397,31 +397,28 @@ export interface WriteBackOutcome {
   conflicted: string[];
 }
 
-/**
- * Ask the remote what the command wrote, and copy back the part that is safe to copy.
- *
- * Best-effort throughout: a probe that cannot run reports nothing rather than guessing, and nothing
- * here throws, so the remote command's exit code is never masked by a failure to look at its
- * side-effects.
- */
-export function collectWriteBack(options: {
+/** Everything {@link probeWriteBack} needs: where to look, and what is not the command's. */
+export interface WriteBackProbeOptions {
   sshHost: string;
   remoteWorkspacePath: string;
-  remoteSyncUrl: string;
   repoRoot: string;
   markerPath: string;
   ignorePaths: readonly string[];
-  /** Content name of the tree that was pushed, for the local-edit guard. */
-  pushedTreeOid: string | undefined;
-  /** Whether to copy the safe files back, as opposed to only naming them. */
-  pull: boolean;
   /**
    * Set for a live run: when, on this machine's clock, the last flush before the command began. Files
    * edited locally since then reached the remote through the live session and are not the command's.
    */
   syncedEditsSince?: number;
   run: RemoteScriptRunner;
-}): WriteBackOutcome {
+}
+
+/**
+ * Ask the remote which files the command wrote, minus the ones git ignores.
+ *
+ * Needs the lease, because it reads the workspace; the copy that follows ({@link pullWriteBack}) does
+ * not, once the files named here are somewhere that stays put.
+ */
+export function probeWriteBack(options: WriteBackProbeOptions): string[] {
   const probe = options.run(
     options.sshHost,
     buildWriteBackProbeScript({
@@ -431,16 +428,33 @@ export function collectWriteBack(options: {
     }),
   );
   if (probe.status !== 0) {
-    return { changed: [], pulled: [], conflicted: [] };
+    return [];
   }
   const notIgnored = dropIgnoredPaths(
     options.repoRoot,
     parseChangedPaths(probe.stdout),
   );
-  const changed =
-    options.syncedEditsSince === undefined
-      ? notIgnored
-      : dropFilesEditedLocallySince(options.repoRoot, notIgnored, options.syncedEditsSince);
+  return options.syncedEditsSince === undefined
+    ? notIgnored
+    : dropFilesEditedLocallySince(options.repoRoot, notIgnored, options.syncedEditsSince);
+}
+
+/**
+ * Copy back the part of `changed` that is safe to copy.
+ *
+ * `remoteSyncUrl` is where the files are read from: the workspace itself, or a snapshot of it taken
+ * under the lease (see stageHome.ts).
+ */
+export function pullWriteBack(options: {
+  changed: string[];
+  remoteSyncUrl: string;
+  repoRoot: string;
+  /** Content name of the tree that was pushed, for the local-edit guard. */
+  pushedTreeOid: string | undefined;
+  /** Whether to copy the safe files back, as opposed to only naming them. */
+  pull: boolean;
+}): WriteBackOutcome {
+  const { changed } = options;
   if (changed.length === 0 || !options.pull) {
     return { changed, pulled: [], conflicted: [] };
   }
@@ -476,6 +490,31 @@ export function collectWriteBack(options: {
     return { changed, pulled: [], conflicted };
   }
   return { changed, pulled: safe, conflicted };
+}
+
+/**
+ * Ask the remote what the command wrote, and copy back the part that is safe to copy.
+ *
+ * Best-effort throughout: a probe that cannot run reports nothing rather than guessing, and nothing
+ * here throws, so the remote command's exit code is never masked by a failure to look at its
+ * side-effects.
+ */
+export function collectWriteBack(
+  options: WriteBackProbeOptions & {
+    remoteSyncUrl: string;
+    /** Content name of the tree that was pushed, for the local-edit guard. */
+    pushedTreeOid: string | undefined;
+    /** Whether to copy the safe files back, as opposed to only naming them. */
+    pull: boolean;
+  },
+): WriteBackOutcome {
+  return pullWriteBack({
+    changed: probeWriteBack(options),
+    remoteSyncUrl: options.remoteSyncUrl,
+    repoRoot: options.repoRoot,
+    pushedTreeOid: options.pushedTreeOid,
+    pull: options.pull,
+  });
 }
 
 /**

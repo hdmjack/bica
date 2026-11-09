@@ -166,6 +166,30 @@ describe('acquireWorkspace', () => {
     expect(lease.held[WS]).toBeUndefined();
     expect(() => acquire(lease)).not.toThrow();
   });
+
+  it('gives the lease back once, however many of the places that give it back run', () => {
+    // A run releases early, so the next one need not wait for its copy home; the handlers that release
+    // at the end of every run then find nothing to do, rather than costing a round trip, or, worse,
+    // releasing what the next run has by now taken.
+    const lease = fakeLease();
+    let releases = 0;
+    const counting = {
+      ...lease,
+      release: (ws: string, owner: ClaimOwner) => {
+        releases += 1;
+        lease.release(ws, owner);
+      },
+    };
+    const first = acquire(counting, 'first');
+    expect(first.releaseAfterRun(0)).toBe(true);
+
+    const second = acquire(counting, 'second');
+    first.release();
+    expect(first.releaseAfterRun(0)).toBe(true);
+    expect(releases).toBe(1);
+    expect(lease.held[WS]?.runId).toBe('second');
+    second.release();
+  });
 });
 
 /**
