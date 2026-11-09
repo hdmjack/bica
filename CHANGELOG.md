@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.10.3 — 2026-11-09
 
 ### Changed
 - **A pinned run gives the workspace lease back before it copies files home.** Raised against 0.10.2:
