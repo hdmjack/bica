@@ -9,6 +9,7 @@ import {
   buildStageScript,
   REMOTE_STAGE_ROOT,
   STAGE_DONE,
+  STAGE_LINKED_DIR,
   stageDirName,
   stageSyncUrl,
   takeStage,
@@ -150,6 +151,41 @@ describe('the snapshot', () => {
     const copied = path.join(stageAt('4242'), 'build/bin/clang');
     expect(fs.lstatSync(copied).isSymbolicLink()).toBe(false);
     expect(fs.readFileSync(copied, 'utf8')).toBe('the real one');
+  });
+
+  it('declines to snapshot an artifact that links to a directory, and copies nothing', () => {
+    // The 15 GB run: `-L` follows the link, so the snapshot would hold everything it points at.
+    const big = path.join(home, 'big');
+    fs.mkdirSync(big);
+    fs.writeFileSync(path.join(big, 'huge.bin'), 'x'.repeat(1_000_000));
+    write('previews/queue/a.png', 'a');
+    fs.symlinkSync(big, path.join(workspace, 'previews/worlds'));
+
+    const r = runScript(script({ artifacts: ['previews/'] }));
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).not.toContain(STAGE_DONE);
+    expect(r.stdout).toContain(STAGE_LINKED_DIR);
+    expect(r.stdout).toContain('previews/worlds');
+    expect(fs.existsSync(path.join(stageAt('4242'), 'previews'))).toBe(false);
+  });
+
+  it('declines an artifact that is itself a link to a directory', () => {
+    const big = path.join(home, 'big');
+    fs.mkdirSync(big);
+    fs.writeFileSync(path.join(big, 'huge.bin'), 'x');
+    fs.symlinkSync(big, path.join(workspace, 'previews'));
+
+    const r = runScript(script({ artifacts: ['previews/'] }));
+    expect(r.stdout).toContain(STAGE_LINKED_DIR);
+    expect(r.stdout).not.toContain(STAGE_DONE);
+  });
+
+  it('still takes a directory artifact whose links point at files', () => {
+    write('out/real.txt', 'real');
+    fs.symlinkSync('real.txt', path.join(workspace, 'out/alias.txt'));
+    const r = runScript(script({ artifacts: ['out/'] }));
+    expect(r.stdout).toContain(STAGE_DONE);
+    expect(fs.readFileSync(path.join(stageAt('4242'), 'out/alias.txt'), 'utf8')).toBe('real');
   });
 
   it('replaces an earlier snapshot of the same run rather than adding to it', () => {

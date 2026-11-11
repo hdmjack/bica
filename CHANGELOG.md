@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A run's snapshot no longer copies a whole directory because an artifact links to it.** Raised against
+  0.10.3: on the remote, `~/.bica` grew to about 15 GB for a few minutes on a run that brought 4 KB home,
+  and the remote's free space dropped under a caller's floor. The snapshot copies an artifact the way the
+  pull reads it, following links, so a link inside an artifact (or the artifact itself) to a large
+  directory had all of that directory copied every run. The run now sees such a link first, says so,
+  copies nothing, and keeps the lease through the copy home as it did before 0.10.3. Links to files are
+  still followed and snapshotted. `--write-back` and `--return-flow` snapshots never followed links and
+  are unchanged. Not exercised against a real remote.
+
 ## 0.10.3 — 2026-11-09
 
 ### Changed

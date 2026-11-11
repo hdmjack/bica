@@ -4,6 +4,7 @@ import {
   shellSingleQuoteRemotePathForSh,
 } from './runRemote';
 import { buildReturnFlowRsyncArgs } from './returnFlow';
+import { dim } from '../terminalStyle';
 
 /**
  * A private copy, taken on the remote while the run still holds the workspace lease, of whatever the
@@ -34,6 +35,18 @@ const STALE_AFTER_DAYS = 1;
 
 /** Said by the script once the snapshot is complete, so a partial one is never mistaken for it. */
 export const STAGE_DONE = 'BICA_STAGE_DONE';
+
+/**
+ * Said, with the artifact's name after it, when the script declined to take a snapshot because an
+ * artifact holds a link to a directory.
+ *
+ * An artifact is pulled with `-L`, so a link is read as what it points at; a snapshot has to do the
+ * same or the pull would find links that point nowhere. For a link to a file that costs the file. For
+ * a link to a directory it costs the whole directory, whatever the run changed: one run staged about
+ * 15 GB on the remote's disk, for minutes, to bring home 4 KB. Pulling from the workspace reads only
+ * what differs, so a run with such a link keeps the lease through the copy, as it did before 0.10.3.
+ */
+export const STAGE_LINKED_DIR = 'BICA_STAGE_LINKED_DIR';
 
 export interface StagePlan {
   /** Workspace-relative files, such as what `--write-back` found the command wrote. */
@@ -97,6 +110,16 @@ export function buildStageScript(options: {
     `cd ${remotePathExprForCd(options.remoteWorkspacePath)} || exit 1`,
     'command -v rsync >/dev/null 2>&1 || exit 1',
   ];
+  for (const artifact of plan.artifacts) {
+    // Before anything is copied, so a refusal leaves nothing behind. `-H` reads an artifact that is
+    // itself a link as what it points at, which the second test then catches.
+    const target = quote(`./${artifact.replace(/^\.?\//, '').replace(/\/+$/, '')}`);
+    lines.push(
+      `if [ -L ${target} ] && [ -d ${target} ]; then echo ${STAGE_LINKED_DIR} ${target}; exit 1; fi`,
+      `LINKED=$(find -H ${target} -type l -exec test -d {} \\; -print -quit 2>/dev/null)`,
+      `if [ -n "$LINKED" ]; then echo ${STAGE_LINKED_DIR} "$LINKED"; exit 1; fi`,
+    );
+  }
   if (plan.files.length > 0) {
     lines.push(
       `rsync -a --files-from=- ./ ${stage}/ <<'${FILES_DELIMITER}' || exit 1`,
@@ -156,6 +179,12 @@ export function takeStage(options: {
   };
   const result = run(options.sshHost, script);
   if (result.status !== 0 || !result.stdout.includes(STAGE_DONE)) {
+    const linked = new RegExp(`${STAGE_LINKED_DIR} (.+)`).exec(result.stdout);
+    if (linked !== null) {
+      process.stderr.write(
+        `${dim('[bica]')} ${dim(`Keeping the workspace until the files are home: ${linked[1]} links to a directory, and a snapshot would copy all of it.`)}\n`,
+      );
+    }
     // Whatever was half-copied is no use to anyone.
     remove();
     return null;
