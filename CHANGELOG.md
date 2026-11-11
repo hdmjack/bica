@@ -3,7 +3,7 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.10.4 — 2026-11-10
 
 ### Fixed
 - **A run's snapshot no longer copies a whole directory because an artifact links to it.** Raised against
