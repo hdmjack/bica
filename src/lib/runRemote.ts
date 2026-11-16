@@ -20,6 +20,7 @@ import {
   commandPidFileExpr,
   commandTagFor,
   parseCommandEndOutcome,
+  recordLostCommand,
 } from './remoteCommandEnd';
 import type { CommandEndOutcome } from './remoteCommandEnd';
 import { PROCESS_TREE_SH } from './remoteProcessTree';
@@ -1330,11 +1331,13 @@ function reportSshFailure(options: {
   }
   const failure = classifySshFailure({ status: code, diagnostics });
   if (failure === 'connection-lost') {
+    const outcome = options.endCommand?.();
+    recordLostCommand(outcome);
     const message = describeConnectionLoss({
       sshHost: options.sshHost,
       label: options.label,
       diagnostics,
-      outcome: options.endCommand?.(),
+      outcome,
     });
     for (const line of message.split('\n')) {
       process.stderr.write(`${chalk.bold.yellow('[bica]')} ${line}\n`);
@@ -1342,6 +1345,7 @@ function reportSshFailure(options: {
     return CONNECTION_LOST_EXIT;
   }
   if (failure === 'killed-by-signal') {
+    recordLostCommand(undefined);
     const message = describeKilledBySignal({
       sshHost: options.sshHost,
       label: options.label,

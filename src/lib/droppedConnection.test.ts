@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CONNECTION_LOST_EXIT } from './connectionLoss';
+import { forgetLostCommands, lostCommandsAreConfirmedGone } from './remoteCommandEnd';
 import { REMOTE_CD_FAILED_EXIT, runRemoteCommand } from './runRemote';
 
 /**
@@ -22,7 +23,12 @@ let repoRoot = '';
 let originalPath = '';
 
 /** A fake `ssh` that answers bica's probes and then fails the way `how` says. */
-function installFakeSsh(how: { log: string; status: number }): void {
+function installFakeSsh(how: {
+  log: string;
+  status: number;
+  /** What the remote answers when asked to end the command (its script mentions BICA_NOT_MINE). */
+  endAnswer?: string;
+}): void {
   fs.writeFileSync(
     path.join(bin, 'ssh'),
     [
@@ -30,7 +36,12 @@ function installFakeSsh(how: { log: string; status: number }): void {
       '# The login-shell probe runs as `ssh -T host sh -s` with the script on stdin. It has to',
       '# succeed, or bica stops before it ever opens the connection this test is about.',
       'for a in "$@"; do',
-      '  if [ "$a" = "-s" ]; then cat >/dev/null; exit 0; fi',
+      '  if [ "$a" = "-s" ]; then',
+      '    if cat | grep -q BICA_NOT_MINE; then',
+      `      ${how.endAnswer === undefined ? 'true' : `echo ${how.endAnswer}`}`,
+      '    fi',
+      '    exit 0',
+      '  fi',
       'done',
       '# The run itself: find -E, write what ssh would have written, and fail as ssh would.',
       'logfile=',
@@ -74,7 +85,9 @@ function freshHost(): string {
   return `fake-host-${String(hostCounter)}`;
 }
 
-async function runAgainstFakeSsh(): Promise<{ code: number; said: string }> {
+async function runAgainstFakeSsh(
+  lease?: { runId: string; claimPathExpr: string },
+): Promise<{ code: number; said: string }> {
   let said = '';
   vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
     said += String(chunk);
@@ -85,12 +98,21 @@ async function runAgainstFakeSsh(): Promise<{ code: number; said: string }> {
     '~/code/repo',
     'pnpm test:run',
     repoRoot,
-    { label: 'pnpm-test-run' },
+    {
+      label: 'pnpm-test-run',
+      ...(lease === undefined
+        ? {}
+        : { assertRunId: lease.runId, claimPathExpr: lease.claimPathExpr }),
+    },
   );
   return { code, said };
 }
 
 describe('a connection that drops part-way through a run', () => {
+  afterEach(() => {
+    forgetLostCommands();
+  });
+
   it('is reported as 95 and named, not as the command exiting 255', async () => {
     installFakeSsh({
       status: 255,
@@ -105,6 +127,29 @@ describe('a connection that drops part-way through a run', () => {
     expect(said).toContain('pnpm-test-run');
     expect(said).toContain('unknown');
   });
+
+  it.each([
+    ['BICA_GONE', true],
+    ['BICA_ENDED', true],
+    [undefined, false],
+  ] as const)(
+    'lets the lease go only when the remote confirmed the command was gone (%s)',
+    async (endAnswer, confirmed) => {
+      installFakeSsh({
+        status: 255,
+        log:
+          'Authenticated to 192.168.0.120 ([192.168.0.120]:22) using "publickey".\n' +
+          'Read from remote host 192.168.0.120: Connection reset by peer\n',
+        endAnswer,
+      });
+      const { code } = await runAgainstFakeSsh({
+        runId: 'run1',
+        claimPathExpr: '"$HOME/.claim"',
+      });
+      expect(code).toBe(CONNECTION_LOST_EXIT);
+      expect(lostCommandsAreConfirmedGone()).toBe(confirmed);
+    },
+  );
 
   it('reports a command killed on the remote as 95 and says so, not as the command exiting 255', async () => {
     // The 0.8.4 report: `pnpm-test-run=255` after four seconds and nothing else. ssh's closing lines

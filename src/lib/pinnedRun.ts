@@ -19,6 +19,7 @@ import {
 } from './remoteClaim';
 import type { ClaimOwner, ClaimResult } from './remoteClaim';
 import { CONNECTION_LOST_EXIT, describePartialWriteBack } from './connectionLoss';
+import { lostCommandsAreConfirmedGone } from './remoteCommandEnd';
 import {
   REMOTE_CONTENT_MISMATCH_EXIT,
   remoteReadRecordedExit,
@@ -98,9 +99,14 @@ export interface AcquiredWorkspace {
  * process groups are still alive is honoured with 98 and named for `bica cancel`, and once they have
  * gone the next run breaks it for the price of one round trip. Asking here instead would cost that
  * round trip over the link that has just failed.
+ *
+ * Unless the remote has since confirmed that every lost command is gone or has been ended (see
+ * `lostCommandsAreConfirmedGone`). The ending is itself asked over a fresh connection, so by the time
+ * this is read the answer is known, and the lease then guards nothing: holding it only refuses the
+ * next run, and said "ending its remote command in the background" over a command already ended.
  */
 export function leaseOutlivesRun(code: number): boolean {
-  return code === CONNECTION_LOST_EXIT;
+  return code === CONNECTION_LOST_EXIT && !lostCommandsAreConfirmedGone();
 }
 
 /** Injectable so acquisition can be tested without an SSH host. */
