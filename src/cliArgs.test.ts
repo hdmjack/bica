@@ -18,6 +18,14 @@ describe('parseArgs — globals', () => {
     expect(p.autoYes).toBe(true);
   });
 
+  it('reads --reconnect and keeps it out of the remote argv', () => {
+    const p = parseArgs(['run', '--reconnect', 'cargo', 'build']);
+    expect(p.reconnect).toBe(true);
+    expect(p.detach).toBe(false);
+    expect(p.rest).toEqual(['run', 'cargo', 'build']);
+    expect(parseArgs(['run', 'cargo']).reconnect).toBe(false);
+  });
+
   it('requires a value for each value-taking flag', () => {
     expect(() => parseArgs(['--pm'])).toThrow(/--pm requires/);
   });

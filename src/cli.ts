@@ -30,6 +30,8 @@ import {
 } from './lib/commandSeparator';
 import { readLocalBicaSettings } from './localBicaSettings';
 import { cmdLogs, cmdRuns, cmdWait } from './lib/detachedCommands';
+import { CONNECTION_LOST_EXIT } from './lib/connectionLoss';
+import { followRun } from './lib/followRun';
 import { reportArtifactPull } from './lib/reportArtifacts';
 import { ARTIFACTS_NOT_HOME_EXIT, exitAfterArtifactPull } from './lib/artifacts';
 import { describeEnvNotForwarded } from './lib/envPassthrough';
@@ -192,6 +194,9 @@ Remote execution
                               after ten minutes and a 50-minute build cannot be started from one at
                               all otherwise. The command survives the connection closing, and the
                               workspace stays leased until you wait for it, so a second run gets 98.
+  run --reconnect <command>   Run it detached but stay and show its output. If the connection drops it
+                              reconnects and carries on from where the output stopped, instead of
+                              losing the command. One command; exits with the command's own code.
   runs                        The detached runs started from this machine, and where each has got to.
   logs <run-id> [--follow]    A detached run's output. Closing this window does not stop the run.
   wait <run-id>               Block until it finishes; exits with the command's own exit code, brings
@@ -1305,6 +1310,8 @@ async function cmdRun(options: {
   writeBack: boolean;
   /** `--detach`: start it and return the run id. Forces a pinned run; see detachedRun.ts. */
   detach: boolean;
+  /** `--reconnect`: run detached but stay and show the output, resuming after a dropped connection. */
+  reconnect: boolean;
   /** Several commands to run concurrently in one workspace, or one command. */
   commands: string[][];
 }): Promise<void> {
@@ -1326,13 +1333,29 @@ async function cmdRun(options: {
   // `--detach` pins for a different reason: the tree must stop moving. A live session goes on
   // mirroring local edits into a workspace that is being compiled for the next hour, and nobody is
   // watching to notice.
-  const pinned = parallel || options.writeBack || options.detach;
+  const pinned = parallel || options.writeBack || options.detach || options.reconnect;
 
   if (options.detach && parallel) {
     die(
       'bica run --detach takes one command. Several commands at once need somebody watching their\n' +
         'output, which is the thing --detach gives up.',
     );
+  }
+
+  if (options.reconnect) {
+    const conflicts = [
+      options.detach ? '--detach' : undefined,
+      options.writeBack ? '--write-back' : undefined,
+      options.returnFlow ? '--return-flow' : undefined,
+      parallel ? 'several commands at once' : undefined,
+    ].filter((c): c is string => c !== undefined);
+    if (conflicts.length > 0) {
+      die(
+        `bica run --reconnect cannot be combined with ${conflicts.join(' or ')}.\n` +
+          '--reconnect already stays attached to the output; it brings `artifacts:` home when the command ends, ' +
+          'but not write-back or return-flow files, and takes one command.',
+      );
+    }
   }
 
   let acquired;
@@ -1455,7 +1478,48 @@ async function cmdRun(options: {
   /** A detached run keeps the workspace while it builds; `bica wait` is what gives it back. */
   let keepLease = false;
   try {
-    if (options.detach) {
+    if (options.reconnect) {
+      // Started exactly as `--detach` starts it, so the command is not attached to this connection
+      // and survives it dropping; then watched from here, which `--detach` gives up.
+      const launched: DetachOutcomeSink = {};
+      code = await runPinned({
+        prep,
+        remoteArgv,
+        matchArgvs: options.commands,
+        concurrentCommands: undefined,
+        pmOverride: pm,
+        returnFlowOptIn: false,
+        detachRunId: owner.runId,
+        detachOutcome: launched,
+        owner,
+        chrome,
+      });
+      if (code === 0) {
+        // From here the workspace is given back by `cmdWait`, once the command is over, and not by
+        // the exit handler, which would free it under a command that may still be running if this
+        // process were to die. If it does, the watchdog ends the command and then gives it back.
+        keepLease = true;
+        process.removeListener('exit', release);
+        const outcome = await followRun({
+          sshHost: baseRemote.sshHost,
+          remoteWorkspacePath: baseRemote.remoteWorkspacePath,
+          runId: owner.runId,
+        });
+        if (outcome === 'gave-up') {
+          process.stderr.write(
+            `${warn('[bica]')} ${baseRemote.sshHost} stayed unreachable, so bica stopped watching. ` +
+              `The command is most likely still running there, and the workspace stays leased. ` +
+              `\`bica logs ${owner.runId} --follow\` picks up its output and \`bica wait ${owner.runId}\` ` +
+              'its exit code and artifacts, once the host answers. Exit 95 is not a verdict on your code.\n',
+          );
+          code = CONNECTION_LOST_EXIT;
+        } else {
+          // Reads the exit code the command recorded, brings the artifacts home and gives the
+          // workspace back. For a claim that has gone it says so and exits 1.
+          code = await cmdWait(owner.runId, {});
+        }
+      }
+    } else if (options.detach) {
       const detachOutcome: DetachOutcomeSink = {};
       code = await runPinned({
         prep,
@@ -1673,6 +1737,7 @@ async function main(): Promise<void> {
           returnFlow: globals.returnFlow,
           writeBack: globals.writeBack,
           detach: globals.detach,
+          reconnect: globals.reconnect,
           commands: splitParallelCommands(tail),
         });
         break;

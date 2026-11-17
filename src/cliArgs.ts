@@ -25,6 +25,14 @@ export interface ParsedGlobals {
    * build wants: a live session would go on mirroring local edits into a tree being compiled.
    */
   detach: boolean;
+  /**
+   * `--reconnect`: run the command detached on the remote but stay and show its output, carrying on
+   * from where it stopped if the connection drops.
+   *
+   * Implies a pinned run, for the reason `--detach` does. Opt-in: an ordinary run ends its command
+   * when its connection goes, and a run that must not is a choice.
+   */
+  reconnect: boolean;
   rest: string[];
 }
 
@@ -46,6 +54,7 @@ export function parseArgs(argv: string[]): ParsedGlobals {
   let returnFlow = false;
   let writeBack = false;
   let detach = false;
+  let reconnect = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--yes' || a === '-y') {
@@ -56,6 +65,8 @@ export function parseArgs(argv: string[]): ParsedGlobals {
       writeBack = true;
     } else if (a === '--detach') {
       detach = true;
+    } else if (a === '--reconnect') {
+      reconnect = true;
     } else if (a === '--pm') {
       pm = requireValue(argv, i, '--pm', 'a package-manager plugin id (e.g. pnpm)');
       i += 1;
@@ -63,5 +74,5 @@ export function parseArgs(argv: string[]): ParsedGlobals {
       rest.push(a);
     }
   }
-  return { autoYes, pm, returnFlow, writeBack, detach, rest };
+  return { autoYes, pm, returnFlow, writeBack, detach, reconnect, rest };
 }

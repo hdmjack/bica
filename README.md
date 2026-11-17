@@ -719,6 +719,31 @@ starting anything else in that workspace, since a later run will break a lease w
 finished and that takes the recorded exit code with it. If that happens, `bica wait` says so rather
 than reporting somebody else's result.
 
+### Staying attached through a dropped connection: `--reconnect`
+
+`--detach` returns at once. When you want the output in front of you but a blip in the link must not end
+a long build, use `--reconnect`:
+
+```bash
+bica run --reconnect cargo build -p viewer
+```
+
+It starts the command exactly as `--detach` does, so it is not attached to the connection, and then
+shows its output. If the connection drops it says so, opens a new one and carries on from the byte it
+had reached, so nothing is lost or shown twice. When the command ends it exits with the command's own
+exit code, brings the `artifacts:` home and gives the workspace back, as `bica wait` does.
+
+It is opt-in because an ordinary run's command dies with its connection, which is what stops an
+abandoned build holding the workspace. With `--reconnect`:
+
+- A bica that is killed outright still ends the command: the same watchdog and heartbeat an ordinary run
+  has cancel it. Ctrl-C and SIGTERM end it too.
+- If the host stays unreachable for five minutes bica stops watching and exits **95**, which is not a
+  verdict on your code. The command is most likely still going and the workspace stays leased;
+  `bica logs <id> --follow` and `bica wait <id>` pick it up, as for a detached run.
+- stdout and stderr arrive as one stream, as for `bica logs`, and there is no terminal on the remote.
+- One command only, and not with `--write-back`, `--return-flow` or `--detach`.
+
 ## Outputs from a tree the remote owns
 
 A build directory has to live on the remote and survive every run: it is gigabytes, it is what makes
