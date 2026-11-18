@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## Unreleased
+
+### Fixed
+- **A lost connection no longer keeps the workspace leased once the remote has confirmed nothing is
+  left running.** Raised against 0.10.0: a run whose connection dropped said "nothing of it was still
+  running", then in the next line that bica was "ending its remote command in the background" while the
+  workspace stayed leased, so the next run was refused (98) for a command that was already gone. The
+  lease is still kept when the command's end could not be confirmed (the host did not answer, a command
+  was killed by a signal, or only some of several lost commands were confirmed), because there it guards
+  something. The lease-kept notice is no longer printed when it is released. Files a lost command wrote
+  are still described as possibly partial.
+
 ## 0.10.4 — 2026-11-10
 
 ### Fixed

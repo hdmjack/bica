@@ -1,7 +1,8 @@
 import * as os from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { CONNECTION_LOST_EXIT } from './connectionLoss';
+import { forgetLostCommands, recordLostCommand } from './remoteCommandEnd';
 import { acquireWorkspace, WorkspaceInUseError } from './pinnedRun';
 import type { LeaseOps } from './pinnedRun';
 import type { ClaimOwner, ClaimResult } from './remoteClaim';
@@ -236,6 +237,52 @@ describe('releaseAfterRun', () => {
     // Once the orphan has gone, nobody has to cancel anything: the next run takes it.
     remoteAlive = false;
     expect(acquire(lease).owner.runId).toBe('mine');
+  });
+});
+
+/**
+ * Raised against 0.10.0: a connection dropped, bica reported that nothing of the command was still
+ * running, and in the next line said it was ending the command in the background while the workspace
+ * stayed leased. Once the remote has said nothing is left, the lease guards nothing.
+ */
+describe('releaseAfterRun once the remote has confirmed what became of a lost command', () => {
+  afterEach(() => {
+    forgetLostCommands();
+  });
+
+  it.each(['ended', 'gone', 'not-mine'] as const)(
+    'gives the workspace back when the command is %s',
+    (outcome) => {
+      const lease = fakeLease();
+      const run = acquire(lease, 'dropped');
+      recordLostCommand(outcome);
+      expect(run.releaseAfterRun(CONNECTION_LOST_EXIT)).toBe(true);
+      expect(lease.held[WS]).toBeUndefined();
+    },
+  );
+
+  it.each(['unreachable', undefined] as const)(
+    'keeps it when the answer was %s',
+    (outcome) => {
+      const lease = fakeLease();
+      const run = acquire(lease, 'dropped');
+      recordLostCommand(outcome);
+      expect(run.releaseAfterRun(CONNECTION_LOST_EXIT)).toBe(false);
+      expect(lease.held[WS]?.runId).toBe('dropped');
+    },
+  );
+
+  it('keeps it when only some of several lost commands are confirmed', () => {
+    const lease = fakeLease();
+    const run = acquire(lease, 'dropped');
+    recordLostCommand('ended');
+    recordLostCommand('unreachable');
+    expect(run.releaseAfterRun(CONNECTION_LOST_EXIT)).toBe(false);
+  });
+
+  it('keeps it when no lost command was recorded at all', () => {
+    const lease = fakeLease();
+    expect(acquire(lease, 'dropped').releaseAfterRun(CONNECTION_LOST_EXIT)).toBe(false);
   });
 });
 

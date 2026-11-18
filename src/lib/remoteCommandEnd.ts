@@ -70,3 +70,36 @@ export function parseCommandEndOutcome(
   }
   return 'unreachable';
 }
+
+/**
+ * What became of each command of this run whose result never came back.
+ *
+ * The lease is kept after a lost connection because the command may still be running on the remote,
+ * and a second run synced over it would corrupt both. That reason stops applying once the remote has
+ * confirmed there is nothing left of it: the command's processes are ended, or were already gone, or
+ * the workspace is no longer this run's. Keeping the lease then only refuses the next run for
+ * nothing, and the "ending its remote command in the background" notice printed beside a message
+ * saying it already had been was the same mistake said aloud.
+ *
+ * A process runs one `bica run`, so this is process-wide state. Anything not confirmed -- the host
+ * could not be asked, a command killed by a signal, a lost command with no lease to name -- is
+ * recorded as `unknown`, which keeps the lease as before.
+ */
+const lostCommands: (CommandEndOutcome | 'unknown')[] = [];
+
+export function recordLostCommand(outcome: CommandEndOutcome | undefined): void {
+  lostCommands.push(outcome ?? 'unknown');
+}
+
+/** True only when every lost command was confirmed to have nothing left running. */
+export function lostCommandsAreConfirmedGone(): boolean {
+  return (
+    lostCommands.length > 0 &&
+    lostCommands.every((o) => o === 'ended' || o === 'gone' || o === 'not-mine')
+  );
+}
+
+/** For tests: a fresh process starts with nothing recorded. */
+export function forgetLostCommands(): void {
+  lostCommands.length = 0;
+}
