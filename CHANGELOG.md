@@ -3,7 +3,25 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
-## Unreleased
+## 0.10.5 — 2026-11-18
+
+### Added
+- **`bica run --reconnect`: stay attached to a long run's output, and keep the command through a dropped
+  connection.** Raised against 0.10.0: a connection reset as a seven-minute build finished lost the
+  job that was to follow it, because an ordinary run ends its command when its connection goes. With
+  the flag the command is started detached, exactly as `--detach` starts it, and bica then shows its
+  output; if the connection drops it says so, opens a new one and carries on from the byte it had
+  reached, so nothing is lost or shown twice. When the command ends it exits with the command's own
+  code, brings `artifacts:` home and gives the workspace back, as `bica wait` does. Opt-in, because the
+  rule that a dropped link ends the command is what stops abandoned builds holding the workspace.
+  A bica killed outright (`kill -9`) still ends the command through the same watchdog an ordinary
+  run has, and Ctrl-C and SIGTERM end it too. If the host stays unreachable for five minutes bica
+  stops watching and exits 95, leaving the command running and the workspace leased for `bica logs
+  --follow` and `bica wait`. One command; not with `--write-back`, `--return-flow` or `--detach`.
+  stdout and stderr arrive as one stream, as for `bica logs`. Exercised against the mini: a run
+  whose follower connection was cut mid-run delivered all 40 of its lines once and in order and
+  returned its exit code, and a run whose bica was killed with `kill -9` had its command ended and its
+  claim cleared within about fifteen seconds. The give-up path is covered by tests only.
 
 ### Fixed
 - **A lost connection no longer keeps the workspace leased once the remote has confirmed nothing is
