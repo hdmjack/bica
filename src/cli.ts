@@ -1115,6 +1115,8 @@ async function runWithLiveSession(options: {
       progress: ready.progress,
       // The budget that was actually applied, which is larger for a phase with nothing to publish.
       stallSeconds: ready.stalledSeconds ?? SYNC_STALL_SECONDS,
+      restarts: ready.restarts,
+      neverStaged: ready.neverStaged,
     }).split('\n')) {
       process.stderr.write(`${warn('[bica]')} ${line}\n`);
     }

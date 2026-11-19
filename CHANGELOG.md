@@ -3,6 +3,25 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.6 — 2026-11-18
+
+### Fixed
+- **A failed listing of the remote workspace is no longer read as "the workspace is empty".** Raised against
+  0.10.5: a run printed "Seeded the empty remote workspace in one transfer" into a workspace that held a full
+  checkout and a 204 MB build. The emptiness probe printed `empty=yes` whenever `find` printed nothing, and a
+  `find` that failed prints nothing just as an empty directory does. The probe now checks `find`'s exit status
+  and answers `empty=unknown` for a failed listing, which skips the bulk copy and leaves the workspace to the
+  sync, as the code's own comment had always said it did. The cause of the failed listing in that run is not
+  known; the earlier ssh logs the report points at are from 16:30, not from the failed run.
+- **A scan that keeps starting over no longer holds `bica run` for ever.** The same run printed "Scanning the
+  tree" about a thousand times over 3 h 14 m and sent nothing. Both stall budgets restarted whenever anything in
+  the progress changed, and a scan that finishes a pass with different counts and begins another changes it every
+  time. The wait now also ends after 30 minutes in which no further file was staged, whatever else changed: exit
+  94, naming how many times the scan restarted, with nothing run. The progress line says so while it is happening.
+
+### Not fixed
+- The same report's orphaned client kept the workspace lease after being killed. The cause is not found yet.
+
 ## 0.10.5 — 2026-11-18
 
 ### Added

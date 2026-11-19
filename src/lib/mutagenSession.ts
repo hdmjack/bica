@@ -2,10 +2,12 @@ import * as fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 import {
+  SYNC_NO_STAGING_CEILING_SECONDS,
   SYNC_QUIET_PHASE_STALL_SECONDS,
   SYNC_STALL_SECONDS,
   stallBudgetSeconds,
   describeSyncProgress,
+  publishesNoProgress,
   progressFingerprint,
   readSyncProgress,
 } from './syncProgress';
@@ -85,6 +87,11 @@ export function waitForSyncReady(
      * Separate because stillness there is not evidence of anything: there was nothing to watch.
      */
     quietStallSeconds?: number;
+    /**
+     * Seconds the whole wait may go without staging one more file, whatever else changes. See
+     * `SYNC_NO_STAGING_CEILING_SECONDS`.
+     */
+    noStagingCeilingSeconds?: number;
     /** Said every so often while waiting, so a long first sync does not look like a hang. */
     onProgress?: (line: string) => void;
     /** Injectable for tests. */
@@ -102,10 +109,16 @@ export function waitForSyncReady(
   progress: SyncProgress | null;
   /** The budget that was exceeded, so the message quotes the number that was actually used. */
   stalledSeconds?: number;
+  /** Times the stall clock was reset by a change that was not staging getting further. */
+  restarts: number;
+  /** True when the wait ended on the no-staging ceiling: it was changing, and sent nothing. */
+  neverStaged?: boolean;
 } {
   const stallSeconds = options.stallSeconds ?? SYNC_STALL_SECONDS;
   const quietStallSeconds =
     options.quietStallSeconds ?? SYNC_QUIET_PHASE_STALL_SECONDS;
+  const ceilingSeconds =
+    options.noStagingCeilingSeconds ?? SYNC_NO_STAGING_CEILING_SECONDS;
   const readProgress = options.readProgress ?? readSyncProgress;
   const readStatus = options.readStatus ?? getSessionListParse;
   const now = options.now ?? Date.now;
@@ -120,16 +133,33 @@ export function waitForSyncReady(
   let fingerprint = '';
   let movedAt = now();
   let saidAt = 0;
+  // Staging getting further is the only movement that means files are on their way. The fingerprint
+  // also moves when a scan finishes a cycle with different counts, and a sync that does that forever
+  // never reaches the stall budgets above; this is what stops it.
+  let forwardAt = movedAt;
+  let stagedFiles = 0;
+  let stagedBytes = 0;
+  let restarts = 0;
 
   for (;;) {
     const info = readStatus(sessionName);
     lastStatus = info.status;
     if (info.exists && isLikelySyncReady(info.status)) {
-      return { ready: true, lastStatus, progress };
+      return { ready: true, lastStatus, progress, restarts };
     }
     progress = readProgress(sessionName);
+    const files = progress?.receivedFiles ?? 0;
+    const bytes = progress?.totalReceivedSize ?? 0;
+    if (files > stagedFiles || bytes > stagedBytes) {
+      forwardAt = now();
+    }
+    stagedFiles = files;
+    stagedBytes = bytes;
     const current = progressFingerprint(progress);
     if (current !== fingerprint) {
+      if (fingerprint !== '' && publishesNoProgress(progress?.status ?? lastStatus)) {
+        restarts += 1;
+      }
       fingerprint = current;
       movedAt = now();
     }
@@ -142,12 +172,25 @@ export function waitForSyncReady(
       quiet: quietStallSeconds,
     });
     if (stalledFor >= budget * 1_000) {
-      return { ready: false, lastStatus, progress, stalledSeconds: budget };
+      return { ready: false, lastStatus, progress, stalledSeconds: budget, restarts };
+    }
+    if (now() - forwardAt >= ceilingSeconds * 1_000) {
+      return {
+        ready: false,
+        lastStatus,
+        progress,
+        stalledSeconds: ceilingSeconds,
+        restarts,
+        neverStaged: true,
+      };
     }
     if (options.onProgress !== undefined && now() - saidAt >= PROGRESS_EVERY_MS) {
       saidAt = now();
       const line = describeSyncProgress(progress, {
-        elapsedSeconds: stalledFor / 1_000,
+        // Since anything was last sent, not since the counters last changed: those change every
+        // cycle, and a clock that restarts every cycle reads as a scan that has only just begun.
+        elapsedSeconds: (now() - forwardAt) / 1_000,
+        restarts,
       });
       if (line !== undefined) {
         options.onProgress(line);

@@ -40,6 +40,21 @@ export const SYNC_STALL_SECONDS = 60;
 export const SYNC_QUIET_PHASE_STALL_SECONDS = 600;
 
 /**
+ * The most a sync may go without staging a single further file, however much else about it changes.
+ *
+ * The two budgets above both reset whenever anything in the progress fingerprint moves, and the
+ * fingerprint includes the per-cycle file counts and the status. A sync that scans, finishes the
+ * cycle with different counts, and scans again therefore never looks stalled: each cycle is "movement".
+ * One did exactly that for 3 h 14 m -- about twenty scans of 6 to 301 s, a thousand "Scanning the
+ * tree" lines, nothing ever sent -- and `bica run` never exited, holding the workspace the whole time.
+ *
+ * Only staging getting further is progress toward the files being on the remote, so this budget is
+ * reset by that alone. Thirty minutes is three times the quiet-phase budget: long enough for a cold
+ * scan of a very large tree on a loaded machine to be followed by its first staged file.
+ */
+export const SYNC_NO_STAGING_CEILING_SECONDS = 1800;
+
+/**
  * Whether this phase publishes any number that moves while it works.
  *
  * Stillness is only evidence of a stall where there was something to watch. Matched on substrings
@@ -184,7 +199,7 @@ function formatBytes(bytes: number): string {
  */
 export function describeSyncProgress(
   progress: SyncProgress | null,
-  options: { elapsedSeconds?: number } = {},
+  options: { elapsedSeconds?: number; restarts?: number } = {},
 ): string | undefined {
   if (progress === null) {
     return undefined;
@@ -204,7 +219,11 @@ export function describeSyncProgress(
       options.elapsedSeconds === undefined || options.elapsedSeconds < 1
         ? ''
         : ` (${String(Math.round(options.elapsedSeconds))}s so far)`;
-    return `Scanning the tree${so_far}; a large repository takes a while before anything is sent.`;
+    const restarted =
+      options.restarts === undefined || options.restarts < 1
+        ? ''
+        : ` -- the scan has restarted ${String(options.restarts)} time${options.restarts === 1 ? '' : 's'} without sending anything`;
+    return `Scanning the tree${so_far}${restarted}; a large repository takes a while before anything is sent.`;
   }
   return undefined;
 }
@@ -219,7 +238,27 @@ export function describeSyncStall(options: {
   lastStatus: string | null;
   progress: SyncProgress | null;
   stallSeconds: number;
+  /**
+   * Set when the wait ended on the no-staging ceiling rather than on stillness: the sync was
+   * changing the whole time, and sent nothing.
+   */
+  restarts?: number;
+  neverStaged?: boolean;
 }): string {
+  if (options.neverStaged === true) {
+    const n = options.restarts ?? 0;
+    return (
+      `The sync ran for ${String(options.stallSeconds)}s without sending a file` +
+      (n > 0 ? `, and its scan restarted ${String(n)} time${n === 1 ? '' : 's'} in that time` : '') +
+      ` (last status: "${options.lastStatus ?? 'unknown'}"). A scan that keeps starting over is not ` +
+      'stuck on the remote -- nothing has been sent -- it usually means files under the repository ' +
+      'are changing as fast as they are read, or that Mutagen cannot finish a pass over the tree.\n' +
+      `Nothing ran, so exit ${String(SYNC_NOT_READY_EXIT)} is not a verdict on your code.\n` +
+      'Check what is writing into the repository while it syncs, that `sync.ignore.paths` covers ' +
+      'build output and run artifacts, and the local load; then run it again. ' +
+      '`mutagen sync list` shows the session if it is still there.'
+    );
+  }
   const quiet = publishesNoProgress(
     options.progress?.status ?? options.lastStatus,
   );
