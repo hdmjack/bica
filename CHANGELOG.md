@@ -3,6 +3,18 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.8 — 2026-11-19
+
+### Fixed
+- **A failed pinned sync now quotes rsync's own error lines.** Raised against 0.10.6: a pinned sync exited 23 and
+  the message read "217290 earlier characters omitted" followed by a list of files, then "remote command exited
+  1". rsync says why it failed on stderr, as it goes, and then lists the files it transferred on stdout. bica
+  joined stderr in front of stdout and kept the last 2,000 characters of the whole, so a long file list pushed
+  every error line out of the message. The two streams are now quoted separately, a short stretch of the file
+  list first and the error stream last and given the room. The reason run 80046 failed was in the part that was
+  cut, and is not recoverable from the saved log; the next failure of that kind will show it. This applies to
+  every message built from a failed child's output, not only rsync's.
+
 ## 0.10.7 — 2026-11-19
 
 ### Fixed

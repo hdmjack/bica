@@ -23,18 +23,27 @@ export const SUBPROCESS_MAX_BUFFER = 256 * 1024 * 1024;
 const QUOTED_OUTPUT_LIMIT = 2_000;
 
 /**
+ * Longest stretch of ordinary output quoted ahead of the error stream. Enough to show what the child
+ * was doing when it stopped; not enough to crowd out what it said about why.
+ */
+const QUOTED_STDOUT_LIMIT = 600;
+
+/**
  * Trim captured output down to something a person can read.
  *
  * A failure message carrying 15,000 itemised lines buries the one line that explains it, and the
  * explanation is nearly always at the end -- so the tail is what is kept.
  */
-export function quoteSubprocessOutput(text: string): string {
+export function quoteSubprocessOutput(
+  text: string,
+  limit: number = QUOTED_OUTPUT_LIMIT,
+): string {
   const trimmed = text.trim();
-  if (trimmed.length <= QUOTED_OUTPUT_LIMIT) {
+  if (trimmed.length <= limit) {
     return trimmed;
   }
-  const kept = trimmed.slice(-QUOTED_OUTPUT_LIMIT);
-  const dropped = trimmed.length - QUOTED_OUTPUT_LIMIT;
+  const kept = trimmed.slice(-limit);
+  const dropped = trimmed.length - limit;
   return `… ${String(dropped)} earlier characters omitted …\n${kept}`;
 }
 
@@ -49,9 +58,16 @@ export function describeSpawnFailure(
   result: Pick<SpawnSyncReturns<string>, 'error' | 'status' | 'stdout' | 'stderr'>,
   what: string,
 ): string {
-  const output = quoteSubprocessOutput(
-    `${result.stderr ?? ''}${result.stdout ?? ''}`,
-  );
+  // Quoted separately, with the error stream last and given the room. They used to be joined with
+  // stderr first and the tail of the whole taken, and a child whose errors come early and whose
+  // ordinary output is long -- rsync listing 217,290 characters of files after saying which one it
+  // could not read -- lost every line that explained the failure.
+  const output = [
+    quoteSubprocessOutput(result.stdout ?? '', QUOTED_STDOUT_LIMIT),
+    quoteSubprocessOutput(result.stderr ?? ''),
+  ]
+    .filter((part) => part !== '')
+    .join('\n');
   const error = result.error as (Error & { code?: string }) | undefined;
   if (error !== undefined) {
     if (error.code === 'ENOBUFS') {

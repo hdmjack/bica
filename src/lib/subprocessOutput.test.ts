@@ -96,6 +96,33 @@ describe('describeSpawnFailure', () => {
     ).toBe('The pinned sync exited 23: permission denied');
   });
 
+  it("keeps the child's error lines when its ordinary output is far longer", () => {
+    // The report: a pinned sync exited 23, and the message said "217290 earlier characters omitted"
+    // and then listed files. The errors were on stderr, which was put in front of stdout before the
+    // tail was taken, so the 2,000 characters that survived were all itemised file lines.
+    const stdout = Array.from({ length: 6_000 }, (_, i) => `<f..t.... vendor/x/file-${String(i)}.rs`).join('\n');
+    const stderr =
+      'rsync: [sender] send_files failed to open "vendor/x/locked.rs": Permission denied (13)\n' +
+      'rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338)';
+    const said = describeSpawnFailure(
+      { error: undefined, status: 23, stdout, stderr },
+      'The pinned sync',
+    );
+    expect(said).toContain('Permission denied (13)');
+    expect(said).toContain('(code 23)');
+    expect(said.length).toBeLessThan(3_500);
+  });
+
+  it('still says what the long output was, when stdout is all there is', () => {
+    // A child that prints its complaint on stdout is read the way it always was: by its tail.
+    const said = describeSpawnFailure(
+      { error: undefined, status: 1, stdout: `${'noise\n'.repeat(5_000)}the actual error`, stderr: '' },
+      'The thing',
+    );
+    expect(said).toContain('the actual error');
+    expect(said).toContain('earlier characters omitted');
+  });
+
   it('says plainly when the command could not be run at all', () => {
     expect(
       describeSpawnFailure(
