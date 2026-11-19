@@ -3,11 +3,12 @@ import { spawnSync } from 'node:child_process';
 
 import {
   SYNC_NO_STAGING_CEILING_SECONDS,
+  SYNC_PERSISTENT_ERROR_SECONDS,
   SYNC_QUIET_PHASE_STALL_SECONDS,
   SYNC_STALL_SECONDS,
   stallBudgetSeconds,
   describeSyncProgress,
-  publishesNoProgress,
+  isScanStart,
   progressFingerprint,
   readSyncProgress,
 } from './syncProgress';
@@ -92,6 +93,11 @@ export function waitForSyncReady(
      * `SYNC_NO_STAGING_CEILING_SECONDS`.
      */
     noStagingCeilingSeconds?: number;
+    /**
+     * Seconds the same Mutagen error may stand, with nothing staged, before the wait gives up on it.
+     * See `SYNC_PERSISTENT_ERROR_SECONDS`.
+     */
+    persistentErrorSeconds?: number;
     /** Said every so often while waiting, so a long first sync does not look like a hang. */
     onProgress?: (line: string) => void;
     /** Injectable for tests. */
@@ -109,8 +115,10 @@ export function waitForSyncReady(
   progress: SyncProgress | null;
   /** The budget that was exceeded, so the message quotes the number that was actually used. */
   stalledSeconds?: number;
-  /** Times the stall clock was reset by a change that was not staging getting further. */
+  /** Times a scan began again after the first, so a number that is 0 for a tree scanned once. */
   restarts: number;
+  /** Set when the wait ended because Mutagen kept reporting this same error and never got past it. */
+  persistentError?: string;
   /** True when the wait ended on the no-staging ceiling: it was changing, and sent nothing. */
   neverStaged?: boolean;
 } {
@@ -119,6 +127,8 @@ export function waitForSyncReady(
     options.quietStallSeconds ?? SYNC_QUIET_PHASE_STALL_SECONDS;
   const ceilingSeconds =
     options.noStagingCeilingSeconds ?? SYNC_NO_STAGING_CEILING_SECONDS;
+  const errorSeconds =
+    options.persistentErrorSeconds ?? SYNC_PERSISTENT_ERROR_SECONDS;
   const readProgress = options.readProgress ?? readSyncProgress;
   const readStatus = options.readStatus ?? getSessionListParse;
   const now = options.now ?? Date.now;
@@ -139,13 +149,20 @@ export function waitForSyncReady(
   let forwardAt = movedAt;
   let stagedFiles = 0;
   let stagedBytes = 0;
-  let restarts = 0;
+  // Scans begun, counted on entering one from some other state. The fingerprint moves for many
+  // reasons that are not a scan starting over -- a count stepping, a status naming a different phase --
+  // and counting those said "restarted" about a session that never scanned anything.
+  let scansBegun = 0;
+  let scanning = false;
+  // The error Mutagen is reporting, and since when. A change of message or a clean cycle starts over.
+  let errorSeen: string | undefined;
+  let errorSince = movedAt;
 
   for (;;) {
     const info = readStatus(sessionName);
     lastStatus = info.status;
     if (info.exists && isLikelySyncReady(info.status)) {
-      return { ready: true, lastStatus, progress, restarts };
+      return { ready: true, lastStatus, progress, restarts: Math.max(0, scansBegun - 1) };
     }
     progress = readProgress(sessionName);
     const files = progress?.receivedFiles ?? 0;
@@ -157,11 +174,33 @@ export function waitForSyncReady(
     stagedBytes = bytes;
     const current = progressFingerprint(progress);
     if (current !== fingerprint) {
-      if (fingerprint !== '' && publishesNoProgress(progress?.status ?? lastStatus)) {
-        restarts += 1;
-      }
       fingerprint = current;
       movedAt = now();
+    }
+    const scanningNow = isScanStart(progress?.status ?? lastStatus);
+    if (scanningNow && !scanning) {
+      scansBegun += 1;
+    }
+    scanning = scanningNow;
+    const restarts = Math.max(0, scansBegun - 1);
+    const reportedError = progress?.lastError;
+    if (reportedError !== errorSeen) {
+      errorSeen = reportedError;
+      errorSince = now();
+    }
+    if (
+      errorSeen !== undefined &&
+      now() - errorSince >= errorSeconds * 1_000 &&
+      now() - forwardAt >= errorSeconds * 1_000
+    ) {
+      return {
+        ready: false,
+        lastStatus,
+        progress,
+        stalledSeconds: errorSeconds,
+        restarts,
+        persistentError: errorSeen,
+      };
     }
     const stalledFor = now() - movedAt;
     // The budget depends on what the sync is doing. Scanning a large tree publishes no number that

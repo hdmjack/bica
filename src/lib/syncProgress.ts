@@ -55,6 +55,21 @@ export const SYNC_QUIET_PHASE_STALL_SECONDS = 600;
 export const SYNC_NO_STAGING_CEILING_SECONDS = 1800;
 
 /**
+ * How long Mutagen may report the same session error before the wait gives up on it.
+ *
+ * A session that cannot open one of its roots does not stop: it reports the error, waits five seconds
+ * and tries again, for ever. Nothing in its status moves in a way a stall budget notices, because
+ * "waiting for rescan" and "scanning" alternate, so the wait used to read it as a scan that restarts
+ * and reported that, with a hint about large repositories. Nothing is wrong with the repository; the
+ * error says so, and it is available in the session listing the whole time.
+ *
+ * Long enough that a dropped connection, which Mutagen reports and then recovers from within a few
+ * retries, is not mistaken for this; short enough that nobody waits for a thing that was never going
+ * to come good.
+ */
+export const SYNC_PERSISTENT_ERROR_SECONDS = 45;
+
+/**
  * Whether this phase publishes any number that moves while it works.
  *
  * Stillness is only evidence of a stall where there was something to watch. Matched on substrings
@@ -102,11 +117,17 @@ export interface SyncProgress {
   /** Files Mutagen has reconciled on each side, which step up once per cycle. */
   alphaFiles?: number;
   betaFiles?: number;
+  /**
+   * The error Mutagen last hit, as it words it. It stays set while the session retries, and goes
+   * when a cycle completes, so seeing the same one again and again means the retry is not working.
+   */
+  lastError?: string;
 }
 
 /** Shape of the parts of `mutagen sync list --template '{{json .}}'` this reads. */
 interface MutagenSessionJson {
   status?: unknown;
+  lastError?: unknown;
   alpha?: { files?: unknown };
   beta?: {
     files?: unknown;
@@ -142,7 +163,26 @@ export function parseSyncProgress(json: string): SyncProgress | null {
     totalReceivedSize: asNumber(staging?.totalReceivedSize),
     alphaFiles: asNumber(session.alpha?.files),
     betaFiles: asNumber(session.beta?.files),
+    lastError:
+      typeof session.lastError === 'string' && session.lastError.trim() !== ''
+        ? session.lastError.trim()
+        : undefined,
   };
+}
+
+/**
+ * Whether this status is a scan beginning, as opposed to the wait between scans.
+ *
+ * `waiting-for-rescan` contains the word "scan", which is why `publishesNoProgress` treats it as a
+ * phase with nothing to report; but it is the opposite of a scan starting, and counting it as one is
+ * how a session that never scanned anything came to be described as a scan that kept restarting.
+ */
+export function isScanStart(status: string | null): boolean {
+  if (status === null) {
+    return false;
+  }
+  const s = status.toLowerCase();
+  return s.includes('scan') && !s.includes('rescan');
 }
 
 /** How a sync's progress is read. Injectable so the waiting can be tested without Mutagen. */
@@ -205,6 +245,11 @@ export function describeSyncProgress(
     return undefined;
   }
   const { receivedFiles, expectedFiles, totalReceivedSize } = progress;
+  if (progress.lastError !== undefined) {
+    // Ahead of anything about scanning: a session that is retrying after an error is not scanning,
+    // and "a large repository takes a while" sends the reader looking at the wrong thing.
+    return `The sync is retrying after an error: ${progress.lastError}`;
+  }
   if (receivedFiles !== undefined && expectedFiles !== undefined) {
     const size =
       totalReceivedSize === undefined
@@ -228,6 +273,22 @@ export function describeSyncProgress(
   return undefined;
 }
 
+/** What to check for an error that does not clear. Says only what the error itself supports. */
+function persistentErrorHint(error: string): string {
+  if (error.toLowerCase().includes('too many levels of symbolic links')) {
+    return (
+      'Mutagen refuses to open a synchronization root through a symbolic link, and the remote path is ' +
+      'one, or passes through one. Check it with `ssh <host> ls -ld <remotePath>`, and point ' +
+      '`remotePath` (in .bica/local.yml or BICA_REMOTE_PATH) at the directory it resolves to.'
+    );
+  }
+  return (
+    'This is Mutagen\'s own message, from `mutagen sync list` for this session. The repository is not ' +
+    'the likely cause: check that the remote is reachable and that the local and remote paths exist ' +
+    'and can be opened, then run it again.'
+  );
+}
+
 /**
  * What to tell someone whose sync never got there.
  *
@@ -244,7 +305,18 @@ export function describeSyncStall(options: {
    */
   restarts?: number;
   neverStaged?: boolean;
+  /** Set when the wait ended because Mutagen kept reporting this same error and never recovered. */
+  persistentError?: string;
 }): string {
+  if (options.persistentError !== undefined) {
+    return (
+      `The sync could not get started: Mutagen has reported the same error for ` +
+      `${String(options.stallSeconds)}s and retried without getting past it:\n` +
+      `  ${options.persistentError}\n` +
+      `Nothing ran, so exit ${String(SYNC_NOT_READY_EXIT)} is not a verdict on your code.\n` +
+      persistentErrorHint(options.persistentError)
+    );
+  }
   if (options.neverStaged === true) {
     const n = options.restarts ?? 0;
     return (

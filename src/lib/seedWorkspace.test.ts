@@ -66,6 +66,24 @@ describe('buildEmptinessProbeScript, run in a real shell', () => {
     }
   });
 
+  it('looks inside a workspace path that is a symbolic link, as the remote paths are', () => {
+    // `seed-mini.sh` makes ~/code/NAME a link to a directory on another volume. `find` does not
+    // follow a link it is handed, so it listed nothing, successfully, and a workspace holding a full
+    // tree was called empty and bulk-copied over on every run.
+    const real = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-real-'));
+    const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-link-'));
+    const link = path.join(holder, 'workspace');
+    try {
+      fs.symlinkSync(real, link);
+      expect(probe(link)).toBe('empty=yes\n');
+      fs.writeFileSync(path.join(real, 'f'), '');
+      expect(probe(link)).toBe('empty=no\n');
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true });
+      fs.rmSync(holder, { recursive: true, force: true });
+    }
+  });
+
   it('does not call a workspace empty when the listing itself failed', () => {
     // A failed `find` prints nothing, which is what an empty directory prints too. A full workspace
     // on a machine out of file descriptors was seeded as "empty" on that reading.

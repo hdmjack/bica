@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { waitForSyncReady } from './mutagenSession';
 import type { SessionListParse } from './mutagenSession';
+import { describeSyncStall, parseSyncProgress } from './syncProgress';
 import type { SyncProgress } from './syncProgress';
 
 /**
@@ -61,11 +62,13 @@ describe('waitForSyncReady, a scan that keeps starting over', () => {
       readStatus: () => ({ exists: true, status: 'Scanning files' }),
       readProgress: () => {
         polls += 1;
-        // The counts step every 100 polls (50 s), well inside the 600 s quiet budget.
+        // The counts step every 100 polls (50 s), well inside the 600 s quiet budget, and each cycle
+        // is a scan, a reconcile, a wait, and a scan again.
         if (polls % 100 === 0) {
           cycle += 1;
         }
-        return { status: 'scanning', alphaFiles: 181_000 + cycle, betaFiles: 181_000 };
+        const phase = polls % 100 < 80 ? 'scanning' : polls % 100 < 90 ? 'reconciling' : 'waiting-for-rescan';
+        return { status: phase, alphaFiles: 181_000 + cycle, betaFiles: 181_000 };
       },
     });
     expect(result.ready).toBe(false);
@@ -196,5 +199,147 @@ describe('waitForSyncReady', () => {
     });
     expect(result.ready).toBe(true);
     expect(clock.now()).toBe(0);
+  });
+});
+
+/**
+ * Captured from `mutagen sync list --template '{{json .}}'` (0.18.1) for a session whose beta root is a
+ * symbolic link that loops, which is the error the report's run showed against the mini. Only the
+ * fields bica reads are kept; the rest of the real output is identifiers, paths and empty objects.
+ */
+const REAL_UNOPENABLE_ROOT = JSON.stringify([
+  {
+    alpha: { protocol: 'local', connected: true, scanned: false },
+    beta: { protocol: 'local', connected: true, scanned: false },
+    mode: 'one-way-replica',
+    name: 'bica-fixture-loop',
+    paused: false,
+    status: 'waiting-for-rescan',
+    lastError:
+      'beta scan error: unable to open synchronization root: too many levels of symbolic links',
+  },
+]);
+
+describe('waitForSyncReady, a session that cannot open its root', () => {
+  it('reads the error out of what Mutagen really prints', () => {
+    const progress = parseSyncProgress(REAL_UNOPENABLE_ROOT);
+    expect(progress?.status).toBe('waiting-for-rescan');
+    expect(progress?.lastError).toContain('too many levels of symbolic links');
+  });
+
+  it('stops on the error, names it, and does not call it a scan that restarted', () => {
+    // The report's run: `bica run true` printed "Scanning the tree ... restarted N times" for five
+    // minutes while Mutagen retried an unopenable root every five seconds and said why on every poll.
+    const clock = fakeClock(500);
+    const progress = parseSyncProgress(REAL_UNOPENABLE_ROOT);
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: () => ({ exists: true, status: 'Waiting 5 seconds for rescan' }),
+      readProgress: () => progress,
+    });
+    expect(result.ready).toBe(false);
+    expect(result.persistentError).toContain('too many levels of symbolic links');
+    expect(result.restarts).toBe(0);
+    expect(result.neverStaged).toBeUndefined();
+    expect(clock.now()).toBeGreaterThanOrEqual(45_000);
+    expect(clock.now()).toBeLessThan(60_000);
+
+    const message = describeSyncStall({
+      lastStatus: result.lastStatus,
+      progress: result.progress,
+      stallSeconds: result.stalledSeconds ?? 0,
+      persistentError: result.persistentError,
+    });
+    expect(message).toContain('too many levels of symbolic links');
+    expect(message).toContain('remotePath');
+    expect(message).toContain('exit 94 is not a verdict');
+    expect(message).not.toContain('large repository');
+  });
+
+  it('says so while it is happening, not only at the end', () => {
+    const said: string[] = [];
+    const progress = parseSyncProgress(REAL_UNOPENABLE_ROOT);
+    waitForSyncReady('s', {
+      ...fakeClock(500),
+      readStatus: () => ({ exists: true, status: 'Waiting 5 seconds for rescan' }),
+      readProgress: () => progress,
+      onProgress: (line) => said.push(line),
+    });
+    expect(said[0]).toContain('retrying after an error');
+    expect(said[0]).toContain('too many levels of symbolic links');
+    expect(said.join('\n')).not.toContain('Scanning the tree');
+  });
+
+  it('waits out an error that clears, as a dropped connection does', () => {
+    const clock = fakeClock(500);
+    let polls = 0;
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: statusAfter(150, 'Waiting 5 seconds for rescan', 'Watching for changes'),
+      readProgress: () => {
+        polls += 1;
+        // Thirty seconds of error, then a normal cycle: under the 45 s window.
+        return polls < 60
+          ? { status: 'waiting-for-rescan', lastError: 'beta scan error: connection reset' }
+          : { status: 'scanning' };
+      },
+    });
+    expect(result.ready).toBe(true);
+    expect(result.persistentError).toBeUndefined();
+  });
+
+  it('starts the window again when the error changes', () => {
+    const clock = fakeClock(500);
+    let polls = 0;
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: statusAfter(220, 'Waiting 5 seconds for rescan', 'Watching for changes'),
+      readProgress: () => {
+        polls += 1;
+        // A different message every 40 s: no one of them stands for 45 s.
+        return {
+          status: 'waiting-for-rescan',
+          lastError: `beta scan error: attempt ${String(Math.floor(polls / 80))}`,
+        };
+      },
+    });
+    expect(result.ready).toBe(true);
+  });
+});
+
+describe('waitForSyncReady, counting scan restarts', () => {
+  it('counts scans that begin again, not changes in the counters', () => {
+    // Three scans in a row, with the counts changing all the while: two restarts.
+    const clock = fakeClock(500);
+    const script = [
+      ...Array<string>(40).fill('scanning'),
+      ...Array<string>(20).fill('reconciling'),
+      ...Array<string>(40).fill('scanning'),
+      ...Array<string>(20).fill('waiting-for-rescan'),
+      ...Array<string>(40).fill('scanning'),
+    ];
+    let polls = 0;
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: statusAfter(script.length, 'Scanning', 'Watching for changes'),
+      readProgress: () => {
+        const status = script[Math.min(polls, script.length - 1)];
+        polls += 1;
+        return { status, alphaFiles: polls, betaFiles: polls };
+      },
+    });
+    expect(result.ready).toBe(true);
+    expect(result.restarts).toBe(2);
+  });
+
+  it('reports no restarts for a tree that was scanned once', () => {
+    const clock = fakeClock(500);
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: statusAfter(100, 'Scanning', 'Watching for changes'),
+      readProgress: () => ({ status: 'scanning' }),
+    });
+    expect(result.ready).toBe(true);
+    expect(result.restarts).toBe(0);
   });
 });

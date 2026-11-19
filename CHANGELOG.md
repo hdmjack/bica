@@ -3,6 +3,39 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.7 — 2026-11-19
+
+### Fixed
+- **A sync that cannot open its remote folder now stops and says why, instead of reporting a scan that keeps
+  restarting.** Raised against 0.10.6: `bica run true` in a freshly seeded worktree printed "Scanning the tree ...
+  the scan has restarted 13 times without sending anything" for five minutes and never ran the command. The scan
+  was not restarting and the tree was not large. Mutagen could not open the remote root
+  (`unable to open synchronization root: too many levels of symbolic links`, the remote path being a link to
+  another volume), retried every five seconds, and reported that error on every poll; bica read the status,
+  which alternated between two words, and never read the error. The wait now reads it. The progress line shows it
+  at once, and the same error standing for 45 seconds with nothing sent ends the run with exit 94, the error
+  quoted, and what to check. An error that clears, as a dropped connection does, is still waited out.
+  Not established: why other worktrees, whose remote paths are links of the same kind, sync. The link itself is
+  therefore named as the thing to check, not asserted as the cause for every such setup.
+- **The "restarted N times" count is now a count of scans that began again.** It was a count of changes in the
+  progress numbers, which also move when a phase changes or a counter steps, so it said "restarted" about a
+  session that had not scanned anything. A tree scanned once now reports none.
+- **The live sync no longer sends `.bica/` to the remote.** It holds the ssh host, the generated project file,
+  the lock naming the running session and the live-run marker, and bica rewrites them while the sync is running.
+  Pinned runs always left it out; the live session did not. It is added to the ignore list unless the repository
+  already ignores it. The remote reads none of it. This was not shown to cause the stall above.
+
+- **A workspace path that is a symbolic link is no longer read as "empty".** Found while reproducing the above:
+  the emptiness probe ran `find` on the path without following it, so for a link it listed nothing, successfully,
+  and bica printed "Seeded the empty remote workspace in one transfer" and bulk-copied over a workspace that held
+  a full tree. This is the 0.10.6 failure again by another route, and every run into a linked path took it.
+  The probe now follows the link (`find -H`). Checked on the mini: without it a linked, populated workspace
+  lists nothing; with it, the first file.
+
+### Not fixed
+- A run killed by `timeout` (SIGTERM) leaves its sync session running; the next run clears it ("was not shut down
+  cleanly"). Seen while reproducing the above.
+
 ## 0.10.6 — 2026-11-18
 
 ### Fixed

@@ -1117,6 +1117,7 @@ async function runWithLiveSession(options: {
       stallSeconds: ready.stalledSeconds ?? SYNC_STALL_SECONDS,
       restarts: ready.restarts,
       neverStaged: ready.neverStaged,
+      persistentError: ready.persistentError,
     }).split('\n')) {
       process.stderr.write(`${warn('[bica]')} ${line}\n`);
     }

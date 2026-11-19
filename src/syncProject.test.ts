@@ -64,7 +64,7 @@ returnFlow:
     expect(keys).toHaveLength(1);
     const session = n.sync[keys[0]];
     expect(session?.mode).toBe('one-way-replica');
-    expect(session?.ignore?.paths).toEqual(['node_modules']);
+    expect(session?.ignore?.paths).toEqual(['node_modules', '.bica']);
   });
 
   it('ignores *.tsbuildinfo with dist for a bica.yml that has not said, as float-javascript\'s had not', () => {
@@ -80,7 +80,7 @@ returnFlow:
     const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
     const session = n.sync[Object.keys(n.sync)[0]];
     // What the sync is configured with, not only what the report says.
-    expect(session?.ignore?.paths).toEqual(['node_modules', 'dist', '*.tsbuildinfo']);
+    expect(session?.ignore?.paths).toEqual(['node_modules', 'dist', '*.tsbuildinfo', '.bica']);
     expect(n.syncIgnorePaths).toContain('*.tsbuildinfo');
     expect(n.companionRecordsIgnored).toEqual(['*.tsbuildinfo']);
   });
@@ -97,7 +97,7 @@ returnFlow:
     const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
     const name = Object.keys(n.sync)[0];
     expect(n.sync[name]?.mode).toBe('one-way-replica');
-    expect(n.sync[name]?.ignore?.paths).toEqual(['node_modules']);
+    expect(n.sync[name]?.ignore?.paths).toEqual(['node_modules', '.bica']);
   });
 
   it('accepts legacy single named session', () => {
@@ -157,7 +157,7 @@ returnFlow:
     expect(n.returnFlow?.paths).toEqual(['**/*.snap', '**/snapshots/**']);
     const session = n.sync[Object.keys(n.sync)[0]];
     const ignored = session?.ignore?.paths ?? [];
-    expect(ignored).toEqual(['node_modules', '**/*.snap', '**/snapshots/**']);
+    expect(ignored).toEqual(['node_modules', '**/*.snap', '.bica', '**/snapshots/**']);
   });
 
   it('disables return-flow when returnFlow.paths is an empty list', () => {
@@ -170,7 +170,50 @@ returnFlow:
     const n = normalizeToSyncSpecYaml(doc, repoRoot, 'bica.yml');
     expect(n.returnFlow?.paths).toEqual([]);
     const session = n.sync[Object.keys(n.sync)[0]];
-    expect(session?.ignore?.paths ?? undefined).toBeUndefined();
+    // Nothing the user or the return-flow asked for, but bica's own state is never synced.
+    expect(session?.ignore?.paths).toEqual(['.bica']);
+  });
+
+  it("keeps bica's own state out of the live sync, in either layout", () => {
+    // The live session used to send `.bica/` to the remote -- the ssh host, the generated project
+    // file, the lock, the live-run marker -- and those are rewritten while the scan is running.
+    const flat = normalizeToSyncSpecYaml(
+      YAML.parse('sync:\n  mode: one-way-replica\n') as unknown,
+      repoRoot,
+      'bica.yml',
+    );
+    expect(flat.sync[Object.keys(flat.sync)[0]]?.ignore?.paths).toContain('.bica');
+
+    const named = normalizeToSyncSpecYaml(
+      YAML.parse('sync:\n  web:\n    mode: one-way-replica\n') as unknown,
+      repoRoot,
+      'bica.yml',
+    );
+    expect(named.sync.web?.ignore?.paths).toContain('.bica');
+  });
+
+  it('does not add .bica a second time when the user already ignores it', () => {
+    for (const spelling of ['.bica', '.bica/', '/.bica']) {
+      const n = normalizeToSyncSpecYaml(
+        YAML.parse(
+          `sync:\n  mode: one-way-replica\n  ignore:\n    paths:\n      - ${spelling}\nreturnFlow:\n  paths: []\n`,
+        ) as unknown,
+        repoRoot,
+        'bica.yml',
+      );
+      expect(n.sync[Object.keys(n.sync)[0]]?.ignore?.paths).toEqual([spelling]);
+    }
+  });
+
+  it('leaves syncIgnorePaths as the configured list, without bica\'s own entry', () => {
+    const n = normalizeToSyncSpecYaml(
+      YAML.parse(
+        'sync:\n  mode: one-way-replica\n  ignore:\n    paths:\n      - node_modules\nreturnFlow:\n  paths: []\n',
+      ) as unknown,
+      repoRoot,
+      'bica.yml',
+    );
+    expect(n.syncIgnorePaths).toEqual(['node_modules']);
   });
 });
 

@@ -52,7 +52,10 @@ export function buildEmptinessProbeScript(remoteWorkspacePath: string): string {
     `w=${w}`,
     `if [ ! -d "$w" ]; then printf 'empty=yes\\n'; exit 0; fi`,
     // `-print -quit` leaves as soon as one entry is found, so this costs nothing on a full tree.
-    `found=$(find "$w" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)`,
+    // `-H` because a workspace path is often a link (`~/code/NAME` to a directory on another
+    // volume), and without it `find` does not follow the link it is given: it lists nothing, with
+    // status 0, which reads as an empty workspace whatever the link points at.
+    `found=$(find -H "$w" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)`,
     `rc=$?`,
     // A listing that failed prints nothing, which is exactly what an empty directory prints. Only a
     // listing that succeeded and found nothing is evidence of emptiness; a failed one (no file

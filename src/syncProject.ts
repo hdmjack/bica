@@ -76,6 +76,27 @@ export const DEFAULT_RETURN_FLOW_PATHS: readonly string[] = [
   '*.log',
 ];
 
+/** Whether an ignore list already names bica's own state directory, in any spelling a person writes. */
+function ignoresBicaState(paths: readonly string[]): boolean {
+  return paths.some((raw) => {
+    const p = raw.trim().replace(/^["']|["']$/g, '');
+    return p === '.bica' || p === '.bica/' || p === '/.bica' || p === '/.bica/';
+  });
+}
+
+/**
+ * Keeps bica's own state out of the live sync.
+ *
+ * `.bica/` holds this checkout's ssh host, its generated project file, the lock naming the running
+ * session and the live-run marker, and bica rewrites those while the sync runs. Pinned runs have
+ * always left it out of their copy; the live session did not, so every one of those files was sent to
+ * the remote and changed under a scan in progress. None of it is meant to be there: the remote reads
+ * none of it, and the host and local paths in it are this machine's.
+ */
+export function withBicaStateIgnored(paths: readonly string[]): string[] {
+  return ignoresBicaState(paths) ? [...paths] : [...paths, '.bica'];
+}
+
 export function findBicaSpecPath(repoRoot: string): {
   absolutePath: string;
   displayName: string;
@@ -222,7 +243,10 @@ export function normalizeToSyncSpecYaml(
     return {
       sync: {
         [sessionName]: applyReturnFlowToSession(
-          { ...session, ignore: { paths: sessionIgnore.paths } },
+          {
+            ...session,
+            ignore: { paths: withBicaStateIgnored(sessionIgnore.paths) },
+          },
           [...returnFlow.paths, ...generated.paths],
         ),
       },
@@ -257,9 +281,7 @@ export function normalizeToSyncSpecYaml(
   const cargoIgnore = withCargoTargetIgnored(repoRoot, ignore?.paths ?? []);
   const companions = withCompanionRecordsIgnored(cargoIgnore.paths);
   const flatIgnore = { ...cargoIgnore, paths: companions.paths };
-  if (flatIgnore.added || companions.added.length > 0) {
-    ignore = { paths: flatIgnore.paths };
-  }
+  ignore = { paths: withBicaStateIgnored(flatIgnore.paths) };
 
   return {
     sync: {
