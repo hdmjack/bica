@@ -3,6 +3,19 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.9 — 2026-11-19
+
+### Fixed
+- **`bica run --write-back` brings home a snapshot the command rewrote.** Raised against 0.10.8:
+  `bica run --write-back pnpm test:run <file> -u` updated two `.snap` files on the remote, exited 0, and copied
+  neither home, with no "Copied back" line and no notice that files were written. A run of the same flag minutes
+  earlier copied 34 files home. The write-back check leaves out the return-flow patterns (`**/__snapshots__/**`,
+  `**/*.snap`, `*.log`) because the return-flow pull carries them, so as not to name a file twice. Pinned runs,
+  which `--write-back` implies, do not pull return-flow unless `--return-flow` is passed, so those files were
+  left out by the check and carried by nothing. They are now left out only when the pull will run. Without
+  `--return-flow` a rewritten snapshot is copied back like any other file the run wrote; with it, the return-flow
+  pull still carries it and it is named once.
+
 ## 0.10.8 — 2026-11-19
 
 ### Fixed

@@ -109,6 +109,29 @@ export function buildPruneTerms(ignorePaths: readonly string[]): string[] {
 }
 
 /**
+ * The paths the write-back probe leaves out because something else carries them home.
+ *
+ * Return-flow patterns have their own transport, and naming them here as well would report one file
+ * twice. That holds only while the transport runs. A pinned run -- which `--write-back` implies -- does
+ * not pull return-flow unless asked to, and the probe still skipped those paths, so a snapshot the
+ * command rewrote (`vitest -u`) was claimed by a pull that was not happening and came back by neither:
+ * the run exited 0, copied nothing and said nothing. So the patterns are left out only when the pull
+ * will actually run.
+ */
+export function writeBackIgnorePaths(options: {
+  syncIgnorePaths: readonly string[];
+  returnFlowPaths: readonly string[];
+  /** Whether this run goes on to pull return-flow files, which is what makes skipping them safe. */
+  returnFlowPulls: boolean;
+}): string[] {
+  const pulls =
+    options.returnFlowPulls &&
+    options.returnFlowPaths.length > 0 &&
+    process.env.BICA_RETURN_FLOW?.trim() !== '0';
+  return [...options.syncIgnorePaths, ...(pulls ? options.returnFlowPaths : [])];
+}
+
+/**
  * The script that lists every file written since the marker, one per line, and then removes the
  * marker so a killed run leaves nothing behind.
  *

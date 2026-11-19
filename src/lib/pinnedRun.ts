@@ -57,6 +57,7 @@ import {
   pullWriteBack,
   reportWriteBack,
   writeBackDisabled,
+  writeBackIgnorePaths,
   writeBackMarkerPath,
 } from './writeBack';
 import { runRemoteScriptOverStdin } from './runRemote';
@@ -595,8 +596,14 @@ export async function runPinned(options: {
         remoteWorkspacePath: prep.config.remoteWorkspacePath,
         repoRoot: prep.repoRoot,
         markerPath,
-        // Return-flow paths have their own transport; reporting them here would name the same files twice.
-        ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
+        // Return-flow paths have their own transport when it runs; reporting them here would name the
+        // same files twice. When it does not -- pinned runs pull it only with --return-flow -- nothing
+        // else will bring them home.
+        ignorePaths: writeBackIgnorePaths({
+          syncIgnorePaths: prep.syncIgnorePaths,
+          returnFlowPaths: prep.returnFlowPaths,
+          returnFlowPulls: returnFlowWanted,
+        }),
         run: runRemoteScriptOverStdin,
       })
     : [];

@@ -17,6 +17,7 @@ import {
   parseLsTreeZ,
   partitionByLocalEdits,
   validateProbePattern,
+  writeBackIgnorePaths,
   writeBackMarkerPath,
 } from './writeBack';
 
@@ -111,6 +112,78 @@ describe('buildWriteBackProbeScript', () => {
       ignorePaths: [],
     });
     expect(script).toContain("[ -e '/tmp/m' ] || exit 0");
+  });
+});
+
+describe('writeBackIgnorePaths', () => {
+  const sync = ['node_modules', 'dist'];
+  const flow = ['**/__snapshots__/**', '**/*.snap', '*.log'];
+
+  it('leaves return-flow paths to the return-flow pull when that pull will run', () => {
+    // Otherwise the same file is named twice, once by each.
+    expect(writeBackIgnorePaths({ syncIgnorePaths: sync, returnFlowPaths: flow, returnFlowPulls: true })).toEqual([
+      ...sync,
+      ...flow,
+    ]);
+  });
+
+  it('does not leave them to a pull that is not running', () => {
+    // Pinned runs, which --write-back implies, do not pull return-flow unless asked to. A snapshot the
+    // command rewrote was then claimed by a transport that was off, and came back by neither.
+    expect(writeBackIgnorePaths({ syncIgnorePaths: sync, returnFlowPaths: flow, returnFlowPulls: false })).toEqual(sync);
+  });
+});
+
+describe('buildWriteBackProbeScript, run against a real workspace', () => {
+  /** A workspace where a command has just rewritten one snapshot and one ordinary file. */
+  function runProbe(ignorePaths: readonly string[]): string[] {
+    const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-ws-'));
+    const markerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-marker-'));
+    const marker = path.join(markerDir, 'marker');
+    try {
+      fs.mkdirSync(path.join(ws, 'web/__snapshots__'), { recursive: true });
+      fs.mkdirSync(path.join(ws, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(ws, 'web/__snapshots__/index.test.tsx.snap'), 'old');
+      fs.writeFileSync(path.join(ws, 'src/a.ts'), 'old');
+      fs.writeFileSync(marker, '');
+      // The marker is older than what the command then writes.
+      const past = new Date(Date.now() - 60_000);
+      fs.utimesSync(marker, past, past);
+      fs.writeFileSync(path.join(ws, 'web/__snapshots__/index.test.tsx.snap'), 'new');
+      fs.writeFileSync(path.join(ws, 'src/a.ts'), 'new');
+      const out = execFileSync(
+        'sh',
+        [
+          '-c',
+          buildWriteBackProbeScript({ remoteWorkspacePath: ws, markerPath: marker, ignorePaths }),
+        ],
+        { encoding: 'utf8' },
+      );
+      return parseChangedPaths(out);
+    } finally {
+      fs.rmSync(ws, { recursive: true, force: true });
+      fs.rmSync(markerDir, { recursive: true, force: true });
+    }
+  }
+
+  it('names a rewritten snapshot when return-flow is not carrying it, and the ordinary file too', () => {
+    // The report: `bica run --write-back pnpm test:run <file> -u` updated two .snap files on the
+    // remote and copied neither home. The control is the ordinary file, which did arrive.
+    const ignore = writeBackIgnorePaths({
+      syncIgnorePaths: ['node_modules'],
+      returnFlowPaths: ['**/__snapshots__/**', '**/*.snap'],
+      returnFlowPulls: false,
+    });
+    expect(runProbe(ignore)).toEqual(['src/a.ts', 'web/__snapshots__/index.test.tsx.snap']);
+  });
+
+  it('leaves the snapshot to return-flow when that pull is running', () => {
+    const ignore = writeBackIgnorePaths({
+      syncIgnorePaths: ['node_modules'],
+      returnFlowPaths: ['**/__snapshots__/**', '**/*.snap'],
+      returnFlowPulls: true,
+    });
+    expect(runProbe(ignore)).toEqual(['src/a.ts']);
   });
 });
 

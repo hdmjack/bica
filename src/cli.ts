@@ -114,6 +114,7 @@ import {
   placeWriteBackMarker,
   reportWriteBack,
   writeBackDisabled,
+  writeBackIgnorePaths,
   writeBackMarkerPath,
 } from './lib/writeBack';
 import {
@@ -1272,7 +1273,12 @@ async function runWithLiveSession(options: {
           remoteSyncUrl: prep.remoteSyncUrl,
           repoRoot: prep.repoRoot,
           markerPath,
-          ignorePaths: [...prep.syncIgnorePaths, ...prep.returnFlowPaths],
+          ignorePaths: writeBackIgnorePaths({
+            syncIgnorePaths: prep.syncIgnorePaths,
+            returnFlowPaths: prep.returnFlowPaths,
+            // A live run always pulls return-flow files after the command.
+            returnFlowPulls: true,
+          }),
           pushedTreeOid: undefined,
           pull: false,
           // This run's session keeps pushing local edits while the command runs.
