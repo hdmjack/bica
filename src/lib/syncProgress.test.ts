@@ -159,3 +159,26 @@ describe('describeSyncStall', () => {
     ).toContain('only what is missing');
   });
 });
+
+describe('describeSyncStall for a scan that never sent anything', () => {
+  it('names the restarts and says nothing ran', () => {
+    const text = describeSyncStall({
+      lastStatus: 'Scanning files',
+      progress: { status: 'scanning' },
+      stallSeconds: 1800,
+      restarts: 20,
+      neverStaged: true,
+    });
+    expect(text).toContain('restarted 20 times');
+    expect(text).toContain('Nothing ran');
+    expect(text).toContain('1800s');
+  });
+
+  it('says in the progress line that the scan has restarted', () => {
+    const line = describeSyncProgress(
+      { status: 'scanning' },
+      { elapsedSeconds: 900, restarts: 3 },
+    );
+    expect(line).toContain('restarted 3 times');
+  });
+});

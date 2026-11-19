@@ -1,3 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -41,7 +46,49 @@ describe('buildEmptinessProbeScript', () => {
   });
 });
 
+describe('buildEmptinessProbeScript, run in a real shell', () => {
+  function probe(workspace: string, env: NodeJS.ProcessEnv = process.env): string {
+    const result = spawnSync('sh', ['-c', buildEmptinessProbeScript(workspace)], {
+      encoding: 'utf8',
+      env,
+    });
+    return result.stdout;
+  }
+
+  it('says empty for an empty directory, no for a full one', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-'));
+    try {
+      expect(probe(dir)).toBe('empty=yes\n');
+      fs.writeFileSync(path.join(dir, 'f'), '');
+      expect(probe(dir)).toBe('empty=no\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not call a workspace empty when the listing itself failed', () => {
+    // A failed `find` prints nothing, which is what an empty directory prints too. A full workspace
+    // on a machine out of file descriptors was seeded as "empty" on that reading.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-'));
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'bica-probe-bin-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'f'), '');
+      fs.writeFileSync(path.join(bin, 'find'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      const out = probe(dir, { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` });
+      expect(out).toBe('empty=unknown\n');
+      expect(/^empty=yes$/m.test(out)).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('remoteWorkspaceIsEmpty', () => {
+  it('is false when the listing failed and the probe said so', () => {
+    expect(remoteWorkspaceIsEmpty('mini', '/w', remote('empty=unknown\n'))).toBe(false);
+  });
+
   it('is true for a workspace with nothing in it', () => {
     expect(remoteWorkspaceIsEmpty('mini', '/w', remote('empty=yes\n'))).toBe(true);
   });

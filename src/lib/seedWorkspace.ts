@@ -41,8 +41,10 @@ export type RemoteRunner = (
  *
  * Asks for one entry rather than a count: a 180,000-file tree should not be walked to answer a
  * yes/no question, and `find -maxdepth 1` stops as soon as it has something to print. A path that
- * does not exist yet is empty by any reading, and so is one that cannot be listed -- in which case
- * the seed is skipped and Mutagen handles it, which is exactly the old behaviour.
+ * does not exist yet is empty by any reading. One that cannot be listed is *not*: the probe answers
+ * `empty=unknown`, the seed is skipped and Mutagen handles it, which is the old behaviour. (This
+ * comment used to say so while the script did the opposite, reading a failed `find` as an empty
+ * directory.)
  */
 export function buildEmptinessProbeScript(remoteWorkspacePath: string): string {
   const w = remoteWorkspaceWordForSh(remoteWorkspacePath);
@@ -51,6 +53,11 @@ export function buildEmptinessProbeScript(remoteWorkspacePath: string): string {
     `if [ ! -d "$w" ]; then printf 'empty=yes\\n'; exit 0; fi`,
     // `-print -quit` leaves as soon as one entry is found, so this costs nothing on a full tree.
     `found=$(find "$w" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)`,
+    `rc=$?`,
+    // A listing that failed prints nothing, which is exactly what an empty directory prints. Only a
+    // listing that succeeded and found nothing is evidence of emptiness; a failed one (no file
+    // descriptors left on a loaded machine, a permission refusal) says nothing either way.
+    `if [ "$rc" -ne 0 ]; then printf 'empty=unknown\\n'; exit 0; fi`,
     `if [ -z "$found" ]; then printf 'empty=yes\\n'; else printf 'empty=no\\n'; fi`,
     '',
   ].join('\n');

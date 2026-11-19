@@ -48,6 +48,65 @@ function staging(receivedFiles: number): SyncProgress {
   };
 }
 
+describe('waitForSyncReady, a scan that keeps starting over', () => {
+  it('gives up with a cause instead of waiting for ever', () => {
+    // The incident: Mutagen scanned, finished a cycle with different counts, and scanned again, about
+    // twenty times over three hours. Each change reset the stall clock, so neither budget was ever
+    // reached and `bica run` never exited. Nothing was ever staged.
+    const clock = fakeClock(500);
+    let cycle = 0;
+    let polls = 0;
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: () => ({ exists: true, status: 'Scanning files' }),
+      readProgress: () => {
+        polls += 1;
+        // The counts step every 100 polls (50 s), well inside the 600 s quiet budget.
+        if (polls % 100 === 0) {
+          cycle += 1;
+        }
+        return { status: 'scanning', alphaFiles: 181_000 + cycle, betaFiles: 181_000 };
+      },
+    });
+    expect(result.ready).toBe(false);
+    expect(result.neverStaged).toBe(true);
+    expect(result.restarts).toBeGreaterThan(10);
+    expect(clock.now()).toBeLessThanOrEqual(1800 * 1000 + 1000);
+  });
+
+  it('is not triggered by a transfer that is still staging files', () => {
+    const clock = fakeClock(500);
+    let staged = 0;
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: statusAfter(5000, 'Staging files on beta', 'Watching for changes'),
+      readProgress: () => {
+        staged += 1;
+        return staging(staged);
+      },
+    });
+    expect(result.ready).toBe(true);
+    expect(result.neverStaged).toBeUndefined();
+  });
+
+  it('counts a scan that is followed by staging as progress, however long the scan took', () => {
+    const clock = fakeClock(500);
+    let polls = 0;
+    const result = waitForSyncReady('s', {
+      ...clock,
+      readStatus: statusAfter(3000, 'Scanning files', 'Watching for changes'),
+      readProgress: () => {
+        polls += 1;
+        // 25 minutes of scan with moving counts, then files begin to go across and keep going.
+        return polls < 3000
+          ? { status: 'scanning', alphaFiles: polls }
+          : staging(polls);
+      },
+    });
+    expect(result.ready).toBe(true);
+  });
+});
+
 describe('waitForSyncReady', () => {
   it('keeps waiting for a transfer that is still moving, far past a minute', () => {
     // Not ready for six hundred polls: this is the llvm-project case, where the old sixty-second
