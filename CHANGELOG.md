@@ -3,6 +3,28 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.10 — 2026-11-19
+
+### Fixed
+- **A remote workspace path that is a symbolic link now works.** Raised against 0.10.9: after checkouts were moved
+  to another volume, `~/code/NAME` became a link to `/Volumes/.../NAME`, and every plain `bica run` into it ended
+  with exit 94. Mutagen will not open a synchronization root that is a link, however the path is written (a
+  trailing slash, `/.` and a doubled slash all fail the same way, checked); 0.10.7 reported that error properly,
+  and this is the fix for it. bica now asks the remote whether the path is a link and, if it is, uses the
+  directory it leads to, saying so in one line. Queued and pinned runs, which never used Mutagen, were not
+  affected before and are not now.
+  - **The real path names the workspace.** The lease, the install records and the run records follow it. A
+    checkout configured with the link and another configured with the real path used to be two workspaces
+    that could run into one directory together; they are now one. The cost is one reinstall on the next run
+    into each workspace that was reached through a link, since its records were filed under the link.
+  - **Only a link at the end of the path is resolved.** A link higher up opens without trouble, and rewriting
+    every workspace whose home directory is a link would rename each for nothing.
+  - **One extra ssh round trip per command, at most,** remembered for the rest of that command, with a
+    10-second limit. If the host cannot be reached the configured path is kept and the failure is reported by
+    whatever runs next, as before. `BICA_RESOLVE_REMOTE_LINKS=0` turns the check off.
+  - **Not changed:** `.bica/local.yml` still holds what you wrote, and anything outside bica that keys on that
+    string, such as a job queue, keeps working with it.
+
 ## 0.10.9 — 2026-11-19
 
 ### Fixed

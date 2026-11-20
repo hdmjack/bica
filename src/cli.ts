@@ -148,6 +148,7 @@ import { cmdInit, ensureBicaWorkspaceOrInteractiveSetup } from './setupWizard';
 import {
   getRepoRoot,
   loadRemoteEnvConfig,
+  loadResolvedRemoteConfig,
   prepareSyncProjectFile,
   readPrimarySessionNameFromSpec,
 } from './syncProject';
@@ -467,7 +468,7 @@ function cmdStop(): void {
   const repoRoot = getRepoRoot();
   // This workspace's project file. A sync an older bica started wrote the checkout-wide one, and
   // `bica stop` still has to be able to end it.
-  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  const { sshHost, remoteWorkspacePath } = loadResolvedRemoteConfig(repoRoot);
   const keyed = path.join(
     repoRoot,
     projectFileRelative(workspaceKey(`${sshHost}:${remoteWorkspacePath}`)),
@@ -587,7 +588,7 @@ function cmdPluginsList(): void {
 async function cmdSsh(): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
-  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  const { sshHost, remoteWorkspacePath } = loadResolvedRemoteConfig(repoRoot);
   const code = openRemoteInteractiveSsh(sshHost, remoteWorkspacePath);
   // Set exitCode rather than process.exit() so any buffered stdout/stderr flushes before exit.
   process.exitCode = code;
@@ -874,7 +875,7 @@ async function cmdTunnel(
 
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
-  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  const { sshHost, remoteWorkspacePath } = loadResolvedRemoteConfig(repoRoot);
   // No sync of its own: the tree the remote process reads is whatever the last `bica run` put there,
   // and syncing here would need the lease this command deliberately does not take.
   process.exitCode = await runTunnel({
@@ -917,7 +918,7 @@ async function cmdQueue(): Promise<void> {
 async function cmdCancel(options: { force: boolean }): Promise<void> {
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
-  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  const { sshHost, remoteWorkspacePath } = loadResolvedRemoteConfig(repoRoot);
 
   const report = remoteReadClaim(sshHost, remoteWorkspacePath);
   if (report === null) {
@@ -1331,7 +1332,7 @@ async function cmdRun(options: {
 
   await ensureRemoteSshHostFromEnvOrPrompt();
   const repoRoot = getRepoRoot();
-  const baseRemote = loadRemoteEnvConfig(repoRoot);
+  const baseRemote = loadResolvedRemoteConfig(repoRoot);
   // Several commands pin the content: they run for minutes and must all see the same tree, which a
   // live session -- designed to keep pushing later edits -- cannot promise.
   const parallel = options.commands.length > 1;

@@ -40,6 +40,8 @@ describe('prepareSyncProjectFile, one checkout and two workspaces', () => {
     );
     vi.spyOn(process, 'cwd').mockReturnValue(repoRoot);
     vi.stubEnv('BICA_SSH_HOST', 'somehost');
+    // These tests are about keys, and `somehost` is not a machine to ask about links.
+    vi.stubEnv('BICA_RESOLVE_REMOTE_LINKS', '0');
   });
   afterEach(() => {
     vi.unstubAllEnvs();

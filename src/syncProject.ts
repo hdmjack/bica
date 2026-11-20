@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { withCargoTargetIgnored } from './lib/rustWorkspace';
 import { withCompanionRecordsIgnored } from './lib/syncConsistency';
+import { resolveRemoteWorkspacePath } from './lib/remoteRealPath';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -520,7 +521,7 @@ export function readPrimarySessionNameFromSpec(): string {
   const raw = fs.readFileSync(absolutePath, 'utf8');
   const docUnknown: unknown = YAML.parse(raw);
   const normalized = normalizeToSyncSpecYaml(docUnknown, repoRoot, displayName);
-  const { sshHost, remoteWorkspacePath } = loadRemoteEnvConfig(repoRoot);
+  const { sshHost, remoteWorkspacePath } = loadResolvedRemoteConfig(repoRoot);
   return syncSessionName(
     getPrimarySessionName(normalized, displayName),
     `${sshHost}:${remoteWorkspacePath}`,
@@ -652,6 +653,28 @@ export function loadRemoteEnvConfig(repoRoot: string): RemoteEnvConfig {
 }
 
 /**
+ * The configuration with a workspace path that is a link replaced by the directory it leads to, which
+ * is what the sync, the lease and every record are then named after. See `remoteRealPath.ts`.
+ *
+ * Asks the remote, so it is for commands that go on to use it; `loadRemoteEnvConfig` stays a read of
+ * local settings. Every command that derives a key from the path has to use this one, or it names a
+ * workspace the run did not.
+ */
+export function loadResolvedRemoteConfig(repoRoot: string): RemoteEnvConfig {
+  const config = loadRemoteEnvConfig(repoRoot);
+  const real = resolveRemoteWorkspacePath(
+    config.sshHost,
+    config.remoteWorkspacePath,
+  );
+  if (real === config.remoteWorkspacePath) {
+    return config;
+  }
+  // A link to somewhere that must never be mirrored into is refused like the path itself would be.
+  assertRemoteWorkspacePathIsSafe(real);
+  return { sshHost: config.sshHost, remoteWorkspacePath: real };
+}
+
+/**
  * An ssh host that begins with `-` is an option, not a host.
  *
  * `-oProxyCommand=…` in the host position is local command execution, and the value reaches us from a
@@ -732,7 +755,7 @@ export function prepareSyncProjectFile(options: {
   const repoRoot = getRepoRoot();
   const { absolutePath: sourcePath, displayName } =
     resolveSyncSpecPath(repoRoot);
-  const config = loadRemoteEnvConfig(repoRoot);
+  const config = loadResolvedRemoteConfig(repoRoot);
   const remoteSyncUrl = `${config.sshHost}:${config.remoteWorkspacePath}`;
 
   const raw = fs.readFileSync(sourcePath, 'utf8');
