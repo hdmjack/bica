@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
@@ -49,6 +50,90 @@ function socketDir(): string | null {
   }
 }
 
+/**
+ * How long a shared call or an rsync may exchange nothing with the remote before ssh ends it.
+ *
+ * Seven `bica run`s sat for two hours and more in their `.git` rsync, at no CPU, printing nothing.
+ * The remote half of each had exited and the remote sshd never collected it: ten finished sessions
+ * were still on its books twelve hours later, which is its `MaxSessions`, so it also refused every
+ * new one. The connection itself was healthy and answered its keepalives, and a keepalive is all
+ * `ServerAliveInterval` asks about. Nothing was ever going to arrive on those channels, and nothing
+ * on this side was counting.
+ *
+ * ssh can count: `ChannelTimeout` closes a session that has carried no bytes either way for this
+ * long, and the client on it exits 255. It is kept by whichever process holds the channel, so it
+ * works the same for a client on the shared connection and for one that fell back to its own.
+ *
+ * Silence is not proof of death, so the limit is generous. Everything that shares is short; the long
+ * one is rsync, which is quiet while the sender walks a large tree and while the receiver deletes
+ * one. `BICA_SSH_IDLE_SECONDS` changes it, and `0` turns it off.
+ *
+ * rsync's own `--timeout` is not the tool: the rsync macOS ships reports `poll: timeout` and then
+ * waits for its ssh to exit, which is the process that is stuck.
+ */
+const DEFAULT_IDLE_SECONDS = 120;
+
+export function sshIdleSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.BICA_SSH_IDLE_SECONDS?.trim();
+  if (raw === undefined || raw === '') {
+    return DEFAULT_IDLE_SECONDS;
+  }
+  const seconds = Number(raw);
+  return Number.isInteger(seconds) && seconds >= 0 ? seconds : DEFAULT_IDLE_SECONDS;
+}
+
+let idleLimitSupported: boolean | undefined;
+
+/**
+ * Whether the installed ssh knows `ChannelTimeout`, asked once per process. An older client stops at
+ * an option it does not know, and `IgnoreUnknown` on the command line would displace the one in the
+ * user's own configuration, which on macOS is usually what lets `UseKeychain` through. `-G` parses
+ * the options and connects to nothing.
+ */
+function sshSupportsIdleLimit(): boolean {
+  if (idleLimitSupported === undefined) {
+    const probe = spawnSync(
+      'ssh',
+      ['-G', '-o', 'ChannelTimeout=session=1', 'bica-option-probe.invalid'],
+      { stdio: 'ignore', timeout: 5000 },
+    );
+    idleLimitSupported = probe.status === 0;
+  }
+  return idleLimitSupported;
+}
+
+/** The ssh options that end a silent session, or none when the limit is off or ssh is too old. */
+export function sshIdleLimitOptions(
+  env: NodeJS.ProcessEnv = process.env,
+  supported: () => boolean = sshSupportsIdleLimit,
+): string[] {
+  const seconds = sshIdleSeconds(env);
+  if (seconds === 0 || !supported()) {
+    return [];
+  }
+  return ['-o', `ChannelTimeout=session=${String(seconds)}`];
+}
+
+/**
+ * What to add to a failure that the idle limit may have caused. ssh says nothing when it closes a
+ * silent session; rsync says only `unexpected end of file`. Exit 255 is ssh's own, so it is the one
+ * status worth explaining, and the explanation is hedged because a dropped link gives it too.
+ */
+export function idleLimitHint(
+  status: number | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const seconds = sshIdleSeconds(env);
+  if (status !== 255 || seconds === 0 || sshShareDisabled(env)) {
+    return '';
+  }
+  return (
+    `ssh ended the connection. If that came after ${String(seconds)}s of nothing, the remote end had ` +
+    'stopped answering and bica gave up on it rather than wait for ever; BICA_SSH_IDLE_SECONDS ' +
+    'raises the limit for a remote that is only slow.'
+  );
+}
+
 export function sshShareDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.BICA_SSH_SHARE?.trim() === '0';
 }
@@ -70,7 +155,9 @@ export function sharedSshOptions(env: NodeJS.ProcessEnv = process.env): string[]
     '-o',
     'ControlMaster=auto',
     '-o',
-    `ControlPath=${dir}/%C`,
+    // The suffix keeps this build off a connection opened by one before 0.10.11. The idle limit is
+    // kept by the process that owns the connection, so a session on an older one has none.
+    `ControlPath=${dir}/%C-i`,
     '-o',
     `ControlPersist=${String(PERSIST_SECONDS)}`,
     // Only the connection that becomes the master reads these. A master whose network has gone must
@@ -79,6 +166,8 @@ export function sharedSshOptions(env: NodeJS.ProcessEnv = process.env): string[]
     'ServerAliveInterval=15',
     '-o',
     'ServerAliveCountMax=3',
+    // A keepalive proves the connection, not the session on it; see `sshIdleSeconds`.
+    ...sshIdleLimitOptions(env),
   ];
 }
 

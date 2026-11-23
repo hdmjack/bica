@@ -41,6 +41,10 @@ function fakeMutagen(projectFile: string, alpha: string, beta: string) {
   spawnSync.mockImplementation((cmd: string, args: string[], options?: { input?: string }) => {
     // The cache cleanup after a terminate: recorded, not run.
     if (cmd === 'ssh') {
+      // `-G` is bica asking the local ssh which options it takes; nothing goes to the remote.
+      if (args[0] === '-G') {
+        return ok();
+      }
       sshCalls.push({ args, input: options?.input ?? '' });
       return ok();
     }

@@ -1144,6 +1144,7 @@ taken over, with a line saying so, because otherwise every hard kill would need 
 | `BICA_LOGIN_SHELL` | Remote shell for non-interactive commands (default `zsh`) |
 | `BICA_LOGIN_FLAGS` | Flags for that shell (default `-lc` for zsh) |
 | `BICA_SSH_SHARE` | `0` = give every short ssh call and rsync its own connection, as before. By default they share one connection per host, kept for 60 s after the last use, in a folder under `/tmp` only you can read. The command's own connection is never shared |
+| `BICA_SSH_IDLE_SECONDS` | How long a shared ssh call or an rsync may exchange nothing with the remote before ssh ends it (exit 255), so a session whose far end has gone is not waited on for ever. Default `120`; `0` = off. Needs a recent OpenSSH, one with `ChannelTimeout` (bica asks the installed one and leaves the option out if it is refused). A run that joins a shared connection already open gets the limit that connection was opened with |
 | `BICA_MAX_RUNS` | How many runs may execute on the remote at once: a number, `auto` (a third of its cores, at least one; the default) or `off` / `0`. See "Too many runs at once" |
 | `BICA_DEBUG` | `1` = print remote script on stderr before `ssh` |
 | `BICA_TUNNEL_DEAD_AFTER` | Seconds a tunnel's forward may go unanswered before ssh gives up (default `60`). Raise it on a link that stalls legitimately |
@@ -1167,3 +1168,55 @@ pnpm dev
 pnpm dev -- plugins list
 ```
 
+
+## Research
+
+Findings from investigations, kept so the next one starts from them. Each says when and where it was
+measured.
+
+### 2026-11-23: a session can outlive its remote process, and only an idle limit ends it
+
+**Claim.** A healthy ssh connection can carry sessions that will never deliver anything again, and
+neither ssh's keepalives nor rsync notice. `ChannelTimeout` is the one setting that ends them.
+
+Taken from a live case, 12 hours old when examined: MacBook (macOS, OpenSSH 10.2p1, openrsync
+protocol 29) to `mini` (same versions, sshd `MaxSessions` 10, default). Seven `bica run`s of 0.10.10
+had started within a minute while twelve sessions built at once.
+
+| Observed | Value |
+| --- | --- |
+| Local rsyncs waiting, CPU used | 7, about 5 s each in 2 h 21 min |
+| `rsync --server` processes on the remote | 0 |
+| Finished, uncollected children of the shared connection's sshd | 10, which is `MaxSessions` |
+| Shared connection, both ends | established, idle in `select`, empty TCP queues |
+| A new session over that connection | `Session open refused by peer`, then ssh connects on its own and succeeds |
+| MacBook asleep | 23:13:13 to 23:14:50, twenty minutes after the stall began, so not the cause |
+
+**Not reproduced.** Why the sshd stopped collecting its children is unknown. Its log held nothing for
+that process, and it cannot be sampled without root.
+
+| Attempt, over one fresh shared connection | Result |
+| --- | --- |
+| 14 sessions at once, three rounds | all exit 0 in 3 s; 4 refused per round, each fell back to its own connection |
+| 12 rsyncs of 148 MB at once | all exit 0 in 50 s; no uncollected children afterwards |
+
+**What ends a silent session.** Measured with a remote made silent on purpose (`sleep` in place of
+the remote command), limit set to 4 or 5 s.
+
+| Setting | Result |
+| --- | --- |
+| Nothing (0.10.10) | waits until killed |
+| `ServerAliveInterval=15`, `ServerAliveCountMax=3` | no effect: the connection answers, only the session is dead |
+| rsync `--timeout=5` (openrsync) | prints `poll: timeout`, then waits for its ssh; never exits |
+| `ChannelTimeout=session=5`, own connection | ssh exits 255 after 5 s; rsync says `unexpected end of file`, exits 255 |
+| `ChannelTimeout=session=5`, shared connection | the same, whether the client opened the connection or joined it |
+| `ChannelTimeout` with output every 3 s | runs to the end, exit 0 |
+
+**Traps.**
+
+- ssh prints nothing when the limit closes a session. The only sign is exit 255.
+- The limit belongs to the process that owns the connection. A client that joins a shared connection
+  gets that connection's limit, not its own, which is why 0.10.11 renamed the socket.
+- `-o IgnoreUnknown=ChannelTimeout` would make an old ssh accept the option, but the first
+  `IgnoreUnknown` wins, so it displaces the one in `~/.ssh/config`. bica asks `ssh -G` instead.
+- A test of this must not signal `rsync --server` by name on a shared host: other runs' copies match.

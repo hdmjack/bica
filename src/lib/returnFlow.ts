@@ -18,6 +18,7 @@ import {
   remotePathExprForCd,
   runRemoteScriptOverStdin,
 } from './runRemote';
+import { idleLimitHint } from './sshShare';
 import { SUBPROCESS_MAX_BUFFER } from './subprocessOutput';
 import { SYNC_NOT_READY_EXIT } from './syncProgress';
 import type { RsyncRunner } from './artifacts';
@@ -653,8 +654,9 @@ export function rsyncGit(
     }
     said = `${result.stderr}${result.stdout}`.trim();
   }
+  const hint = idleLimitHint(code);
   process.stderr.write(
-    `${warn('[bica]')} ${dim(`.git sync rsync exited ${String(code)}${said ? `: ${said}` : ''}`)}\n`,
+    `${warn('[bica]')} ${dim(`.git sync rsync exited ${String(code)}${said ? `: ${said}` : ''}${hint ? `\n${hint}` : ''}`)}\n`,
   );
   return { ran: true, exitCode: code };
 }

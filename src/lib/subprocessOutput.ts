@@ -1,5 +1,7 @@
 import type { SpawnSyncReturns } from 'node:child_process';
 
+import { idleLimitHint } from './sshShare';
+
 /**
  * Reading the whole of a subprocess's output, and saying so when we could not.
  *
@@ -78,5 +80,7 @@ export function describeSpawnFailure(
     }
     return `${what} could not be run: ${error.message}`;
   }
-  return `${what} exited ${String(result.status ?? 1)}${output ? `: ${output}` : ''}`;
+  const said = `${what} exited ${String(result.status ?? 1)}${output ? `: ${output}` : ''}`;
+  const hint = idleLimitHint(result.status);
+  return hint === '' ? said : `${said}\n${hint}`;
 }

@@ -3,6 +3,35 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.11 — 2026-11-23
+
+### Fixed
+- **A sync whose remote end has gone no longer waits for ever.** Raised against 0.10.10: seven `bica run`s from
+  different worktrees, started within a minute of each other, sat for more than two hours in their `.git` rsync
+  at no CPU, printing nothing. The remote half of each had exited and the remote sshd had not collected it. Ten
+  finished sessions were still held by the shared connection's sshd twelve hours later, and a new session over
+  it was refused. The connection itself was healthy and answered keepalives throughout, which is all
+  `ServerAliveInterval` tests, so nothing on either side had a reason to stop. Every shared ssh call and every
+  rsync now carries ssh's `ChannelTimeout`: a session that exchanges nothing for 120 seconds is closed and its
+  client exits 255. A `.git` sync ended that way is retried once, as any failed one is, and then stops the run
+  with the exit that says nothing ran.
+  - **Why the remote sshd stopped collecting sessions is not known.** Fourteen sessions at once over one
+    connection and twelve concurrent rsyncs of 148 MB both ran clean afterwards: sessions past `MaxSessions`
+    are refused and ssh opens its own connection. The fix is for the waiting, not for the cause.
+  - **Silence is not proof of death,** so the limit is long. rsync is quiet while the sender walks a large
+    tree and while the receiver deletes one. `BICA_SSH_IDLE_SECONDS` changes it and `0` turns it off.
+  - **The failure says what may have happened.** ssh prints nothing when it closes a silent session and rsync
+    says only `unexpected end of file`, so an exit of 255 from a sync now names the limit and its variable.
+  - **rsync's `--timeout` was tried and does not work here.** The rsync macOS ships reports `poll: timeout` and
+    then waits for its ssh, which is the process that is stuck.
+  - **An ssh without `ChannelTimeout` is left as it was.** bica asks the installed ssh once per run whether it
+    takes the option; `IgnoreUnknown` on the command line would have displaced the one in `~/.ssh/config`.
+  - **The shared connection's socket has a new name,** so this build never joins one opened by an older
+    build, whose sessions have no limit. Both can be open at once; each closes 60 s after its last use.
+  - **The heartbeat was exposed to the same wait.** It sends one beat at a time over the shared connection, so
+    one beat that never returned would have stopped all later ones, and the remote ends a leased command
+    after eleven minutes without a beat. It is covered by the same limit.
+
 ## 0.10.10 — 2026-11-19
 
 ### Fixed

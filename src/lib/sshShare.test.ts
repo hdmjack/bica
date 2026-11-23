@@ -6,7 +6,14 @@ import { describe, expect, it } from 'vitest';
 
 import { removeRemoteSessionCaches } from './mutagenCaches';
 import { buildRemoteProbeSshArgv, buildRunRemoteSshArgs, runRemoteScriptOverStdin } from './runRemote';
-import { sharedSshOptions, shareSshWithRsync, sshShareDisabled } from './sshShare';
+import {
+  idleLimitHint,
+  sharedSshOptions,
+  shareSshWithRsync,
+  sshIdleLimitOptions,
+  sshIdleSeconds,
+  sshShareDisabled,
+} from './sshShare';
 
 const POSIX = process.platform !== 'win32';
 
@@ -33,11 +40,65 @@ describe('sharedSshOptions', () => {
   });
 });
 
+describe('the idle limit', () => {
+  // Raised against 0.10.10: seven runs sat for two hours in their `.git` rsync. The remote halves had
+  // exited, the remote sshd never closed their sessions, and the shared connection went on answering
+  // keepalives, so neither rsync nor ssh nor bica had any reason to stop waiting.
+  const yes = (): boolean => true;
+  const no = (): boolean => false;
+
+  it('ends a session that has been silent for two minutes, by default', () => {
+    expect(sshIdleSeconds({})).toBe(120);
+    expect(sshIdleLimitOptions({}, yes)).toEqual(['-o', 'ChannelTimeout=session=120']);
+  });
+
+  it('takes its length from BICA_SSH_IDLE_SECONDS, and 0 turns it off', () => {
+    expect(sshIdleLimitOptions({ BICA_SSH_IDLE_SECONDS: '600' }, yes)).toEqual([
+      '-o',
+      'ChannelTimeout=session=600',
+    ]);
+    expect(sshIdleLimitOptions({ BICA_SSH_IDLE_SECONDS: '0' }, yes)).toEqual([]);
+    // A value that is not a whole number of seconds is not a reason to wait for ever.
+    expect(sshIdleSeconds({ BICA_SSH_IDLE_SECONDS: 'soon' })).toBe(120);
+    expect(sshIdleSeconds({ BICA_SSH_IDLE_SECONDS: '-5' })).toBe(120);
+  });
+
+  it('is left out for an ssh that would stop at an option it does not know', () => {
+    expect(sshIdleLimitOptions({}, no)).toEqual([]);
+  });
+
+  it.runIf(POSIX)('reaches the short calls and rsync alike, when this ssh has it', () => {
+    const limit = sshIdleLimitOptions({});
+    const shared = sharedSshOptions({});
+    const env: NodeJS.ProcessEnv = {};
+    shareSshWithRsync(env);
+    if (limit.length === 0) {
+      expect(shared.join(' ')).not.toContain('ChannelTimeout');
+      return;
+    }
+    expect(shared).toContain('ChannelTimeout=session=120');
+    expect(env.RSYNC_RSH).toContain('-o ChannelTimeout=session=120');
+  });
+
+  it('explains exit 255, which is all ssh says when it closes a silent session', () => {
+    expect(idleLimitHint(255, {})).toContain('120s of nothing');
+    expect(idleLimitHint(255, {})).toContain('BICA_SSH_IDLE_SECONDS');
+    expect(idleLimitHint(255, { BICA_SSH_IDLE_SECONDS: '30' })).toContain('30s of nothing');
+  });
+
+  it('says nothing about a failure the limit cannot have caused', () => {
+    expect(idleLimitHint(23, {})).toBe('');
+    expect(idleLimitHint(0, {})).toBe('');
+    expect(idleLimitHint(255, { BICA_SSH_IDLE_SECONDS: '0' })).toBe('');
+    expect(idleLimitHint(255, { BICA_SSH_SHARE: '0' })).toBe('');
+  });
+});
+
 describe('shareSshWithRsync', () => {
   it.runIf(POSIX)('gives rsync the same options through RSYNC_RSH, so no rsync call site changes', () => {
     const env: NodeJS.ProcessEnv = {};
     shareSshWithRsync(env);
-    expect(env.RSYNC_RSH).toMatch(/^ssh -o ControlMaster=auto -o ControlPath=\/tmp\/bica-ssh-\d+\/%C /);
+    expect(env.RSYNC_RSH).toMatch(/^ssh -o ControlMaster=auto -o ControlPath=\/tmp\/bica-ssh-\d+\/%C-i /);
     expect(env.RSYNC_RSH).not.toMatch(/\s{2,}/);
   });
 
@@ -81,8 +142,10 @@ describe('which connections share', () => {
       removeRemoteSessionCaches('mini', ['sync_abc']);
       spawnSync('true');
     });
-    expect(calls).toHaveLength(2);
-    for (const call of calls) {
+    // The one-off question of whether this ssh has an idle limit is not a call to the remote.
+    const remote = calls.filter((call) => !call.startsWith('-G '));
+    expect(remote).toHaveLength(2);
+    for (const call of remote) {
       expect(call).toContain('ControlMaster=auto');
       expect(call).toContain('ControlPath=/tmp/bica-ssh-');
     }
