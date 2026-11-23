@@ -241,8 +241,8 @@ Running several commands at once
   identical times.
 
   --return-flow               Pull remote artifacts back after a multi-command run. Off by default
-                              there because the pull mirrors with --delete and describes exactly one
-                              content state.
+                              there because the pull mirrors, removing local files the remote lacks,
+                              and so describes exactly one content state.
 
 Commands that write files
   The remote gets a copy of your tree, so a command that edits files edits the copy. bica names those
@@ -1163,7 +1163,7 @@ async function runWithLiveSession(options: {
   // Return-flow artifacts (snapshots, logs) are Mutagen-ignored, so the forward sync never
   // refreshes them on the remote across a branch switch — the remote keeps the previous branch's
   // snapshots, which then flow back locally. Mirror the current branch's artifacts onto the remote
-  // (local → remote, --delete) before the run so it starts clean and can't leak stale cross-branch
+  // (local → remote, removing obsolete files by name) before the run so it starts clean and can't leak stale cross-branch
   // snapshots back via return-flow.
   // What the local files look like as they go over. The pull at the end leaves alone whatever has
   // changed since, so a log deleted or created while a long run is going is not undone by it.
@@ -1172,7 +1172,7 @@ async function runWithLiveSession(options: {
     chrome(
       `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
     );
-    const rfPush = pushReturnFlowToRemote(prep);
+    const rfPush = pushReturnFlowToRemote(prep, returnFlowBefore);
     if (rfPush.ran && rfPush.exitCode === 0) {
       chrome(`${dim('[bica]')} ${dim('Return-flow remote refresh done.')}\n`);
     }

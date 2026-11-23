@@ -3,6 +3,31 @@
 Dates are the release date. bica keeps state on the remote that several versions can reach, so
 entries note where a change affects what another version sees.
 
+## 0.10.12 — 2026-11-23
+
+### Fixed
+- **Return-flow no longer tries to delete directories.** Raised against 0.10.11: one `bica run` printed a
+  dozen `rsync(…): warning: …/float-javascript//./ui/scripts: not empty, cannot delete` lines for tracked
+  source directories that existed on both sides, with nothing saying which rsync or which direction.
+  - **What it was.** The pull after a run (and the push before it) copied with `--delete` and
+    `--prune-empty-dirs`. Pruning drops from the sender's list every directory without a snapshot or log in
+    it, which is nearly all of them, so the receiver set out to delete them all. The files inside were
+    protected by return-flow's whitelist and survived, which is the warning; **an empty directory had
+    nothing to protect it and was removed**, from the checkout on the pull and from the workspace on the
+    push. Tracked files were never at risk. The warning was printed on every run but captured, and shown
+    only when the rsync failed for some other reason, which is why it looked intermittent.
+  - **What changed.** Both transfers now copy without `--delete`. bica then lists both sides and removes,
+    by name, only the files that match a pattern and that the other side no longer has, followed by the
+    directories that removal left empty. Every other directory stays, including an empty one, and every
+    file removed is named in a line saying which transfer removed it and where.
+  - **A copy that fails removes nothing,** and its error names the transfer and its direction:
+    `return-flow pull (remote → here)` or `return-flow refresh (here → remote)`.
+  - **The last obsolete snapshot is now removed.** When the sender had no return-flow files at all, the rsync
+    macOS ships skipped deletion entirely, so a snapshot deleted on the remote stayed here.
+  - **Receiver-side protect rules were tried and do not work here.** With openrsync, `P */` or `-r */` in
+    any position switched off deletion altogether.
+  - Costs one extra listing of the remote per push and per pull, under a second on `float-javascript`.
+
 ## 0.10.11 — 2026-11-23
 
 ### Fixed

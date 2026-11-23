@@ -25,9 +25,9 @@ import { SUBPROCESS_MAX_BUFFER } from './subprocessOutput';
  * to invert it into a denylist and mirror everything else back. That is the wrong axis, for three
  * reasons that are all properties of the whitelist rather than of the patterns in it:
  *
- * - The whitelist is what makes `--delete` safe. Return-flow's trailing `- *` protects every
- *   non-matching local file from deletion, which is how obsolete snapshots can be pruned without
- *   endangering anything else. A denylist plus `--delete` means "remove any local file the remote does
+ * - The whitelist is what makes pruning safe. Return-flow removes only files that match a pattern and
+ *   that the other side lacks, which is how obsolete snapshots can be pruned without endangering
+ *   anything else. A denylist plus `--delete` means "remove any local file the remote does
  *   not have" — and the remote deliberately does not have plenty: gitignored files, `.env`, everything
  *   in `sync.ignore.paths`.
  * - They fail in opposite directions. A missing whitelist entry means a snapshot does not come back,

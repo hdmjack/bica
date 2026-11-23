@@ -319,8 +319,8 @@ function warnAboutDeletedGeneratedFiles(
  * Run a command against a pinned copy of the content: push once, run, optionally pull.
  * Returns the remote command's exit code, or a non-zero bica-side code when the push failed.
  *
- * Return-flow happens only with `--return-flow`. It mirrors remote artifacts into the local tree with
- * `--delete`, so it describes exactly one content state; the pull is serialised even when asked for.
+ * Return-flow happens only with `--return-flow`. It mirrors remote artifacts into the local tree,
+ * removing local files the remote lacks, so it describes exactly one content state; the pull is serialised even when asked for.
  */
 export async function runPinned(options: {
   prep: PrepareResult;
@@ -360,7 +360,7 @@ export async function runPinned(options: {
   const { prep, chrome } = options;
   // Return-flow is explicit opt-in, full stop. It used to be guessed by counting runs in flight, which
   // was racy by its own admission -- two runs starting together could both conclude they were alone --
-  // and a guess that is usually right is the worst kind here, because the pull mirrors with `--delete`.
+  // and a guess that is usually right is the worst kind here, because the pull mirrors, removing local files.
   const returnFlow = options.returnFlowOptIn;
 
   const dirReady = await ensureRemoteWorkspaceDirectory(
@@ -482,7 +482,7 @@ export async function runPinned(options: {
     chrome(
       `${dim('[bica]')} ${dim('Refreshing return-flow artifacts on remote…')}\n`,
     );
-    pushReturnFlowToRemote(prep);
+    pushReturnFlowToRemote(prep, returnFlowBefore);
   }
 
   // Placed after every pre-run push, so the files those put there are not mistaken for the command's
@@ -664,7 +664,7 @@ export async function runPinned(options: {
     }
 
     if (returnFlowWanted) {
-      // Serialised: concurrent pulls with `--delete` into one tree would fight over the same files.
+      // Serialised: concurrent mirroring pulls into one tree would fight over the same files.
       const rfLock = await acquireLockWithWait(returnFlowLockPath(prep.repoRoot), {
         timeoutMs: RETURN_FLOW_LOCK_TIMEOUT_MS,
       });

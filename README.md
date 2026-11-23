@@ -455,6 +455,11 @@ matches the default `*.log`, and the pull would otherwise replace your local `ru
 copy, so the run's output vanished while the exit code stayed 0. bica now leaves whatever file its own
 stdout and stderr are open on out of the pull. Any other matching file is still the remote's to replace.
 
+**The pull mirrors files, never directories.** A local file matching a pattern that the remote no longer
+has, such as a snapshot `vitest -u` removed, is removed here too, and bica names it. A directory is
+removed only when that removal leaves it empty. Every other directory stays, including an empty one;
+the push before the run treats the remote the same way.
+
 Set `paths: []` to disable. Whitelisted patterns are also auto-added to the forward session's `sync.ignore.paths`, so a stale local snapshot will not overwrite the fresh remote one. Disable per-run with `BICA_RETURN_FLOW=0`. Requires `rsync` on PATH; if missing, bica prints a warning and skips the pull.
 
 ### Commands that write files (`--write-back`)
@@ -519,9 +524,9 @@ Return-flow answers "which paths does the remote own" with a whitelist, and the 
 invert it into a denylist and mirror everything else back. That is the wrong axis, for three reasons
 that are properties of the whitelist rather than of the patterns in it:
 
-- **The whitelist is what makes `--delete` safe.** Return-flow's trailing `- *` protects every
-  non-matching local file from deletion, which is how an obsolete snapshot can be pruned without
-  endangering anything else. A denylist plus `--delete` means "remove any local file the remote does not
+- **The whitelist is what makes pruning safe.** Return-flow removes only files that match a pattern
+  and that the other side lacks, which is how an obsolete snapshot can be pruned without endangering
+  anything else. A denylist plus `--delete` means "remove any local file the remote does not
   have" — and the remote deliberately does not have plenty: gitignored files, your `.env`, everything in
   `sync.ignore.paths`.
 - **They fail in opposite directions.** A missing whitelist entry means a snapshot does not come back,

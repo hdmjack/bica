@@ -7,8 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PrepareResult } from '../syncProject';
 import {
   buildReturnFlowExcludes,
-  buildReturnFlowMirrorArgs,
+  buildRemoteRemovalScript,
+  buildReturnFlowCopyArgs,
   buildReturnFlowRsyncArgs,
+  obsoleteReturnFlowFiles,
+  parentsDeepestFirst,
+  pushReturnFlowToRemote,
+  splitRsyncUrl,
   GIT_TRANSIENT_PATTERNS,
   gitSyncStopsRun,
   pushGitToRemote,
@@ -98,18 +103,17 @@ describe('buildReturnFlowExcludes', () => {
   });
 });
 
-describe('buildReturnFlowMirrorArgs', () => {
+describe('buildReturnFlowCopyArgs', () => {
   const patterns = ['**/__snapshots__/**', '**/*.snap'];
 
-  it('scopes --delete with the whitelist filters and puts source before dest', () => {
-    const args = buildReturnFlowMirrorArgs(
+  it('copies the whitelist with no --delete, and puts source before dest', () => {
+    const args = buildReturnFlowCopyArgs(
       patterns,
       'mini:~/code/foo/',
       '/local/foo/',
     );
     expect(args).toEqual([
       '-az',
-      '--delete',
       '--prune-empty-dirs',
       '--filter=+ */',
       '--filter=+ **/__snapshots__/**',
@@ -118,37 +122,210 @@ describe('buildReturnFlowMirrorArgs', () => {
       'mini:~/code/foo/',
       '/local/foo/',
     ]);
+    // With --prune-empty-dirs the sender leaves out every directory holding no return-flow file, and a
+    // receiver deleting against that list tries to remove all of them. Never pair the two.
+    expect(args.some((a) => a.startsWith('--delete'))).toBe(false);
   });
 
-  it('passes excluded trees through, keeping --delete out of them entirely', () => {
-    const args = buildReturnFlowMirrorArgs(
+  it('passes excluded trees through ahead of the descend-everywhere include', () => {
+    const args = buildReturnFlowCopyArgs(
       patterns,
       'mini:~/code/foo/',
       '/local/foo/',
       ['.git', 'node_modules'],
     );
-    // Excluded paths are protected from deletion as well as transfer, so a dependency's own
-    // snapshots never cross the wire and local-only ignored trees are left alone.
     expect(args).toContain('--filter=- node_modules');
     expect(args.indexOf('--filter=- node_modules')).toBeLessThan(
       args.indexOf('--filter=+ */'),
     );
   });
 
-  it('places --delete before the trailing exclude so non-matching files stay protected', () => {
-    const args = buildReturnFlowMirrorArgs(patterns, 'src/', 'dst/');
-    // --delete removes only extraneous *included* files; the final "- *" protects everything else
-    // (on the receiver) from deletion.
-    expect(args.indexOf('--delete')).toBeLessThan(args.indexOf('--filter=- *'));
-  });
-
   it('is direction-agnostic — same builder used for push (local→remote) and pull (remote→local)', () => {
-    const push = buildReturnFlowMirrorArgs(patterns, '/local/', 'mini:~/r/');
-    const pull = buildReturnFlowMirrorArgs(patterns, 'mini:~/r/', '/local/');
+    const push = buildReturnFlowCopyArgs(patterns, '/local/', 'mini:~/r/');
+    const pull = buildReturnFlowCopyArgs(patterns, 'mini:~/r/', '/local/');
     expect(push.slice(-2)).toEqual(['/local/', 'mini:~/r/']);
     expect(pull.slice(-2)).toEqual(['mini:~/r/', '/local/']);
-    // Only the trailing source/dest differ; the flags are identical.
     expect(push.slice(0, -2)).toEqual(pull.slice(0, -2));
+  });
+});
+
+describe('splitRsyncUrl', () => {
+  it('reads a colon before the first slash as a host, as rsync does', () => {
+    expect(splitRsyncUrl('mini:code/repo')).toEqual({ host: 'mini', path: 'code/repo' });
+    expect(splitRsyncUrl('mini:~/code/repo')).toEqual({ host: 'mini', path: '~/code/repo' });
+    expect(splitRsyncUrl('mini:')).toEqual({ host: 'mini', path: '' });
+  });
+
+  it('reads a path, including one with a colon after a slash, as local', () => {
+    expect(splitRsyncUrl('/Users/me/repo')).toEqual({ host: null, path: '/Users/me/repo' });
+    expect(splitRsyncUrl('/tmp/a:b')).toEqual({ host: null, path: '/tmp/a:b' });
+  });
+});
+
+describe('obsoleteReturnFlowFiles', () => {
+  const listing = (...files: string[]): Map<string, string> =>
+    new Map(files.map((f) => [f, '1:2026/11/23 00:00:00']));
+
+  it('is the files the receiver has and the sender does not, minus those kept', () => {
+    expect(
+      obsoleteReturnFlowFiles(
+        listing('a/__snapshots__/a.snap'),
+        listing('a/__snapshots__/a.snap', 'b/__snapshots__/b.snap', 'run.log', 'kept.log'),
+        ['kept.log'],
+      ),
+    ).toEqual(['b/__snapshots__/b.snap', 'run.log']);
+  });
+
+  it('never yields a path that could leave the root', () => {
+    expect(
+      obsoleteReturnFlowFiles(listing(), listing('../x.log', '/etc/x.log', 'a/../b.log', './c.log', 'ok.log')),
+    ).toEqual(['ok.log']);
+  });
+});
+
+describe('parentsDeepestFirst', () => {
+  it('lists each directory above the files once, deepest first, never the root', () => {
+    expect(parentsDeepestFirst(['a/b/__snapshots__/x.snap', 'a/b/__snapshots__/y.snap', 'a/c.log', 'top.log'])).toEqual([
+      'a/b/__snapshots__',
+      'a/b',
+      'a',
+    ]);
+  });
+});
+
+describe('buildRemoteRemovalScript', () => {
+  it('removes the named files and only the directories that left empty, when run by sh', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bica removal 'quoted' "));
+    try {
+      fs.mkdirSync(path.join(dir, 'ui/__snapshots__'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'ui/scripts'), { recursive: true });
+      fs.mkdirSync(path.join(dir, 'ui/empty'), { recursive: true });
+      fs.writeFileSync(path.join(dir, "ui/__snapshots__/it's.snap"), 'x');
+      fs.writeFileSync(path.join(dir, 'ui/scripts/x.js'), 'x');
+      const script = buildRemoteRemovalScript(dir, ["ui/__snapshots__/it's.snap", 'gone/already.log']);
+      expect(spawnSync('sh', ['-s'], { input: script }).status).toBe(0);
+      expect(fs.existsSync(path.join(dir, 'ui/__snapshots__'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'ui/scripts/x.js'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'ui/empty'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stops before removing anything when the root cannot be entered', () => {
+    const script = buildRemoteRemovalScript('/nonexistent/bica/root', ['a.log']);
+    expect(spawnSync('sh', ['-s'], { input: script, stdio: ['pipe', 'ignore', 'ignore'] }).status).toBe(3);
+  });
+});
+
+describe('a return-flow mirror leaves directories alone', () => {
+  // The reported symptom: after a `bica run`, openrsync printed "not empty, cannot delete" for a dozen
+  // tracked source directories in the checkout. The pull's --delete, against a sender list that
+  // --prune-empty-dirs had stripped of every directory without a snapshot or log, was trying to remove
+  // them. Files inside were protected and survived; an empty directory was removed.
+  const rsync = spawnSync('rsync', ['--version']);
+
+  function tree(root: string, files: Record<string, string>, emptyDirs: string[] = []): void {
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      fs.writeFileSync(path.join(root, rel), body);
+    }
+    for (const d of emptyDirs) {
+      fs.mkdirSync(path.join(root, d), { recursive: true });
+    }
+  }
+
+  it.runIf(rsync.status === 0)('pull: removes the obsolete snapshot and nothing else, and rsync says nothing', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica pull dirs '));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const remote = path.join(dir, 'remote');
+      const local = path.join(dir, 'local');
+      const source = {
+        '.husky/_/h': 'h',
+        'ui/scripts/x.js': 's',
+        'ui/__snapshots__/kept.snap': 'k',
+      };
+      tree(remote, source);
+      tree(local, { ...source, 'ui/old/__snapshots__/obsolete.snap': 'o', 'gone/keep.ts': 'g' }, ['ui/empty', 'newwork/nested']);
+      const prep = {
+        repoRoot: local,
+        remoteSyncUrl: remote,
+        returnFlowPaths: ['**/__snapshots__/**'],
+        syncIgnorePaths: [],
+      } as unknown as PrepareResult;
+
+      expect(pullReturnFlow(prep).exitCode).toBe(0);
+
+      expect(fs.existsSync(path.join(local, 'ui/old/__snapshots__/obsolete.snap'))).toBe(false);
+      // Emptied by the removal, so it goes; its parent held only that and goes too.
+      expect(fs.existsSync(path.join(local, 'ui/old'))).toBe(false);
+      for (const kept of ['.husky/_/h', 'ui/scripts/x.js', 'ui/__snapshots__/kept.snap', 'gone/keep.ts', 'ui/empty', 'newwork/nested']) {
+        expect(fs.existsSync(path.join(local, kept)), kept).toBe(true);
+      }
+      const printed = stderr.mock.calls.map((c) => String(c[0])).join('');
+      expect(printed).not.toContain('cannot delete');
+      expect(printed).toContain('return-flow pull (remote → here): removed 1 file here');
+      expect(printed).toContain('ui/old/__snapshots__/obsolete.snap');
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(rsync.status === 0)('pull: removes the last obsolete snapshot when the remote has none at all', () => {
+    // openrsync skips deletion when the sender's list is empty, so --delete never removed this one.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica pull none '));
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const remote = path.join(dir, 'remote');
+      const local = path.join(dir, 'local');
+      tree(remote, { 'src/a.ts': 'a' });
+      tree(local, { 'src/a.ts': 'a', 'src/__snapshots__/a.snap': 'old' });
+      const prep = {
+        repoRoot: local,
+        remoteSyncUrl: remote,
+        returnFlowPaths: ['**/__snapshots__/**'],
+        syncIgnorePaths: [],
+      } as unknown as PrepareResult;
+      expect(pullReturnFlow(prep).exitCode).toBe(0);
+      expect(fs.existsSync(path.join(local, 'src/__snapshots__'))).toBe(false);
+      expect(fs.existsSync(path.join(local, 'src/a.ts'))).toBe(true);
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(rsync.status === 0)('push: resets the remote\'s snapshots and leaves its directories alone', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bica push dirs '));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const remote = path.join(dir, 'remote');
+      const local = path.join(dir, 'local');
+      tree(local, { 'ui/scripts/x.js': 's', 'ui/__snapshots__/new.snap': 'n' }, ['ui/empty']);
+      tree(remote, { 'ui/scripts/x.js': 's', 'other/__snapshots__/stale.snap': 'st' }, ['ui/empty', 'remote-only/empty']);
+      const prep = {
+        repoRoot: local,
+        remoteSyncUrl: remote,
+        returnFlowPaths: ['**/__snapshots__/**'],
+        syncIgnorePaths: [],
+      } as unknown as PrepareResult;
+
+      expect(pushReturnFlowToRemote(prep, snapshotReturnFlowFiles(prep)).exitCode).toBe(0);
+
+      expect(fs.readFileSync(path.join(remote, 'ui/__snapshots__/new.snap'), 'utf8')).toBe('n');
+      expect(fs.existsSync(path.join(remote, 'other'))).toBe(false);
+      for (const kept of ['ui/scripts/x.js', 'ui/empty', 'remote-only/empty']) {
+        expect(fs.existsSync(path.join(remote, kept)), kept).toBe(true);
+      }
+      const printed = stderr.mock.calls.map((c) => String(c[0])).join('');
+      expect(printed).not.toContain('cannot delete');
+      expect(printed).toContain('return-flow refresh (here → remote): removed 1 file on the remote');
+    } finally {
+      vi.restoreAllMocks();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -270,7 +447,7 @@ describe('a log the run is writing is not the remote\'s to replace', () => {
       fs.writeFileSync(path.join(local, 'run.log'), 'everything the run printed\n');
       fs.writeFileSync(path.join(local, 'other.log'), 'everything the run printed\n');
       const pull = (excludes: string[]): void => {
-        const args = buildReturnFlowMirrorArgs(['*.log'], `${remote}/`, `${local}/`, excludes);
+        const args = buildReturnFlowCopyArgs(['*.log'], `${remote}/`, `${local}/`, excludes);
         expect(spawnSync('rsync', args).status).toBe(0);
       };
       pull([]);
